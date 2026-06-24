@@ -53,6 +53,7 @@ This repository is the design and future implementation workspace for **Agent Ru
 
 - TypeScript POC scaffold is present under `src/`.
 - Scenario-based tests are under `tests/`; `pnpm test` compiles them to ignored `dist-tests/` output before running Node's test runner.
+- Web PubSub integration tests read `tests/.env` for `WEBPUBSUB_ENDPOINT` and use `DefaultAzureCredential`; run `az login` before expecting those tests to exercise the real Azure service.
 - Verified bootstrap command: `pnpm install`.
 - Verified build command: `pnpm build`.
 - Verified typecheck command: `pnpm typecheck`.

@@ -1,5 +1,16 @@
 export { SystemClock } from './contracts';
-export type { Clock, Controller, RuntimeStorage, RuntimeTransport } from './contracts';
+export type {
+	Clock,
+	Controller,
+	RuntimeChannel,
+	RuntimeConnectionGrant,
+	RuntimeEventEnvelope,
+	RuntimeEventHandler,
+	RuntimeEventTransport,
+	RuntimeStorage,
+	RuntimeSubscription,
+	TenantConnectionIssuer
+} from './contracts';
 export type {
 	AgentSpec,
 	AgentSpecRef,
@@ -18,4 +29,3 @@ export type {
 	WorkerRecord,
 	WorkspaceSnapshot
 } from './models';
-export { CENTRAL_EVENTS_GROUP, sessionGroup, workerGroup } from './protocol/web-pubsub-events';

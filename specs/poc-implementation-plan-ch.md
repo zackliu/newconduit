@@ -14,12 +14,12 @@
 1. 先做 public contract，再做默认实现。
 2. 先写 central-owned truth，再做 fan-out 或 sidecar command。
 3. Web PubSub 只作为长连接 transport；session truth 不在 Web PubSub。
-3. Tenant 是 high-level runtime boundary。POC 只有一个 `poc` tenant runtime，但 `tenantId` 不由 create session payload 自报。
-4. Principal 来自 Web PubSub negotiate/connection context。Create session payload 不自报 `principal` 或 `owner`。
-5. Docker container 启动只是 hosting 行为；sidecar registration 成功后，central 才能看到 ready Worker。
-6. Copilot session history 由 Copilot 自己的 session files 承载；POC 通过 Docker volume snapshot/restore 保留这些文件。
-7. 每个 slice 的测试都用 scenario 名字描述系统结果。
-8. 不为 POC 添加 crash recovery、Kubernetes、完整 auth matrix、非 Web PubSub transport。
+4. Tenant 是 high-level runtime boundary。POC 只有一个 `poc` tenant runtime，但 `tenantId` 不由 create session payload 自报。
+5. Principal 来自 negotiate/connection 或 runtime message ingress context。Create session payload 不自报 `principal` 或 `owner`。
+6. Docker container 启动只是 hosting 行为；sidecar registration 成功后，central 才能看到 ready Worker。
+7. Copilot session history 由 Copilot 自己的 session files 承载；POC 通过 Docker volume snapshot/restore 保留这些文件。
+8. 每个 slice 的测试都用 scenario 名字描述系统结果。
+9. 不为 POC 添加 crash recovery、Kubernetes、完整 auth matrix、非 Web PubSub transport。
 
 ## 3. Slice 1：Durable Session Truth
 
@@ -38,7 +38,7 @@ Scenario-based test：`scenario: create session request creates durable session 
 Given：
 
 - POC 静态 AgentSpec 已加载。
-- Client publish `session.create.requested` 到 `central:events`。
+- Client publish `session.create.requested` 到 tenant inbox runtime channel。
 - Payload 包含 `agent.agentSpecId`、`input.initialMessage`、`input.clientRequestId`、`workspace.source`。
 - Payload 不包含 `tenantId`、`principal`、`owner`。
 
@@ -60,21 +60,23 @@ Expect：
 
 - `/client/negotiate` 和 `/sidecar/negotiate` 的 central-owned token boundary。
 - Central runtime Web PubSub client connection。
-- `central:events`、`session:{sessionId}`、`worker:{workerId}` group naming。
-- In-memory Web PubSub adapter 用于测试。
+- Runtime channels：`tenant-inbox`、`session-events`、`worker-commands`。
+- Web PubSub adapter 内部把 runtime channels 映射为 tenant-prefixed groups：`tenant:{tenantId}:central:events`、`tenant:{tenantId}:session:{sessionId}`、`tenant:{tenantId}:worker:{workerId}`。
+- In-memory runtime transport adapter 用于测试。
 
-Scenario-based test：`scenario: client event reaches central through central events group`
+Scenario-based test：`scenario: real Web PubSub client event reaches tenant inbox channel`
 
 Given：
 
 - Client 持有 central negotiate 返回的 token。
-- Client 只被授权 publish 到 POC 允许的 groups。
+- Web PubSub adapter 使用 tenant-prefixed group 映射。
+- 本 slice 不展开 token 最小权限矩阵。
 
 Expect：
 
-- Client publish `session.create.requested` 到 `central:events`。
-- Central connection 收到该 event。
-- Central 写入 local truth 后 publish `session.created` 到 `session:{sessionId}`。
+- Client publish `session.create.requested` 到 tenant inbox runtime channel 对应的 Web PubSub group。
+- Central runtime connection 收到该 event，并把 `fromUserId` 还原为 transport envelope 中的 principal context。
+- Tenant runtime 能从 tenant inbox 处理该 event；local truth 写入由 Slice 1 的 durable session scenario 覆盖。
 - Test 不使用 Web PubSub upstream，不暴露 central callback endpoint。
 
 ## 5. Slice 3：Docker Worker Registration
@@ -85,7 +87,7 @@ Expect：
 
 - Docker hosting adapter 启动 sidecar container。
 - Sidecar 使用 `/sidecar/negotiate` 连接 Web PubSub。
-- Sidecar publish `worker.register` 到 `central:events`。
+- Sidecar publish `worker.register` 到 tenant inbox runtime channel。
 - Worker registry controller 写 `workers/<workerId>.json`。
 
 Scenario-based test：`scenario: sidecar container registers ready worker capacity`
@@ -114,7 +116,7 @@ Expect：
 - Worker lease controller。
 - `currentWorkerId`。
 - `workerLeaseGeneration`。
-- `session.assign` command publish 到 `worker:{workerId}`。
+- `session.assign` command publish 到 worker commands runtime channel。
 
 Scenario-based test：`scenario: queued session is assigned to matching ready worker`
 
@@ -130,7 +132,7 @@ Expect：
 - Session status 变为 `starting`。
 - Session record 写入 `currentWorkerId`。
 - `workerLeaseGeneration` 增加。
-- Central publish `session.assign` 到 `worker:{workerId}`。
+- Central publish `session.assign` 到 worker commands runtime channel。
 - 不匹配 labels 的 Worker 不会被选择。
 
 ## 7. Slice 5：Start Copilot On Sidecar
@@ -158,7 +160,7 @@ Expect：
 - Sidecar 挂载 workspace volume。
 - Sidecar 挂载 Copilot session volume。
 - Copilot process adapter 收到两个 volume paths。
-- Sidecar publish `status.changed` 到 `central:events`。
+- Sidecar publish `status.changed` 到 tenant inbox runtime channel。
 
 ## 8. Slice 6：Run Session Event Loop
 
@@ -168,26 +170,26 @@ Expect：
 
 - Client input event handling。
 - Central append input event before routing。
-- Worker group command publish。
+- Worker commands runtime channel publish。
 - Sidecar forwards input to Copilot process adapter。
 - Sidecar output event publish。
-- Central append output event and fan-out to session group。
+- Central append output event and fan-out to session events runtime channel。
 
 Scenario-based test：`scenario: input is persisted before routing to sidecar`
 
 Given：
 
 - Session 已 assigned 给 ready Worker。
-- Client publish input event 到 `central:events`。
+- Client publish input event 到 tenant inbox runtime channel。
 
 Expect：
 
 - Central 先 append input event 到 `events.jsonl`。
-- Central publish input command 到 `worker:{workerId}`。
+- Central publish input command 到 worker commands runtime channel。
 - Sidecar forwards input to Copilot adapter。
-- Sidecar publish output to `central:events`。
+- Sidecar publish output to tenant inbox runtime channel。
 - Central append output event。
-- Central publish output to `session:{sessionId}`。
+- Central publish output to session events runtime channel。
 - Client 不知道 Worker endpoint。
 
 ## 9. Slice 7：Pause Session With Volume Snapshot
@@ -198,7 +200,7 @@ Expect：
 
 - `session.pause.requested` handling。
 - Session status `running -> pausing -> paused`。
-- Pause command to worker group。
+- Pause command to worker commands runtime channel。
 - Sidecar reaches turn-boundary pause。
 - Copilot session files flushed to Copilot session volume。
 - Snapshot controller。
@@ -213,7 +215,7 @@ Given：
 - Session status 是 `running`。
 - Workspace volume contains a test workspace file。
 - Copilot session volume contains a test session file。
-- Client publish `session.pause.requested` 到 `central:events`。
+- Client publish `session.pause.requested` 到 tenant inbox runtime channel。
 
 Expect：
 
@@ -248,7 +250,7 @@ Given：
 
 - Session status 是 `paused`。
 - Latest snapshot contains workspace and Copilot session volume copies。
-- Client publish `session.resume.requested` 到 `central:events`。
+- Client publish `session.resume.requested` 到 tenant inbox runtime channel。
 
 Expect：
 
@@ -270,7 +272,7 @@ Expect：
 
 - Event replay API/function。
 - Client reconnect with cursor。
-- Session group resubscribe。
+- Session events runtime channel resubscribe。
 
 Scenario-based test：`scenario: reconnect replays events after client cursor`
 
@@ -294,10 +296,10 @@ Expect：
 
 - `/client/negotiate`。
 - `/sidecar/negotiate`。
-- Demo principal from central local config。
+- Demo principal from POC HTTP route request context。
 - Audit append for create、register、pause、resume。
 
-Scenario-based test：`scenario: negotiate is central-owned and scopes group access`
+Scenario-based test：`scenario: negotiate is central-owned`
 
 Given：
 
@@ -306,8 +308,8 @@ Given：
 
 Expect：
 
-- Client token includes only allowed session group and `central:events` send ability。
-- Sidecar token includes only allowed worker group and `central:events` send ability。
+- Client token is issued by central for the runtime channels allowed in the POC path。
+- Sidecar token is issued by central for the runtime channels allowed in the POC path。
 - Browser and sidecar do not choose their own `userId`。
 - Audit log records token issuance as record-only。
 

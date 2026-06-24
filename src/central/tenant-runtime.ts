@@ -1,12 +1,12 @@
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
-import type { Clock, CreateSessionRequest, RequestContext, RuntimeStorage, RuntimeTransport, TenantContext } from '../shared';
-import { CENTRAL_EVENTS_GROUP, sessionGroup } from '../shared/protocol/web-pubsub-events';
+import type { Clock, CreateSessionRequest, RequestContext, RuntimeConnectionGrant, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext } from '../shared';
 import { AgentSpecAdmissionController, EventLogController, SessionLifecycleController } from './controllers';
 
 export interface TenantRuntimeOptions {
   tenant: TenantContext;
   storage: RuntimeStorage;
-  transport: RuntimeTransport;
+  eventTransport: RuntimeEventTransport;
+  connectionIssuer: TenantConnectionIssuer;
   clock: Clock;
   agentSpecRegistry: AgentSpecRegistry;
 }
@@ -14,7 +14,8 @@ export interface TenantRuntimeOptions {
 export class TenantRuntime {
   private readonly tenant: TenantContext;
   private readonly storage: RuntimeStorage;
-  private readonly transport: RuntimeTransport;
+  private readonly eventTransport: RuntimeEventTransport;
+  private readonly connectionIssuer: TenantConnectionIssuer;
   private readonly agentSpecRegistry: AgentSpecRegistry;
   private readonly agentSpecAdmissionController: AgentSpecAdmissionController;
   private readonly sessionLifecycleController: SessionLifecycleController;
@@ -23,7 +24,8 @@ export class TenantRuntime {
   constructor(options: TenantRuntimeOptions) {
     this.tenant = options.tenant;
     this.storage = options.storage;
-    this.transport = options.transport;
+    this.eventTransport = options.eventTransport;
+    this.connectionIssuer = options.connectionIssuer;
     this.agentSpecRegistry = options.agentSpecRegistry;
     this.agentSpecAdmissionController = new AgentSpecAdmissionController(options.clock);
     this.sessionLifecycleController = new SessionLifecycleController(options.storage, options.clock);
@@ -52,19 +54,56 @@ export class TenantRuntime {
       sessionId: session.sessionId
     });
     const queuedSession = await this.sessionLifecycleController.transition({ ...session, eventCursor: event.sequence }, 'queued', 'waiting-for-worker');
-    await this.transport.publish(sessionGroup(queuedSession.sessionId), event);
+    await this.eventTransport.publish({ kind: 'session-events', sessionId: queuedSession.sessionId }, event);
     return queuedSession.sessionId;
   }
 
-  async negotiateClientConnection(context: RequestContext): Promise<{ url: string }> {
-    return this.transport.negotiate(context.principal.principalId, [CENTRAL_EVENTS_GROUP]);
+  async start(): Promise<void> {
+    await this.eventTransport.subscribe({ kind: 'tenant-inbox' }, (envelope) => this.handleRuntimeEvent(envelope.context, envelope.event));
   }
 
-  async negotiateSidecarConnection(context: RequestContext): Promise<{ url: string }> {
-    return this.transport.negotiate(context.principal.principalId, [CENTRAL_EVENTS_GROUP]);
+  async negotiateClientConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
+    return this.connectionIssuer.issueClientConnection({
+      principal: context.principal,
+      channels: [{ kind: 'tenant-inbox' }]
+    });
+  }
+
+  async negotiateSidecarConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
+    return this.connectionIssuer.issueSidecarConnection({
+      principal: context.principal,
+      channels: [{ kind: 'tenant-inbox' }]
+    });
   }
 
   get tenantId(): string {
     return this.tenant.tenantId;
+  }
+
+  private async handleRuntimeEvent(context: RequestContext, event: RuntimeEvent): Promise<void> {
+    if (event.type !== 'session.create.requested') {
+      return;
+    }
+
+    const payload = this.parseCreateSessionRequestedPayload(event.payload);
+    await this.createSession(context, payload);
+  }
+
+  private parseCreateSessionRequestedPayload(payload: unknown): CreateSessionRequest {
+    if (!this.isCreateSessionRequestedPayload(payload)) {
+      throw new Error('invalid session.create.requested payload');
+    }
+    return payload;
+  }
+
+  private isCreateSessionRequestedPayload(payload: unknown): payload is CreateSessionRequest {
+    if (typeof payload !== 'object' || payload === null) {
+      return false;
+    }
+    const candidate = payload as Partial<CreateSessionRequest>;
+    return typeof candidate.agent?.agentSpecId === 'string'
+      && typeof candidate.input?.initialMessage === 'string'
+      && typeof candidate.input?.clientRequestId === 'string'
+      && candidate.workspace?.source === 'empty';
   }
 }

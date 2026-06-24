@@ -3,17 +3,17 @@ import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { WebPubSubTransportAdapter } from '../../src/central/adapters';
+import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import { CENTRAL_EVENTS_GROUP, type RuntimeEvent } from '../../src/shared';
+import type { RuntimeEvent } from '../../src/shared';
 
 test('scenario: create session request creates durable session truth', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-slice1-'));
   try {
-    const transport = new WebPubSubTransportAdapter();
+    const transport = new InMemoryRuntimeTransportAdapter();
     const storage = new LocalFileStorage(root);
-    const central = new CentralService({ storage, transport });
+    const central = new CentralService({ storage, eventTransport: transport, connectionIssuer: transport });
     await central.start();
 
     const request: RuntimeEvent = {
@@ -36,7 +36,13 @@ test('scenario: create session request creates durable session truth', async () 
       }
     };
 
-    await transport.publish(CENTRAL_EVENTS_GROUP, request);
+    await transport.publish({ kind: 'tenant-inbox' }, request, {
+      principal: {
+        principalId: 'demo-user',
+        type: 'user'
+      },
+      connectionId: 'demo-connection'
+    });
 
     const sessionIds = await readdir(join(root, 'sessions'));
     assert.equal(sessionIds.length, 1);

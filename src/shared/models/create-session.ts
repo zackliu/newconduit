@@ -24,7 +24,7 @@ export interface PrincipalContext {
 
 export interface RequestContext {
   principal: PrincipalContext;
-  connectionId: string;
+  connectionId?: string;
 }
 
 export interface TenantContext {

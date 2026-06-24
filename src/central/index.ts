@@ -1,4 +1,5 @@
-export { DockerHostingAdapter, DockerVolumeAdapter, WebPubSubTransportAdapter } from './adapters';
+export { DockerHostingAdapter, DockerVolumeAdapter, InMemoryRuntimeTransportAdapter, WebPubSubTransportAdapter } from './adapters';
+export type { WebPubSubTransportAdapterOptions } from './adapters';
 export { CentralService } from './central-service';
 export { CentralHttpServer } from './http/central-http-server';
 export { registerPocCentralRoutes } from './http/poc-routes';

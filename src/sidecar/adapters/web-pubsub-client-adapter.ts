@@ -1,4 +1,4 @@
-import type { RuntimeEvent } from '../../shared';
+import type { RuntimeChannel, RuntimeEvent } from '../../shared';
 
 export class WebPubSubClientAdapter {
   async connect(accessUrl: string): Promise<void> {
@@ -7,7 +7,7 @@ export class WebPubSubClientAdapter {
     }
   }
 
-  async publish(_group: string, _event: RuntimeEvent): Promise<void> {
+  async publish(_channel: RuntimeChannel, _event: RuntimeEvent): Promise<void> {
     return;
   }
 }

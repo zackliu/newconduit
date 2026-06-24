@@ -7,6 +7,7 @@ export {
 	DockerHostingAdapter,
 	DockerVolumeAdapter,
 	EventLogController,
+	InMemoryRuntimeTransportAdapter,
 	LocalFileStorage,
 	POC_AGENT_SPEC,
 	RecoveryController,
@@ -22,7 +23,7 @@ export {
 } from './central';
 export type { CentralHttpRouteHandler, CentralHttpServerOptions, JsonResponse } from './central';
 export type { TenantRuntimeOptions } from './central';
-export { CENTRAL_EVENTS_GROUP, sessionGroup, SystemClock, workerGroup } from './shared';
+export { SystemClock } from './shared';
 export type {
 	AgentSpec,
 	AgentSpecRef,
@@ -35,11 +36,17 @@ export type {
 	RequestContext,
 	ResolvedAgentSpec,
 	RuntimeEvent,
+	RuntimeChannel,
+	RuntimeConnectionGrant,
+	RuntimeEventEnvelope,
+	RuntimeEventHandler,
+	RuntimeEventTransport,
 	RuntimeEventType,
 	RuntimeStorage,
-	RuntimeTransport,
+	RuntimeSubscription,
 	SessionRecord,
 	SessionStatus,
+	TenantConnectionIssuer,
 	TenantContext,
 	WorkerCondition,
 	WorkerRecord,

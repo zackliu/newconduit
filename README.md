@@ -22,7 +22,6 @@ src/
   shared/
     models/       # AgentSpec, Session, Worker, Event, Snapshot, Audit
     contracts/    # Generic controller/storage/transport contracts
-    protocol/     # Web PubSub group/event naming
   central/
     registries/   # POC predefined class/profile registry
     storage/      # Central local file storage
@@ -56,6 +55,15 @@ pnpm test
 ```
 
 The test command compiles `tests/` into `dist-tests/` and runs Node's built-in test runner. Implementation code remains under `src/`.
+
+The Web PubSub integration test reads `tests/.env`:
+
+```text
+WEBPUBSUB_ENDPOINT=https://chenylremoteagent.webpubsub.azure.com
+WEBPUBSUB_HUB=agentruntimepoc
+```
+
+It uses `DefaultAzureCredential`, so run `az login` before enabling that test locally. The code does not use Web PubSub connection strings.
 
 Start the central framework entrypoint:
 
@@ -105,9 +113,11 @@ All barrel files must use explicit named exports. Do not use `export * from ...`
 POC Web PubSub usage is a simple client-connection pattern:
 
 1. central, client, and sidecar connect as Web PubSub clients.
-2. client and sidecar publish runtime events to `central:events`.
+2. client and sidecar publish runtime events to the tenant inbox runtime channel.
 3. central handles the event and writes local file storage first.
-4. central publishes results to `session:{sessionId}` and `worker:{workerId}` groups.
+4. central publishes results to session-events and worker-commands runtime channels.
+
+The shared transport contract uses runtime channels such as `tenant-inbox`, `session-events`, and `worker-commands`. Web PubSub group names such as `tenant:{tenantId}:central:events`, `tenant:{tenantId}:session:{sessionId}`, and `tenant:{tenantId}:worker:{workerId}` are adapter-internal mappings, not shared runtime contract fields.
 
 Web PubSub upstream is not used.
 
