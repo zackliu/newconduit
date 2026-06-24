@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import type { RuntimeEvent } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type RuntimeEvent } from '../../src/shared';
 
 test('scenario: create session request creates durable session truth', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-slice1-'));
@@ -77,6 +77,65 @@ test('scenario: create session request creates durable session truth', async () 
       workspace: { source: 'empty' },
       requestedBy: 'demo-user'
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scenario: sidecar worker register event creates active worker truth', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-slice3-'));
+  try {
+    const transport = new InMemoryRuntimeTransportAdapter();
+    const storage = new LocalFileStorage(root);
+    const central = new CentralService({ storage, eventTransport: transport, connectionIssuer: transport });
+    await central.start();
+
+    const request: RuntimeEvent = {
+      eventId: 'evt-worker-register',
+      sequence: 0,
+      type: 'worker.register',
+      timestamp: new Date().toISOString(),
+      actor: 'sidecar',
+      payload: {
+        sidecarId: 'sidecar-1',
+        sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
+        labels: { agent: 'copilot' },
+        capacity: 1,
+        allocatable: 1
+      }
+    };
+
+    await transport.publish({ kind: 'tenant-inbox' }, request, {
+      principal: {
+        principalId: 'demo-sidecar',
+        type: 'service'
+      },
+      connectionId: 'sidecar-connection'
+    });
+
+    const workerIds = (await readdir(join(root, 'workers'))).filter((file) => file.endsWith('.json')).map((file) => file.replace(/\.json$/, ''));
+    assert.equal(workerIds.length, 1);
+
+    const workerFile = await readFile(join(root, 'workers', `${workerIds[0]}.json`), 'utf8');
+    const worker = JSON.parse(workerFile) as {
+      tenantId: string;
+      sidecarId: string;
+      sidecarClass: string;
+      labels: Record<string, string>;
+      capacity: number;
+      allocatable: number;
+      lifecycleState: string;
+      conditions: string[];
+    };
+
+    assert.equal(worker.tenantId, 'poc');
+    assert.equal(worker.sidecarId, 'sidecar-1');
+    assert.equal(worker.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
+    assert.deepEqual(worker.labels, { agent: 'copilot' });
+    assert.equal(worker.capacity, 1);
+    assert.equal(worker.allocatable, 1);
+    assert.equal(worker.lifecycleState, 'active');
+    assert.deepEqual(worker.conditions, ['ready']);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

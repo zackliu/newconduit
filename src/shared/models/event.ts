@@ -11,7 +11,14 @@ export type RuntimeEventType =
   | 'session.resumed'
   | 'worker.register'
   | 'worker.registered'
-  | 'worker.heartbeat';
+  | 'worker.heartbeat'
+  | 'worker.drain.requested'
+  | 'worker.draining'
+  | 'worker.close.requested'
+  | 'worker.closed'
+  | 'worker.expired'
+  | 'worker.heartbeat.rejected'
+  | 'worker.lease.lost';
 
 export interface RuntimeEvent<TPayload = unknown> {
   eventId: string;

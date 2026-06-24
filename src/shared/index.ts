@@ -1,4 +1,6 @@
 export { SystemClock } from './contracts';
+export { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, WebPubSubRuntimeChannelMapper } from './protocol';
+export { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from './models';
 export type {
 	Clock,
 	Controller,
@@ -24,8 +26,13 @@ export type {
 	RuntimeEventType,
 	SessionRecord,
 	SessionStatus,
+	SidecarClass,
 	TenantContext,
 	WorkerCondition,
+	WorkerHeartbeatPayload,
+	WorkerIdentityPayload,
+	WorkerLifecycleState,
 	WorkerRecord,
+	WorkerRegisterPayload,
 	WorkspaceSnapshot
 } from './models';

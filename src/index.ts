@@ -22,7 +22,7 @@ export {
 	WorkerSelectionController
 } from './central';
 export type { CentralHttpRouteHandler, CentralHttpServerOptions, JsonResponse } from './central';
-export type { TenantRuntimeOptions } from './central';
+export type { TenantRuntimeOptions, VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerHostingAdapter } from './central';
 export { SystemClock } from './shared';
 export type {
 	AgentSpec,
@@ -61,3 +61,4 @@ export {
 	WebPubSubClientAdapter,
 	WorkerRegistrationController
 } from './sidecar';
+export type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount, WorkerRegistrationEventFactory } from './sidecar';

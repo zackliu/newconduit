@@ -58,4 +58,4 @@ This repository is the design and future implementation workspace for **Agent Ru
 - Verified build command: `pnpm build`.
 - Verified typecheck command: `pnpm typecheck`.
 - Verified test command: `pnpm test`.
-- Entrypoint commands are available: `pnpm start:central` starts the central HTTP server framework, and `pnpm start:sidecar` starts the sidecar framework stub.
+- Entrypoint commands are available: `pnpm start:central` starts the central HTTP server, and `pnpm start:sidecar` starts a standalone sidecar worker when `CENTRAL_URL` and `TENANT_ID` are set.

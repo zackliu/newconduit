@@ -1,6 +1,8 @@
 import type { LocalFileStorage } from '../storage/local-file-storage';
+import type { VolumeRestoreAdapter } from '../controllers/recovery-controller';
+import type { VolumeSnapshotAdapter } from '../controllers/snapshot-controller';
 
-export class DockerVolumeAdapter {
+export class DockerVolumeAdapter implements VolumeSnapshotAdapter, VolumeRestoreAdapter {
   constructor(private readonly storage: LocalFileStorage) {}
 
   async copyVolumeToDirectory(volumePath: string, targetDirectory: string): Promise<void> {

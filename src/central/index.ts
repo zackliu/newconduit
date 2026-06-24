@@ -19,6 +19,7 @@ export {
 	WorkerRegistryController,
 	WorkerSelectionController
 } from './controllers';
+export type { VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerHostingAdapter } from './controllers';
 export { POC_AGENT_SPEC } from './registries/poc-class-registry';
 export { StaticAgentSpecRegistry } from './registries/agent-spec-registry';
 export type { AgentSpecRegistry } from './registries/agent-spec-registry';

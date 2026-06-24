@@ -57,7 +57,8 @@ export class CentralHttpServer {
   }
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const route = this.routes.find((candidate) => candidate.method === request.method && candidate.path === request.url);
+    const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    const route = this.routes.find((candidate) => candidate.method === request.method && candidate.path === path);
     if (route) {
       const result = await route.handler(request);
       this.writeJson(response, result.statusCode, result.body);

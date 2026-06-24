@@ -4,4 +4,6 @@ export type { AgentSpecRef, CreateSessionRequest, PrincipalContext, RequestConte
 export type { RuntimeEvent, RuntimeEventType } from './event';
 export type { SessionRecord, SessionStatus } from './session';
 export type { WorkspaceSnapshot } from './snapshot';
-export type { WorkerCondition, WorkerRecord } from './worker';
+export { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from './worker';
+export type { WorkerCondition, WorkerHeartbeatPayload, WorkerIdentityPayload, WorkerLifecycleState, WorkerRecord, WorkerRegisterPayload } from './worker';
+export type { SidecarClass } from './worker';

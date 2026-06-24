@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const server = new CentralHttpServer({ port });
   registerPocCentralRoutes(server, service);
   const actualPort = await server.listen();
-  console.log(`central service framework listening on http://localhost:${actualPort}`);
+  console.log(`central service listening on http://localhost:${actualPort}`);
 }
 
 void main().catch((error) => {

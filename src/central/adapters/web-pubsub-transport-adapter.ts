@@ -2,7 +2,7 @@ import { DefaultAzureCredential } from '@azure/identity';
 import { WebPubSubServiceClient } from '@azure/web-pubsub';
 import { WebPubSubClient } from '@azure/web-pubsub-client';
 import type { OnGroupDataMessageArgs } from '@azure/web-pubsub-client';
-import type { PrincipalContext, RequestContext, RuntimeChannel, RuntimeConnectionGrant, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, TenantConnectionIssuer } from '../../shared';
+import { WebPubSubRuntimeChannelMapper, type PrincipalContext, type RequestContext, type RuntimeChannel, type RuntimeConnectionGrant, type RuntimeEvent, type RuntimeEventHandler, type RuntimeEventTransport, type RuntimeSubscription, type TenantConnectionIssuer } from '../../shared';
 
 export interface WebPubSubTransportAdapterOptions {
   tenantId: string;
@@ -12,25 +12,24 @@ export interface WebPubSubTransportAdapterOptions {
 
 export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantConnectionIssuer {
   private readonly serviceClient: WebPubSubServiceClient;
+  private readonly channelMapper: WebPubSubRuntimeChannelMapper;
   private readonly handlers = new Map<string, RuntimeEventHandler[]>();
 
   private client: WebPubSubClient | undefined;
 
   constructor(private readonly options: WebPubSubTransportAdapterOptions) {
-    if (!options.tenantId) {
-      throw new Error('tenantId is required for Web PubSub transport group mapping');
-    }
+    this.channelMapper = new WebPubSubRuntimeChannelMapper(options.tenantId);
     this.serviceClient = new WebPubSubServiceClient(options.endpoint, new DefaultAzureCredential(), options.hubName);
   }
 
   async publish(channel: RuntimeChannel, event: RuntimeEvent): Promise<void> {
     const client = await this.ensureClient();
-    const group = this.toGroup(channel);
+    const group = this.channelMapper.toGroup(channel);
     await client.sendToGroup(group, event, 'json');
   }
 
   async subscribe(channel: RuntimeChannel, handler: RuntimeEventHandler): Promise<RuntimeSubscription> {
-    const group = this.toGroup(channel);
+    const group = this.channelMapper.toGroup(channel);
     this.handlers.set(group, [...(this.handlers.get(group) ?? []), handler]);
     const client = await this.ensureClient();
     await client.joinGroup(group);
@@ -50,7 +49,7 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
   }
 
   private async issueConnection(principal: PrincipalContext, channels: RuntimeChannel[]): Promise<RuntimeConnectionGrant> {
-    const groups = channels.map((channel) => this.toGroup(channel));
+    const groups = channels.map((channel) => this.channelMapper.toGroup(channel));
     const roles = groups.flatMap((group) => [`webpubsub.joinLeaveGroup.${group}`, `webpubsub.sendToGroup.${group}`]);
     const token = await this.serviceClient.getClientAccessToken({
       userId: this.toUserId(principal),
@@ -116,25 +115,6 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
       && typeof candidate.timestamp === 'string'
       && typeof candidate.actor === 'string'
       && 'payload' in candidate;
-  }
-
-  private toGroup(channel: RuntimeChannel): string {
-    const tenantPrefix = `tenant:${this.toGroupSegment(this.options.tenantId)}`;
-    switch (channel.kind) {
-      case 'tenant-inbox':
-        return `${tenantPrefix}:central:events`;
-      case 'session-events':
-        return `${tenantPrefix}:session:${this.toGroupSegment(channel.sessionId)}`;
-      case 'worker-commands':
-        return `${tenantPrefix}:worker:${this.toGroupSegment(channel.workerId)}`;
-    }
-  }
-
-  private toGroupSegment(value: string): string {
-    if (!value) {
-      throw new Error('Web PubSub group segment cannot be empty');
-    }
-    return encodeURIComponent(value);
   }
 
   private toUserId(principal: PrincipalContext): string {

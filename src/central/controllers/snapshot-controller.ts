@@ -1,10 +1,13 @@
 import type { Clock, RuntimeStorage, SessionRecord, WorkspaceSnapshot } from '../../shared';
-import type { DockerVolumeAdapter } from '../adapters';
+
+export interface VolumeSnapshotAdapter {
+  copyVolumeToDirectory(volumePath: string, targetDirectory: string): Promise<void>;
+}
 
 export class SnapshotController {
   constructor(
     private readonly storage: RuntimeStorage,
-    private readonly volumeAdapter: DockerVolumeAdapter,
+    private readonly volumeAdapter: VolumeSnapshotAdapter,
     private readonly clock: Clock,
     private readonly dataRoot: string
   ) {}

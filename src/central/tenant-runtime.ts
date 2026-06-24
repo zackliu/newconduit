@@ -1,6 +1,6 @@
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
 import type { Clock, CreateSessionRequest, RequestContext, RuntimeConnectionGrant, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext } from '../shared';
-import { AgentSpecAdmissionController, EventLogController, SessionLifecycleController } from './controllers';
+import { AgentSpecAdmissionController, EventLogController, SessionLifecycleController, WorkerRegistryController } from './controllers';
 
 export interface TenantRuntimeOptions {
   tenant: TenantContext;
@@ -20,6 +20,7 @@ export class TenantRuntime {
   private readonly agentSpecAdmissionController: AgentSpecAdmissionController;
   private readonly sessionLifecycleController: SessionLifecycleController;
   private readonly eventLogController: EventLogController;
+  private readonly workerRegistryController: WorkerRegistryController;
 
   constructor(options: TenantRuntimeOptions) {
     this.tenant = options.tenant;
@@ -30,6 +31,7 @@ export class TenantRuntime {
     this.agentSpecAdmissionController = new AgentSpecAdmissionController(options.clock);
     this.sessionLifecycleController = new SessionLifecycleController(options.storage, options.clock);
     this.eventLogController = new EventLogController(options.storage, options.clock);
+    this.workerRegistryController = new WorkerRegistryController(options.storage, options.clock);
   }
 
   async createSession(context: RequestContext, request: CreateSessionRequest): Promise<string> {
@@ -76,17 +78,24 @@ export class TenantRuntime {
     });
   }
 
-  get tenantId(): string {
-    return this.tenant.tenantId;
+  async expireWorkers(): Promise<void> {
+    await this.workerRegistryController.expireWorkers();
   }
 
   private async handleRuntimeEvent(context: RequestContext, event: RuntimeEvent): Promise<void> {
-    if (event.type !== 'session.create.requested') {
+    if (await this.workerRegistryController.handleRuntimeEvent(this.tenant.tenantId, event)) {
       return;
     }
 
-    const payload = this.parseCreateSessionRequestedPayload(event.payload);
-    await this.createSession(context, payload);
+    switch (event.type) {
+      case 'session.create.requested': {
+        const payload = this.parseCreateSessionRequestedPayload(event.payload);
+        await this.createSession(context, payload);
+        return;
+      }
+      default:
+        return;
+    }
   }
 
   private parseCreateSessionRequestedPayload(payload: unknown): CreateSessionRequest {
@@ -106,4 +115,5 @@ export class TenantRuntime {
       && typeof candidate.input?.clientRequestId === 'string'
       && candidate.workspace?.source === 'empty';
   }
+
 }

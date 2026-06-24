@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { AgentSpecAdmissionController } from '../../src/central/controllers/agent-spec-admission-controller';
 import { WorkerSelectionController } from '../../src/central/controllers/worker-selection-controller';
 import { POC_AGENT_SPEC } from '../../src/central/registries/poc-class-registry';
-import { SystemClock, type SessionRecord, type WorkerRecord } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, SystemClock, type SessionRecord, type WorkerRecord } from '../../src/shared';
 
 test('scenario: queued session is assigned to matching ready worker', () => {
   const now = new Date().toISOString();
@@ -25,14 +25,17 @@ test('scenario: queued session is assigned to matching ready worker', () => {
     tenantId: 'tenant-1',
     capacityScope: 'tenant-1',
     sidecarId: 'sidecar-1',
-    sidecarClass: 'copilot-process-wrapper',
+    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
     labels: { agent: 'copilot' },
     capacity: 1,
     allocatable: 1,
     conditions: ['ready'],
+    lifecycleState: 'active',
     heartbeatAt: now,
+    expiresAt: new Date(Date.parse(now) + 30_000).toISOString(),
+    generation: 1,
     currentSessionCount: 0,
-    hostingRef: 'docker-container-1'
+    updatedAt: now
   };
 
   const selected = new WorkerSelectionController().select(session, [worker]);

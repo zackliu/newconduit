@@ -1,15 +1,39 @@
-import type { RuntimeEvent } from '../../shared';
+import type { RuntimeEvent, WorkerHeartbeatPayload, WorkerIdentityPayload } from '../../shared';
 
 export class HeartbeatController {
-  createHeartbeat(workerId: string): RuntimeEvent<{ workerId: string }> {
+  createHeartbeat(payload: WorkerHeartbeatPayload): RuntimeEvent<WorkerHeartbeatPayload> {
     return {
       eventId: crypto.randomUUID(),
-      workerId,
+      workerId: payload.workerId,
       sequence: 0,
       type: 'worker.heartbeat',
       timestamp: new Date().toISOString(),
       actor: 'sidecar',
-      payload: { workerId }
+      payload
+    };
+  }
+
+  createDrainRequested(payload: WorkerIdentityPayload): RuntimeEvent<WorkerIdentityPayload> {
+    return {
+      eventId: crypto.randomUUID(),
+      workerId: payload.workerId,
+      sequence: 0,
+      type: 'worker.drain.requested',
+      timestamp: new Date().toISOString(),
+      actor: 'sidecar',
+      payload
+    };
+  }
+
+  createCloseRequested(payload: WorkerIdentityPayload): RuntimeEvent<WorkerIdentityPayload> {
+    return {
+      eventId: crypto.randomUUID(),
+      workerId: payload.workerId,
+      sequence: 0,
+      type: 'worker.close.requested',
+      timestamp: new Date().toISOString(),
+      actor: 'sidecar',
+      payload
     };
   }
 }

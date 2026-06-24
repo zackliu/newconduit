@@ -1,4 +1,4 @@
-import type { AgentSpec } from '../../shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type AgentSpec } from '../../shared';
 
 export const POC_AGENT_SPEC: AgentSpec = {
   agentSpecId: 'copilot-poc',
@@ -10,7 +10,7 @@ export const POC_AGENT_SPEC: AgentSpec = {
     command: 'copilot',
     args: []
   },
-  sidecarClass: 'copilot-process-wrapper',
+  sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
   workspaceClass: 'docker-workspace-volume-snapshot',
   toolProfile: 'copilot-poc-tools',
   workerSelector: {

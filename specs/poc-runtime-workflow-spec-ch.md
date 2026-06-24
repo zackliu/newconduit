@@ -103,9 +103,9 @@ POC 不引入数据库，但文件写入要保留清晰 ownership：
 
 POC 使用单 central 进程串行写，暂不处理多 central 并发。
 
-## 6. Docker Worker 和 Sidecar
+## 6. Worker 和 Sidecar
 
-POC 的 Worker 来自 Docker container，但 Docker container 本身不是 Worker resource。Docker adapter 负责启动/停止 container，并为每个 session 准备两个 Docker volumes：workspace volume 和 Copilot session volume。Container 内的 sidecar 启动后，通过 Web PubSub 连接 central，并发送 `worker.register` custom event。
+POC 的 Worker 来自 sidecar registration。Standalone sidecar 可以直接注册，Docker WorkerPool provision 出的 sidecar 也必须通过同一个 `worker.register` contract 注册。注册成功后，Worker selection 只读取 Worker record 上的 `sidecarClass`、labels、capacity、allocatable、conditions 和 lifecycle state。
 
 Worker 最小 registration payload：
 
@@ -118,9 +118,10 @@ Worker 最小 registration payload：
 | `capacity` / `allocatable` | 固定为 1。 |
 | `conditions` | ready、busy、draining、disconnected。 |
 | `heartbeatAt` | sidecar 定期上报。 |
-| `hostingRef` | Docker container id/name，仅用于诊断。 |
+| `expiresAt` | central 根据 keepalive TTL 计算。 |
+| `generation` | Worker lifecycle generation。 |
 
-Worker selection 只使用 `sidecarClass`、`workerSelector` 对 Worker labels 的匹配结果、capacity、conditions。不要在 POC 里增加新的 selector 字段或复杂匹配模型。
+Worker selection 只使用 `sidecarClass`、`workerSelector` 对 Worker labels 的匹配结果、capacity、conditions。POC 不增加新的 selector 字段，不增加复杂匹配模型。
 
 ## 7. POC Workflow
 
@@ -208,7 +209,7 @@ Resume 成功后，central append `session.resumed`，并把 session 改回 `run
 | Recovery controller | 只处理 planned resume，不处理 crash restore。 |
 | Worker capacity scaler | POC 中直接调用 Docker adapter 启动一个 container。 |
 | Web PubSub transport adapter | 统一处理 central/client/sidecar client connection、negotiate、runtime channel 到 tenant-prefixed Web PubSub group 的映射，以及 group publish。 |
-| Docker hosting adapter | 启动/停止 sidecar container，记录 Docker hostingRef。 |
+| Docker WorkerPool controller/adaptor | provision sidecar container；container 内 sidecar 仍走同一个 Worker registration contract。 |
 | Docker volume adapter | 在 Snapshot controller 调用下复制和恢复 workspace volume、Copilot session volume。 |
 | Sidecar agent adapter | Copilot process-wrapper 实现。 |
 | Sidecar workspace adapter | 挂载 Docker workspace volume 和 Copilot session volume。 |

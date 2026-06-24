@@ -4,6 +4,7 @@ export class WorkerSelectionController {
   select(session: SessionRecord, workers: WorkerRecord[]): WorkerRecord | undefined {
     return workers.find((worker) =>
       worker.sidecarClass === session.resolvedAgentSpec.sidecarClass
+      && worker.lifecycleState === 'active'
       && worker.allocatable > 0
       && worker.conditions.includes('ready')
       && this.matchesSelector(worker.labels, session.resolvedAgentSpec.workerSelector)

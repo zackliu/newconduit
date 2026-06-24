@@ -14,37 +14,48 @@ export interface CentralServiceOptions {
 }
 
 export class CentralService {
-  private readonly clock: Clock;
-  private readonly defaultTenantRuntime: TenantRuntime;
+  private readonly tenantRuntimes = new Map<string, TenantRuntime>();
 
   constructor(options: CentralServiceOptions) {
-    this.clock = options.clock ?? new SystemClock();
+    const clock = options.clock ?? new SystemClock();
     const tenant = options.tenant ?? {
       tenantId: 'poc',
       storageRoot: '.runtime-poc/tenants/poc',
       webPubSubHub: 'agent-runtime-poc'
     };
     const storage = options.storage ?? new LocalFileStorage(tenant.storageRoot);
-    this.defaultTenantRuntime = new TenantRuntime({
+    const tenantRuntime = new TenantRuntime({
       tenant,
       storage,
       eventTransport: options.eventTransport,
       connectionIssuer: options.connectionIssuer,
-      clock: this.clock,
+      clock,
       agentSpecRegistry: options.agentSpecRegistry ?? new StaticAgentSpecRegistry([POC_AGENT_SPEC])
     });
+    this.tenantRuntimes.set(tenant.tenantId, tenantRuntime);
   }
 
   async start(): Promise<void> {
-    await this.defaultTenantRuntime.start();
+    await Promise.all([...this.tenantRuntimes.values()].map((tenantRuntime) => tenantRuntime.start()));
   }
 
-  async negotiateClientConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
-    return this.defaultTenantRuntime.negotiateClientConnection(context);
+  async negotiateClientConnectionForTenant(tenantId: string | null, context: RequestContext): Promise<RuntimeConnectionGrant> {
+    return this.resolveTenantRuntime(tenantId, 'client negotiate').negotiateClientConnection(context);
   }
 
-  async negotiateSidecarConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
-    return this.defaultTenantRuntime.negotiateSidecarConnection(context);
+  async negotiateSidecarConnectionForTenant(tenantId: string | null, context: RequestContext): Promise<RuntimeConnectionGrant> {
+    return this.resolveTenantRuntime(tenantId, 'sidecar negotiate').negotiateSidecarConnection(context);
+  }
+
+  private resolveTenantRuntime(tenantId: string | null, operation: string): TenantRuntime {
+    if (!tenantId) {
+      throw new Error(`tenantId is required for ${operation}`);
+    }
+    const tenantRuntime = this.tenantRuntimes.get(tenantId);
+    if (!tenantRuntime) {
+      throw new Error(`tenant runtime ${tenantId} is not active`);
+    }
+    return tenantRuntime;
   }
 
 }

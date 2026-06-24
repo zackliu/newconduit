@@ -13,11 +13,31 @@ export class LocalFileStorage implements RuntimeStorage {
     return this.readJson(join(this.root, 'sessions', sessionId, 'session.json'));
   }
 
-  async appendEvent(event: RuntimeEvent): Promise<RuntimeEvent> {
-    if (!event.sessionId) {
-      throw new Error('sessionId is required for session event append');
+  async readSessions(): Promise<SessionRecord[]> {
+    const directory = join(this.root, 'sessions');
+    try {
+      const entries = await readdir(directory);
+      const sessions = await Promise.all(entries.map((entry) => this.readJson<SessionRecord>(join(directory, entry, 'session.json'))));
+      return sessions.filter((session): session is SessionRecord => session !== undefined);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
     }
-    const path = join(this.root, 'sessions', event.sessionId, 'events.jsonl');
+  }
+
+  async appendEvent(event: RuntimeEvent): Promise<RuntimeEvent> {
+    if (event.sessionId) {
+      const path = join(this.root, 'sessions', event.sessionId, 'events.jsonl');
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, `${JSON.stringify(event)}\n`, 'utf8');
+      return event;
+    }
+    if (!event.workerId) {
+      throw new Error('sessionId or workerId is required for event append');
+    }
+    const path = join(this.root, 'workers', `${event.workerId}.events.jsonl`);
     await mkdir(dirname(path), { recursive: true });
     await appendFile(path, `${JSON.stringify(event)}\n`, 'utf8');
     return event;
@@ -30,6 +50,10 @@ export class LocalFileStorage implements RuntimeStorage {
 
   async writeWorker(worker: WorkerRecord): Promise<void> {
     await this.writeJson(join(this.root, 'workers', `${worker.workerId}.json`), worker);
+  }
+
+  async readWorker(workerId: string): Promise<WorkerRecord | undefined> {
+    return this.readJson(join(this.root, 'workers', `${workerId}.json`));
   }
 
   async readWorkers(): Promise<WorkerRecord[]> {

@@ -1,3 +1,5 @@
+import type { SidecarClass } from './worker';
+
 export interface LabelSelector {
   matchLabels: Record<string, string>;
 }
@@ -9,7 +11,7 @@ export interface AgentSpec {
     command: string;
     args: string[];
   };
-  sidecarClass: 'copilot-process-wrapper';
+  sidecarClass: SidecarClass;
   workspaceClass: 'docker-workspace-volume-snapshot';
   toolProfile: 'copilot-poc-tools';
   workerSelector: LabelSelector;

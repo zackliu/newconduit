@@ -65,6 +65,9 @@ For any proposal or implementation, answer:
 - Making sidecar integration require a full rewrite of the agent loop.
 - Reusing Conduit directory or protocol assumptions without revalidating the product boundary.
 - Adding fallback paths, compatibility shims, or dual behavior because the current design is unclear.
+- Keeping placeholder sidecar, central, storage, transport, worker, session, and test paths after the real runtime path exists.
+- Letting a sidecar daemon, tenant runtime controller, central service, or runtime orchestrator directly construct Web PubSub, Docker, Copilot, storage, or hosting adapters instead of receiving a role-named dependency.
+- Naming runtime fields after a current implementation such as WebPubSub, Docker, or Copilot when the field represents a replaceable transport, workspace, hosting, or agent-process role.
 - Adding conditional logic that hides inconsistent state instead of naming and fixing the invalid state transition.
 - Testing private helper shape, source snippets, or implementation structure instead of session/runtime behavior.
 

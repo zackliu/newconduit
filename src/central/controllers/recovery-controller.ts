@@ -1,8 +1,11 @@
 import type { WorkspaceSnapshot } from '../../shared';
-import type { DockerVolumeAdapter } from '../adapters';
+
+export interface VolumeRestoreAdapter {
+  restoreDirectoryToVolume(sourceDirectory: string, volumePath: string): Promise<void>;
+}
 
 export class RecoveryController {
-  constructor(private readonly volumeAdapter: DockerVolumeAdapter) {}
+  constructor(private readonly volumeAdapter: VolumeRestoreAdapter) {}
 
   async restoreForResume(snapshot: WorkspaceSnapshot, target: { workspaceVolume: string; copilotSessionVolume: string }): Promise<void> {
     await this.volumeAdapter.restoreDirectoryToVolume(snapshot.workspaceVolumePath, target.workspaceVolume);
