@@ -6,7 +6,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test \"dist-tests/tests/**/*.test.js\"",
+    "test": "node -e \"require('fs').rmSync('dist-tests', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test --test-force-exit \"dist-tests/tests/**/*.test.js\" \"dist-tests/sdk/tests/**/*.test.js\"",
+    "build:sdk": "pnpm --dir sdk build",
+    "typecheck:sdk": "pnpm --dir sdk typecheck",
+    "test:sdk": "pnpm --dir sdk test",
     "start:central": "node dist/central/main.js",
     "start:sidecar": "node dist/sidecar/main.js",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""

@@ -2,39 +2,12 @@ import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type Clock, type RuntimeEvent, t
 
 const DEFAULT_KEEPALIVE_TTL_MS = 30_000;
 
-export class WorkerRegistryController {
+export class WorkerManager {
   constructor(
     private readonly storage: RuntimeStorage,
     private readonly clock: Clock,
     private readonly keepaliveTtlMs = DEFAULT_KEEPALIVE_TTL_MS
   ) {}
-
-  async handleRuntimeEvent(tenantId: string, event: RuntimeEvent): Promise<boolean> {
-    switch (event.type) {
-      case 'worker.register': {
-        const payload = this.parseWorkerRegisterPayload(event.payload);
-        await this.register({ tenantId, ...payload });
-        return true;
-      }
-      case 'worker.heartbeat': {
-        const payload = this.parseWorkerHeartbeatPayload(event.payload);
-        await this.heartbeat(payload);
-        return true;
-      }
-      case 'worker.drain.requested': {
-        const payload = this.parseWorkerIdentityPayload(event.payload);
-        await this.drain(payload);
-        return true;
-      }
-      case 'worker.close.requested': {
-        const payload = this.parseWorkerIdentityPayload(event.payload);
-        await this.close(payload);
-        return true;
-      }
-      default:
-        return false;
-    }
-  }
 
   async register(input: { tenantId: string } & WorkerRegisterPayload): Promise<WorkerRecord> {
     const now = this.clock.now();
@@ -223,65 +196,5 @@ export class WorkerRegistryController {
 
   private expiresAt(timestamp: string): string {
     return new Date(Date.parse(timestamp) + this.keepaliveTtlMs).toISOString();
-  }
-
-  private parseWorkerRegisterPayload(payload: unknown): WorkerRegisterPayload {
-    if (!this.isWorkerRegisterPayload(payload)) {
-      throw new Error('invalid worker.register payload');
-    }
-    return payload;
-  }
-
-  private isWorkerRegisterPayload(payload: unknown): payload is WorkerRegisterPayload {
-    if (typeof payload !== 'object' || payload === null) {
-      return false;
-    }
-    const candidate = payload as Partial<WorkerRegisterPayload>;
-    return typeof candidate.sidecarId === 'string'
-      && candidate.sidecarClass === COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS
-      && this.isStringRecord(candidate.labels)
-      && typeof candidate.capacity === 'number'
-      && typeof candidate.allocatable === 'number';
-  }
-
-  private parseWorkerHeartbeatPayload(payload: unknown): WorkerHeartbeatPayload {
-    if (!this.isWorkerHeartbeatPayload(payload)) {
-      throw new Error('invalid worker.heartbeat payload');
-    }
-    return payload;
-  }
-
-  private isWorkerHeartbeatPayload(payload: unknown): payload is WorkerHeartbeatPayload {
-    if (typeof payload !== 'object' || payload === null) {
-      return false;
-    }
-    const candidate = payload as Partial<WorkerHeartbeatPayload>;
-    return typeof candidate.workerId === 'string'
-      && typeof candidate.generation === 'number'
-      && typeof candidate.capacity === 'number'
-      && typeof candidate.allocatable === 'number'
-      && Array.isArray(candidate.conditions)
-      && candidate.conditions.every((condition) => condition === 'ready' || condition === 'busy' || condition === 'draining' || condition === 'disconnected');
-  }
-
-  private parseWorkerIdentityPayload(payload: unknown): WorkerIdentityPayload {
-    if (!this.isWorkerIdentityPayload(payload)) {
-      throw new Error('invalid worker identity payload');
-    }
-    return payload;
-  }
-
-  private isWorkerIdentityPayload(payload: unknown): payload is WorkerIdentityPayload {
-    if (typeof payload !== 'object' || payload === null) {
-      return false;
-    }
-    const candidate = payload as Partial<WorkerIdentityPayload>;
-    return typeof candidate.workerId === 'string' && typeof candidate.generation === 'number';
-  }
-
-  private isStringRecord(value: unknown): value is Record<string, string> {
-    return typeof value === 'object'
-      && value !== null
-      && Object.values(value).every((entry) => typeof entry === 'string');
   }
 }

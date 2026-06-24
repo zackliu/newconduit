@@ -50,7 +50,7 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
 
   private async issueConnection(principal: PrincipalContext, channels: RuntimeChannel[]): Promise<RuntimeConnectionGrant> {
     const groups = channels.map((channel) => this.channelMapper.toGroup(channel));
-    const roles = groups.flatMap((group) => [`webpubsub.joinLeaveGroup.${group}`, `webpubsub.sendToGroup.${group}`]);
+    const roles = ['webpubsub.joinLeaveGroup', ...groups.flatMap((group) => [`webpubsub.joinLeaveGroup.${group}`, `webpubsub.sendToGroup.${group}`])];
     const token = await this.serviceClient.getClientAccessToken({
       userId: this.toUserId(principal),
       groups,
@@ -59,8 +59,8 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
     return { url: token.url };
   }
 
-  stop(): void {
-    this.client?.stop();
+  async stop(): Promise<void> {
+    await stopWebPubSubClient(this.client);
     this.client = undefined;
   }
 
@@ -141,4 +141,8 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
       type
     };
   }
+}
+
+async function stopWebPubSubClient(client: WebPubSubClient | undefined): Promise<void> {
+  client?.stop();
 }

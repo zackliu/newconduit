@@ -25,7 +25,8 @@ src/
   central/
     registries/   # POC predefined class/profile registry
     storage/      # Central local file storage
-    controllers/  # Replaceable central controllers
+    controllers/  # Protocol-facing replaceable ingress controllers
+    managers/     # Tenant-owned runtime workflows and state mechanisms
     adapters/     # Web PubSub, Docker hosting, Docker volume adapters
   sidecar/
     controllers/  # Worker registration, heartbeat, lease command handling
@@ -54,7 +55,7 @@ Run tests:
 pnpm test
 ```
 
-The test command compiles `tests/` into `dist-tests/` and runs Node's built-in test runner. Implementation code remains under `src/`.
+The test command clears stale `dist-tests/` output, compiles `tests/` into `dist-tests/`, and runs Node's built-in test runner. Implementation code remains under `src/`.
 
 The Web PubSub integration test reads `tests/.env`:
 
@@ -89,20 +90,22 @@ pnpm start:sidecar
 - `CentralService`: central-facing runtime orchestration entrypoint.
 - `SidecarDaemon`: worker-local wrapper around Docker volumes and Copilot process startup.
 
-## Controller vs Adapter
+## Controller, Manager, Adapter
 
-Use this rule when adding files: controllers decide runtime state; adapters execute those decisions against a concrete technology.
+Use this rule when adding files: controllers represent replaceable protocol or ingress boundaries, managers own cohesive runtime workflows and state mechanisms, and adapters execute decisions against a concrete technology.
 
 | Category | Use it for | Examples |
 | --- | --- | --- |
-| Controller | Reads runtime facts and decides the next state, assignment, lease, event, or snapshot boundary. | `SessionLifecycleController`, `WorkerSelectionController`, `WorkerLeaseController`, `SnapshotController` |
+| Controller | Translates an external protocol or ingress shape into tenant-internal commands. It is replaceable when the ingress protocol changes. | `TenantInboxController`, `ClientRuntimeEventController`, `WorkerRuntimeEventController` |
+| Manager | Owns a tenant-internal workflow, state transition, sequence, assignment, lease, event log, or registry mechanism. It does not represent a replaceable protocol boundary. | `SessionManager`, `SessionLifecycleManager`, `SessionAssignmentManager`, `WorkerManager`, `WorkerLeaseManager`, `EventLogManager` |
+| Policy/selector | Makes a pure selection or policy decision without owning protocol ingress or durable state writes. | `WorkerSelector` |
 | Adapter | Connects a controller decision to a concrete implementation such as Web PubSub, Docker, local files, or the Copilot process. | `WebPubSubTransportAdapter`, `DockerHostingAdapter`, `DockerVolumeAdapter`, `CopilotProcessAdapter` |
 | Model | Defines the shape of durable resources and public contracts. | `SessionRecord`, `WorkerRecord`, `AgentSpec`, `RuntimeEvent` |
 | Registry/Profile | Provides predefined POC class/profile configuration without advancing runtime state. | `POC_AGENT_SPEC`, POC class/profile registry |
 
-For example, `WorkerSelectionController` is a controller because it decides which registered Worker should receive a session. It does not know whether that Worker is backed by Docker, Kubernetes, or a VM. `DockerHostingAdapter` is an adapter because it only performs the POC-specific act of starting a sidecar container.
+For example, `ClientRuntimeEventController` is a controller because it accepts Web PubSub runtime events and translates them into session commands. `SessionManager` is a manager because it owns the create/input workflow and coordinates session lifecycle, event log, turn sequence, and assignment managers. `WorkerSelector` is a selector because it only chooses a compatible Worker from facts it is given. `DockerHostingAdapter` is an adapter because it only performs the POC-specific act of starting a sidecar container.
 
-The same boundary applies to pause and resume. `SnapshotController` decides that a pause boundary needs a workspace volume and Copilot session volume snapshot tied to an event cursor. `DockerVolumeAdapter` performs the actual copy and restore of those Docker volumes. `WebPubSubTransportAdapter` is also an adapter: Web PubSub is the POC transport, not the owner of session lifecycle or event truth.
+The same boundary applies to pause and resume. A protocol controller should translate `session.pause.requested` or `session.resume.requested` into a tenant-internal command. Managers decide the lifecycle, lease, snapshot, recovery, and event-log effects. `DockerVolumeAdapter` performs the actual copy and restore of Docker volumes. `WebPubSubTransportAdapter` is also an adapter: Web PubSub is the POC transport, not the owner of session lifecycle or event truth.
 
 `CentralHttpServer` is a generic HTTP server shell. It exposes route registration, but concrete routes such as `/health`, `/client/negotiate`, and `/sidecar/negotiate` are registered by the composition root in `src/central/main.ts`. Route handlers call central or tenant runtime APIs; they do not reach into transport adapters directly.
 

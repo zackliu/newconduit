@@ -6,9 +6,11 @@ export interface AgentSpecRef {
 export interface CreateSessionRequest {
   agent: AgentSpecRef;
   input: {
-    initialMessage: string;
-    clientRequestId: string;
+    message: string;
   };
+  displayName?: string;
+  description?: string;
+  externalId?: string;
   workspace: {
     source: 'empty';
   };
@@ -25,6 +27,12 @@ export interface PrincipalContext {
 export interface RequestContext {
   principal: PrincipalContext;
   connectionId?: string;
+}
+
+export interface SessionInputRequest {
+  input: {
+    message: string;
+  };
 }
 
 export interface TenantContext {

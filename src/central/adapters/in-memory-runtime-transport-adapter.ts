@@ -45,6 +45,8 @@ export class InMemoryRuntimeTransportAdapter implements RuntimeEventTransport, T
     switch (channel.kind) {
       case 'tenant-inbox':
         return 'tenant-inbox';
+      case 'client-inbox':
+        return `client-inbox:${channel.principalId}`;
       case 'session-events':
         return `session-events:${channel.sessionId}`;
       case 'worker-commands':

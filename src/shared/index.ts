@@ -24,6 +24,8 @@ export type {
 	ResolvedAgentSpec,
 	RuntimeEvent,
 	RuntimeEventType,
+	SessionAssignPayload,
+	SessionInputRequest,
 	SessionRecord,
 	SessionStatus,
 	SidecarClass,

@@ -18,6 +18,7 @@ test('scenario: create session request creates durable session truth', async () 
 
     const request: RuntimeEvent = {
       eventId: 'evt-create-request',
+      ackId: 'ack-create-1',
       sequence: 0,
       type: 'session.create.requested',
       timestamp: new Date().toISOString(),
@@ -27,14 +28,23 @@ test('scenario: create session request creates durable session truth', async () 
           agentSpecId: 'copilot-poc'
         },
         input: {
-          initialMessage: 'make the repo build',
-          clientRequestId: 'client-request-1'
+          message: 'make the repo build'
         },
         workspace: {
           source: 'empty'
         }
       }
     };
+
+    let acknowledgementResolve: (event: RuntimeEvent) => void;
+    const acknowledgement = new Promise<RuntimeEvent>((resolve) => {
+      acknowledgementResolve = resolve;
+    });
+    await transport.subscribe({ kind: 'client-inbox', principalId: 'demo-user' }, async (envelope) => {
+      if (envelope.event.ackId === 'ack-create-1') {
+        acknowledgementResolve(envelope.event);
+      }
+    });
 
     await transport.publish({ kind: 'tenant-inbox' }, request, {
       principal: {
@@ -48,12 +58,14 @@ test('scenario: create session request creates durable session truth', async () 
     assert.equal(sessionIds.length, 1);
 
     const sessionId = sessionIds[0];
+    assert.notEqual(sessionId, 'ack-create-1');
     const sessionFile = await readFile(join(root, 'sessions', sessionId, 'session.json'), 'utf8');
     const session = JSON.parse(sessionFile) as {
       tenantId: string;
       owner: string;
       status: string;
       eventCursor: number;
+      nextTurnSeq: number;
       resolvedAgentSpec: { agentSpecId: string; digest: string };
     };
 
@@ -61,6 +73,7 @@ test('scenario: create session request creates durable session truth', async () 
     assert.equal(session.owner, 'demo-user');
     assert.equal(session.status, 'queued');
     assert.equal(session.eventCursor, 1);
+    assert.equal(session.nextTurnSeq, 2);
     assert.equal(session.resolvedAgentSpec.agentSpecId, 'copilot-poc');
     assert.equal(typeof session.resolvedAgentSpec.digest, 'string');
 
@@ -71,12 +84,19 @@ test('scenario: create session request creates durable session truth', async () 
     assert.equal(events[0].type, 'session.created');
     assert.equal(events[0].sequence, 1);
     assert.equal(events[0].sessionId, sessionId);
+    assert.equal(events[0].ackId, 'ack-create-1');
+    assert.equal(events[0].turnSeq, 1);
     assert.deepEqual(events[0].payload, {
-      initialMessage: 'make the repo build',
-      clientRequestId: 'client-request-1',
+      input: { message: 'make the repo build' },
       workspace: { source: 'empty' },
+      status: 'queued',
       requestedBy: 'demo-user'
     });
+
+    const ack = await acknowledgement;
+    assert.equal(ack.type, 'session.created');
+    assert.equal(ack.sessionId, sessionId);
+    assert.equal(ack.turnSeq, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

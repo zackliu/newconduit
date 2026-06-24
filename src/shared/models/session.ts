@@ -1,6 +1,6 @@
 import type { ResolvedAgentSpec } from './agent-spec';
 
-export type SessionStatus = 'created' | 'queued' | 'starting' | 'running' | 'pausing' | 'paused' | 'resuming' | 'failed';
+export type SessionStatus = 'created' | 'queued' | 'starting' | 'running' | 'pausing' | 'paused' | 'resuming' | 'completed' | 'cancelled' | 'failed';
 
 export interface SessionRecord {
   sessionId: string;
@@ -11,6 +11,7 @@ export interface SessionRecord {
   currentWorkerId?: string;
   workerLeaseGeneration: number;
   eventCursor: number;
+  nextTurnSeq: number;
   workspaceRef: string;
   latestSnapshotRef?: string;
   lifecycleReason?: string;

@@ -1,0 +1,28 @@
+{
+  "name": "@agent-runtime-sidecar/sdk",
+  "version": "0.1.0",
+  "description": "Customer SDK for Agent Runtime Sidecar sessions.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "public-protocol-spec-ch.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-tests/tests/**/*.test.js\"",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true }); require('fs').rmSync('dist-tests', { recursive: true, force: true })\""
+  },
+  "dependencies": {
+    "@azure/web-pubsub-client": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

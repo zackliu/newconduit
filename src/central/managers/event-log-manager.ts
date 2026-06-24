@@ -1,6 +1,6 @@
 import type { Clock, RuntimeEvent, RuntimeEventType, RuntimeStorage } from '../../shared';
 
-export class EventLogController {
+export class EventLogManager {
   constructor(private readonly storage: RuntimeStorage, private readonly clock: Clock) {}
 
   async append<TPayload>(input: {
@@ -10,6 +10,8 @@ export class EventLogController {
     sequence: number;
     sessionId?: string;
     workerId?: string;
+    ackId?: string;
+    turnSeq?: number;
     workerLeaseGeneration?: number;
   }): Promise<RuntimeEvent<TPayload>> {
     const event: RuntimeEvent<TPayload> = {

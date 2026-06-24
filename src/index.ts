@@ -1,28 +1,33 @@
 export {
-	AgentSpecAdmissionController,
+	AgentSpecAdmissionManager,
 	AuditController,
 	AuthorizationController,
 	CentralHttpServer,
 	CentralService,
+	ClientRuntimeEventController,
 	DockerHostingAdapter,
 	DockerVolumeAdapter,
-	EventLogController,
+	EventLogManager,
 	InMemoryRuntimeTransportAdapter,
 	LocalFileStorage,
 	POC_AGENT_SPEC,
 	RecoveryController,
 	registerPocCentralRoutes,
-	SessionLifecycleController,
+	SessionAssignmentManager,
+	SessionLifecycleManager,
+	SessionManager,
 	SnapshotController,
+	TenantInboxController,
 	TenantRuntime,
 	WebPubSubTransportAdapter,
 	WorkerCapacityScaler,
-	WorkerLeaseController,
-	WorkerRegistryController,
-	WorkerSelectionController
+	WorkerLeaseManager,
+	WorkerManager,
+	WorkerRuntimeEventController,
+	WorkerSelector
 } from './central';
 export type { CentralHttpRouteHandler, CentralHttpServerOptions, JsonResponse } from './central';
-export type { TenantRuntimeOptions, VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerHostingAdapter } from './central';
+export type { AcceptInputOutcome, SessionAssignmentOutcome, StartSessionOutcome, TenantRuntimeOptions, VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerCommandOutput, WorkerHostingAdapter } from './central';
 export { SystemClock } from './shared';
 export type {
 	AgentSpec,

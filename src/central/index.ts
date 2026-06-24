@@ -7,19 +7,27 @@ export type { CentralHttpRouteHandler, CentralHttpServerOptions, JsonResponse } 
 export { TenantRuntime } from './tenant-runtime';
 export type { TenantRuntimeOptions } from './tenant-runtime';
 export {
-	AgentSpecAdmissionController,
 	AuditController,
 	AuthorizationController,
-	EventLogController,
+	ClientRuntimeEventController,
 	RecoveryController,
-	SessionLifecycleController,
 	SnapshotController,
+	TenantInboxController,
 	WorkerCapacityScaler,
-	WorkerLeaseController,
-	WorkerRegistryController,
-	WorkerSelectionController
+	WorkerRuntimeEventController
 } from './controllers';
 export type { VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerHostingAdapter } from './controllers';
+export {
+	AgentSpecAdmissionManager,
+	EventLogManager,
+	SessionAssignmentManager,
+	SessionLifecycleManager,
+	SessionManager,
+	WorkerLeaseManager,
+	WorkerManager,
+	WorkerSelector
+} from './managers';
+export type { AcceptInputOutcome, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput } from './managers';
 export { POC_AGENT_SPEC } from './registries/poc-class-registry';
 export { StaticAgentSpecRegistry } from './registries/agent-spec-registry';
 export type { AgentSpecRegistry } from './registries/agent-spec-registry';

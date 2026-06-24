@@ -3,12 +3,15 @@ export type RuntimeEventType =
   | 'session.created'
   | 'session.assign'
   | 'input.received'
+  | 'input.accepted'
   | 'agent.output'
   | 'session.pause.requested'
   | 'snapshot.created'
   | 'session.paused'
   | 'session.resume.requested'
   | 'session.resumed'
+  | 'session.cancel.requested'
+  | 'session.cancelled'
   | 'worker.register'
   | 'worker.registered'
   | 'worker.heartbeat'
@@ -24,11 +27,24 @@ export interface RuntimeEvent<TPayload = unknown> {
   eventId: string;
   sessionId?: string;
   workerId?: string;
+  ackId?: string;
+  turnSeq?: number;
   sequence: number;
   type: RuntimeEventType;
   timestamp: string;
   actor: 'client' | 'central' | 'sidecar' | 'system';
-  correlationId?: string;
   workerLeaseGeneration?: number;
   payload: TPayload;
+}
+
+export interface SessionAssignPayload {
+  sessionId: string;
+  workerId: string;
+  workerLeaseGeneration: number;
+  workspaceRef: string;
+  resolvedAgentSpec: {
+    agentSpecId: string;
+    sidecarClass: string;
+    digest: string;
+  };
 }

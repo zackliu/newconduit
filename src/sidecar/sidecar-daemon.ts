@@ -33,8 +33,8 @@ export class SidecarDaemon {
     await this.options.agentProcessAdapter.start(mounted);
   }
 
-  stop(): void {
-    this.options.runtimeTransport.stop();
+  async stop(): Promise<void> {
+    await this.options.runtimeTransport.stop();
   }
 
   private async negotiateSidecarConnection(centralUrl: string, tenantId: string): Promise<RuntimeConnectionGrant> {

@@ -3,7 +3,7 @@ import type { RuntimeChannel, RuntimeEvent, WorkerRegisterPayload } from '../sha
 export interface SidecarRuntimeTransport {
   connect(accessUrl: string): Promise<void>;
   publish(channel: RuntimeChannel, event: RuntimeEvent): Promise<void>;
-  stop(): void;
+  stop(): Promise<void>;
 }
 
 export interface SidecarWorkspaceMount {

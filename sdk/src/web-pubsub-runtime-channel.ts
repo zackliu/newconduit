@@ -1,13 +1,16 @@
-import type { RuntimeChannel } from '../contracts';
+export type SdkRuntimeChannel =
+  | { kind: 'tenant-inbox' }
+  | { kind: 'client-inbox'; principalId: string }
+  | { kind: 'session-events'; sessionId: string };
 
-export class WebPubSubRuntimeChannelMapper {
+export class SdkWebPubSubRuntimeChannelMapper {
   constructor(private readonly tenantId: string) {
     if (!tenantId) {
-      throw new Error('tenantId is required for Web PubSub runtime channel mapping');
+      throw new Error('tenantId is required for SDK Web PubSub runtime channel mapping');
     }
   }
 
-  toGroup(channel: RuntimeChannel): string {
+  toGroup(channel: SdkRuntimeChannel): string {
     const tenantPrefix = `tenant:${this.toGroupSegment(this.tenantId)}`;
     switch (channel.kind) {
       case 'tenant-inbox':
@@ -16,14 +19,12 @@ export class WebPubSubRuntimeChannelMapper {
         return `${tenantPrefix}:client:${this.toGroupSegment(channel.principalId)}:events`;
       case 'session-events':
         return `${tenantPrefix}:session:${this.toGroupSegment(channel.sessionId)}`;
-      case 'worker-commands':
-        return `${tenantPrefix}:worker:${this.toGroupSegment(channel.workerId)}`;
     }
   }
 
-  toGroupSegment(value: string): string {
+  private toGroupSegment(value: string): string {
     if (!value) {
-      throw new Error('Web PubSub group segment cannot be empty');
+      throw new Error('SDK Web PubSub group segment cannot be empty');
     }
     return encodeURIComponent(value);
   }

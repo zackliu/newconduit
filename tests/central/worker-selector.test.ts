@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { AgentSpecAdmissionController } from '../../src/central/controllers/agent-spec-admission-controller';
-import { WorkerSelectionController } from '../../src/central/controllers/worker-selection-controller';
+import { AgentSpecAdmissionManager, WorkerSelector } from '../../src/central/managers';
 import { POC_AGENT_SPEC } from '../../src/central/registries/poc-class-registry';
 import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, SystemClock, type SessionRecord, type WorkerRecord } from '../../src/shared';
 
 test('scenario: queued session is assigned to matching ready worker', () => {
   const now = new Date().toISOString();
-  const resolvedAgentSpec = new AgentSpecAdmissionController(new SystemClock()).resolve(POC_AGENT_SPEC);
+  const resolvedAgentSpec = new AgentSpecAdmissionManager(new SystemClock()).resolve(POC_AGENT_SPEC);
   const session: SessionRecord = {
     sessionId: 'session-1',
     tenantId: 'tenant-1',
@@ -16,6 +15,7 @@ test('scenario: queued session is assigned to matching ready worker', () => {
     status: 'queued',
     workerLeaseGeneration: 0,
     eventCursor: 0,
+    nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
     createdAt: now,
     updatedAt: now
@@ -38,7 +38,7 @@ test('scenario: queued session is assigned to matching ready worker', () => {
     updatedAt: now
   };
 
-  const selected = new WorkerSelectionController().select(session, [worker]);
+  const selected = new WorkerSelector().select(session, [worker]);
 
   assert.equal(selected?.workerId, 'worker-1');
 });

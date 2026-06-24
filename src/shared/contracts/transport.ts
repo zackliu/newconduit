@@ -3,6 +3,7 @@ import type { PrincipalContext, RequestContext } from '../models/create-session'
 
 export type RuntimeChannel =
   | { kind: 'tenant-inbox' }
+  | { kind: 'client-inbox'; principalId: string }
   | { kind: 'session-events'; sessionId: string }
   | { kind: 'worker-commands'; workerId: string };
 
@@ -25,6 +26,9 @@ export interface RuntimeEventTransport {
 export interface RuntimeConnectionGrant {
   url: string;
   expiresAt?: string;
+  clientInbox?: {
+    principalId: string;
+  };
 }
 
 export interface TenantConnectionIssuer {

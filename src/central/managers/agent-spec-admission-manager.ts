@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import type { Clock, AgentSpec, ResolvedAgentSpec } from '../../shared';
+import type { AgentSpec, Clock, ResolvedAgentSpec } from '../../shared';
 
-export class AgentSpecAdmissionController {
+export class AgentSpecAdmissionManager {
   constructor(private readonly clock: Clock) {}
 
   resolve(spec: AgentSpec): ResolvedAgentSpec {

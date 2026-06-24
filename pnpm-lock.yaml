@@ -25,6 +25,19 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  sdk:
+    dependencies:
+      '@azure/web-pubsub-client':
+        specifier: ^1.0.4
+        version: 1.0.4
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
 packages:
 
   '@azure/abort-controller@2.1.2':

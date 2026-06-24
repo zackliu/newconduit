@@ -3,9 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { AgentSpecAdmissionController } from '../../src/central/controllers/agent-spec-admission-controller';
-import { WorkerRegistryController } from '../../src/central/controllers/worker-registry-controller';
-import { WorkerSelectionController } from '../../src/central/controllers/worker-selection-controller';
+import { AgentSpecAdmissionManager, WorkerManager, WorkerSelector } from '../../src/central/managers';
 import { POC_AGENT_SPEC } from '../../src/central/registries/poc-class-registry';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type Clock, type RuntimeEvent, type SessionRecord, type WorkerRecord } from '../../src/shared';
@@ -24,9 +22,9 @@ class FixedClock implements Clock {
 
 test('scenario: standalone sidecar registers ready worker capacity', async () => {
   await withStorage(async ({ storage, root, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 30_000);
+    const manager = new WorkerManager(storage, clock, 30_000);
 
-    const worker = await registerWorker(controller);
+    const worker = await registerWorker(manager);
 
     assert.equal(worker.tenantId, 'poc');
     assert.equal(worker.sidecarId, 'sidecar-1');
@@ -48,11 +46,11 @@ test('scenario: standalone sidecar registers ready worker capacity', async () =>
 
 test('scenario: worker heartbeat refreshes active capacity', async () => {
   await withStorage(async ({ storage, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 30_000);
-    const worker = await registerWorker(controller);
+    const manager = new WorkerManager(storage, clock, 30_000);
+    const worker = await registerWorker(manager);
     clock.set('2026-06-24T00:00:10.000Z');
 
-    const updated = await controller.heartbeat({
+    const updated = await manager.heartbeat({
       workerId: worker.workerId,
       generation: worker.generation,
       capacity: 2,
@@ -71,10 +69,10 @@ test('scenario: worker heartbeat refreshes active capacity', async () => {
 
 test('scenario: graceful worker close removes worker from active selection', async () => {
   await withStorage(async ({ storage, root, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 30_000);
-    const worker = await registerWorker(controller);
+    const manager = new WorkerManager(storage, clock, 30_000);
+    const worker = await registerWorker(manager);
 
-    const closed = await controller.close({ workerId: worker.workerId, generation: worker.generation });
+    const closed = await manager.close({ workerId: worker.workerId, generation: worker.generation });
 
     assert.equal(closed.lifecycleState, 'closed');
     assert.equal(closed.terminalReason, 'worker_closed');
@@ -89,10 +87,10 @@ test('scenario: graceful worker close removes worker from active selection', asy
 
 test('scenario: draining worker stops new assignment while existing lease finishes', async () => {
   await withStorage(async ({ storage, root, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 30_000);
-    const worker = await registerWorker(controller);
+    const manager = new WorkerManager(storage, clock, 30_000);
+    const worker = await registerWorker(manager);
 
-    const draining = await controller.drain({ workerId: worker.workerId, generation: worker.generation });
+    const draining = await manager.drain({ workerId: worker.workerId, generation: worker.generation });
 
     assert.equal(draining.lifecycleState, 'active');
     assert.equal(draining.allocatable, 0);
@@ -106,11 +104,11 @@ test('scenario: draining worker stops new assignment while existing lease finish
 
 test('scenario: expired worker keepalive removes worker from active selection', async () => {
   await withStorage(async ({ storage, root, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 1_000);
-    const worker = await registerWorker(controller);
+    const manager = new WorkerManager(storage, clock, 1_000);
+    const worker = await registerWorker(manager);
     clock.set('2026-06-24T00:00:01.001Z');
 
-    const expiredWorkers = await controller.expireWorkers();
+    const expiredWorkers = await manager.expireWorkers();
 
     assert.equal(expiredWorkers.length, 1);
     assert.equal(expiredWorkers[0].workerId, worker.workerId);
@@ -125,11 +123,11 @@ test('scenario: expired worker keepalive removes worker from active selection', 
 
 test('scenario: leased worker close marks lease lost without crash recovery', async () => {
   await withStorage(async ({ storage, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 30_000);
-    const worker = await registerWorker(controller);
+    const manager = new WorkerManager(storage, clock, 30_000);
+    const worker = await registerWorker(manager);
     const session = await writeLeasedSession(storage, worker);
 
-    await controller.close({ workerId: worker.workerId, generation: worker.generation });
+    await manager.close({ workerId: worker.workerId, generation: worker.generation });
 
     const failed = await storage.readSession(session.sessionId);
     assert.equal(failed?.status, 'failed');
@@ -146,12 +144,12 @@ test('scenario: leased worker close marks lease lost without crash recovery', as
 
 test('scenario: leased worker expiry marks lease lost without crash recovery', async () => {
   await withStorage(async ({ storage, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 1_000);
-    const worker = await registerWorker(controller);
+    const manager = new WorkerManager(storage, clock, 1_000);
+    const worker = await registerWorker(manager);
     const session = await writeLeasedSession(storage, worker);
     clock.set('2026-06-24T00:00:01.001Z');
 
-    await controller.expireWorkers();
+    await manager.expireWorkers();
 
     const failed = await storage.readSession(session.sessionId);
     assert.equal(failed?.status, 'failed');
@@ -165,11 +163,11 @@ test('scenario: leased worker expiry marks lease lost without crash recovery', a
 
 test('scenario: stale heartbeat cannot resurrect terminal worker', async () => {
   await withStorage(async ({ storage, root, clock }) => {
-    const controller = new WorkerRegistryController(storage, clock, 30_000);
-    const worker = await registerWorker(controller);
-    await controller.close({ workerId: worker.workerId, generation: worker.generation });
+    const manager = new WorkerManager(storage, clock, 30_000);
+    const worker = await registerWorker(manager);
+    await manager.close({ workerId: worker.workerId, generation: worker.generation });
 
-    const result = await controller.heartbeat({
+    const result = await manager.heartbeat({
       workerId: worker.workerId,
       generation: worker.generation,
       capacity: 1,
@@ -201,8 +199,8 @@ async function withStorage(testBody: (input: { root: string; storage: LocalFileS
   }
 }
 
-async function registerWorker(controller: WorkerRegistryController): Promise<WorkerRecord> {
-  return controller.register({
+async function registerWorker(manager: WorkerManager): Promise<WorkerRecord> {
+  return manager.register({
     tenantId: 'poc',
     sidecarId: 'sidecar-1',
     sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
@@ -223,11 +221,12 @@ async function writeLeasedSession(storage: LocalFileStorage, worker: WorkerRecor
     sessionId: `session-${worker.workerId}`,
     tenantId: worker.tenantId,
     owner: 'owner-1',
-    resolvedAgentSpec: new AgentSpecAdmissionController({ now: () => now }).resolve(POC_AGENT_SPEC),
+    resolvedAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
     status: 'running',
     currentWorkerId: worker.workerId,
     workerLeaseGeneration: 1,
     eventCursor: 0,
+    nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
     createdAt: now,
     updatedAt: now
@@ -242,13 +241,14 @@ function selectWorker(worker: WorkerRecord): WorkerRecord | undefined {
     sessionId: 'queued-session',
     tenantId: worker.tenantId,
     owner: 'owner-1',
-    resolvedAgentSpec: new AgentSpecAdmissionController({ now: () => now }).resolve(POC_AGENT_SPEC),
+    resolvedAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
     status: 'queued',
     workerLeaseGeneration: 0,
     eventCursor: 0,
+    nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
     createdAt: now,
     updatedAt: now
   };
-  return new WorkerSelectionController().select(session, [worker]);
+  return new WorkerSelector().select(session, [worker]);
 }

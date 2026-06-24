@@ -1,6 +1,6 @@
 import type { LabelSelector, SessionRecord, WorkerRecord } from '../../shared';
 
-export class WorkerSelectionController {
+export class WorkerSelector {
   select(session: SessionRecord, workers: WorkerRecord[]): WorkerRecord | undefined {
     return workers.find((worker) =>
       worker.sidecarClass === session.resolvedAgentSpec.sidecarClass

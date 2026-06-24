@@ -1,6 +1,7 @@
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
-import type { Clock, CreateSessionRequest, RequestContext, RuntimeConnectionGrant, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext } from '../shared';
-import { AgentSpecAdmissionController, EventLogController, SessionLifecycleController, WorkerRegistryController } from './controllers';
+import type { Clock, RequestContext, RuntimeConnectionGrant, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext } from '../shared';
+import { ClientRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
+import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionManager, WorkerLeaseManager, WorkerManager, WorkerSelector } from './managers';
 
 export interface TenantRuntimeOptions {
   tenant: TenantContext;
@@ -13,62 +14,53 @@ export interface TenantRuntimeOptions {
 
 export class TenantRuntime {
   private readonly tenant: TenantContext;
-  private readonly storage: RuntimeStorage;
   private readonly eventTransport: RuntimeEventTransport;
   private readonly connectionIssuer: TenantConnectionIssuer;
-  private readonly agentSpecRegistry: AgentSpecRegistry;
-  private readonly agentSpecAdmissionController: AgentSpecAdmissionController;
-  private readonly sessionLifecycleController: SessionLifecycleController;
-  private readonly eventLogController: EventLogController;
-  private readonly workerRegistryController: WorkerRegistryController;
+  private readonly tenantInboxController: TenantInboxController;
+  private readonly workerManager: WorkerManager;
 
   constructor(options: TenantRuntimeOptions) {
     this.tenant = options.tenant;
-    this.storage = options.storage;
     this.eventTransport = options.eventTransport;
     this.connectionIssuer = options.connectionIssuer;
-    this.agentSpecRegistry = options.agentSpecRegistry;
-    this.agentSpecAdmissionController = new AgentSpecAdmissionController(options.clock);
-    this.sessionLifecycleController = new SessionLifecycleController(options.storage, options.clock);
-    this.eventLogController = new EventLogController(options.storage, options.clock);
-    this.workerRegistryController = new WorkerRegistryController(options.storage, options.clock);
-  }
-
-  async createSession(context: RequestContext, request: CreateSessionRequest): Promise<string> {
-    const agentSpec = await this.agentSpecRegistry.resolve(request.agent);
-    const resolvedAgentSpec = this.agentSpecAdmissionController.resolve(agentSpec);
-    const session = await this.sessionLifecycleController.create({
-      tenantId: this.tenant.tenantId,
-      owner: context.principal.principalId,
-      resolvedAgentSpec,
-      workspaceRef: `docker-volume:${crypto.randomUUID()}`
-    });
-    const event = await this.eventLogController.append({
-      type: 'session.created',
-      actor: 'central',
-      payload: {
-        initialMessage: request.input.initialMessage,
-        clientRequestId: request.input.clientRequestId,
-        workspace: request.workspace,
-        requestedBy: context.principal.principalId
-      },
-      sequence: 1,
-      sessionId: session.sessionId
-    });
-    const queuedSession = await this.sessionLifecycleController.transition({ ...session, eventCursor: event.sequence }, 'queued', 'waiting-for-worker');
-    await this.eventTransport.publish({ kind: 'session-events', sessionId: queuedSession.sessionId }, event);
-    return queuedSession.sessionId;
+    const agentSpecAdmissionManager = new AgentSpecAdmissionManager(options.clock);
+    const sessionLifecycleManager = new SessionLifecycleManager(options.storage, options.clock);
+    const eventLogManager = new EventLogManager(options.storage, options.clock);
+    const workerSelector = new WorkerSelector();
+    const workerLeaseManager = new WorkerLeaseManager(options.storage);
+    const sessionAssignmentManager = new SessionAssignmentManager(options.storage, options.clock, workerSelector, workerLeaseManager);
+    const sessionManager = new SessionManager(
+      options.tenant,
+      options.storage,
+      options.agentSpecRegistry,
+      agentSpecAdmissionManager,
+      sessionLifecycleManager,
+      eventLogManager,
+      sessionAssignmentManager
+    );
+    this.workerManager = new WorkerManager(options.storage, options.clock);
+    this.tenantInboxController = new TenantInboxController(
+      options.tenant.tenantId,
+      new WorkerRuntimeEventController(this.workerManager),
+      new ClientRuntimeEventController(sessionManager, options.eventTransport)
+    );
   }
 
   async start(): Promise<void> {
-    await this.eventTransport.subscribe({ kind: 'tenant-inbox' }, (envelope) => this.handleRuntimeEvent(envelope.context, envelope.event));
+    await this.eventTransport.subscribe({ kind: 'tenant-inbox' }, (envelope) => this.tenantInboxController.handleRuntimeEvent(envelope.context, envelope.event));
   }
 
   async negotiateClientConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
-    return this.connectionIssuer.issueClientConnection({
+    const grant = await this.connectionIssuer.issueClientConnection({
       principal: context.principal,
-      channels: [{ kind: 'tenant-inbox' }]
+      channels: [{ kind: 'tenant-inbox' }, { kind: 'client-inbox', principalId: context.principal.principalId }]
     });
+    return {
+      ...grant,
+      clientInbox: {
+        principalId: context.principal.principalId
+      }
+    };
   }
 
   async negotiateSidecarConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
@@ -79,41 +71,7 @@ export class TenantRuntime {
   }
 
   async expireWorkers(): Promise<void> {
-    await this.workerRegistryController.expireWorkers();
-  }
-
-  private async handleRuntimeEvent(context: RequestContext, event: RuntimeEvent): Promise<void> {
-    if (await this.workerRegistryController.handleRuntimeEvent(this.tenant.tenantId, event)) {
-      return;
-    }
-
-    switch (event.type) {
-      case 'session.create.requested': {
-        const payload = this.parseCreateSessionRequestedPayload(event.payload);
-        await this.createSession(context, payload);
-        return;
-      }
-      default:
-        return;
-    }
-  }
-
-  private parseCreateSessionRequestedPayload(payload: unknown): CreateSessionRequest {
-    if (!this.isCreateSessionRequestedPayload(payload)) {
-      throw new Error('invalid session.create.requested payload');
-    }
-    return payload;
-  }
-
-  private isCreateSessionRequestedPayload(payload: unknown): payload is CreateSessionRequest {
-    if (typeof payload !== 'object' || payload === null) {
-      return false;
-    }
-    const candidate = payload as Partial<CreateSessionRequest>;
-    return typeof candidate.agent?.agentSpecId === 'string'
-      && typeof candidate.input?.initialMessage === 'string'
-      && typeof candidate.input?.clientRequestId === 'string'
-      && candidate.workspace?.source === 'empty';
+    await this.workerManager.expireWorkers();
   }
 
 }

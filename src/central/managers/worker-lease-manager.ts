@@ -1,6 +1,6 @@
 import type { RuntimeStorage, SessionRecord, WorkerRecord } from '../../shared';
 
-export class WorkerLeaseController {
+export class WorkerLeaseManager {
   constructor(private readonly storage: RuntimeStorage) {}
 
   async assign(session: SessionRecord, worker: WorkerRecord): Promise<SessionRecord> {

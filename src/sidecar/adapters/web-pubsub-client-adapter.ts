@@ -33,9 +33,13 @@ export class WebPubSubClientAdapter implements SidecarRuntimeTransport {
     await this.client.sendToGroup(this.channelMapper.toGroup(channel), event, 'json');
   }
 
-  stop(): void {
-    this.client?.stop();
+  async stop(): Promise<void> {
+    await stopWebPubSubClient(this.client);
     this.client = undefined;
   }
 
+}
+
+async function stopWebPubSubClient(client: WebPubSubClient | undefined): Promise<void> {
+  client?.stop();
 }
