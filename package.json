@@ -1,0 +1,23 @@
+{
+  "name": "agent-runtime-sidecar-poc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript POC framework for Agent Runtime Sidecar central service and sidecar daemon.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-tests/tests/**/*.test.js\"",
+    "start:central": "node dist/central/main.js",
+    "start:sidecar": "node dist/sidecar/main.js",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

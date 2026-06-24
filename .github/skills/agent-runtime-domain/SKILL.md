@@ -10,6 +10,7 @@ Use this skill for domain decisions in this repo. Load the current brief docs be
 ## Domain Invariants
 
 - Session is the durable object; worker compute is replaceable.
+- Tenant is a high-level runtime boundary. Most runtime state, registries, controllers, adapters, storage, transport config, policy, audit, worker capacity, and AgentSpec defaults are tenant-scoped. The outer central layer handles tenant discovery, tenant creation, tenant registry, and cross-tenant administration, then delegates to tenant runtimes.
 - Central session service is the public/session-facing control plane and communication entry point.
 - Sidecar sits close to the agent process and adapts existing agents into the runtime.
 - Persistent storage provides session metadata, event log, workspace snapshots, artifacts, runtime metadata, and audit records.
@@ -22,7 +23,7 @@ Use this skill for domain decisions in this repo. Load the current brief docs be
 
 ### Central Session Service
 
-Owns session catalog, worker registry, connection state, routing, authorization, tenant isolation, audit, event replay, and artifact access checks.
+Owns tenant discovery, tenant runtime registry, public entrypoints, and cross-tenant administration. Within a tenant, the tenant runtime owns session catalog, worker registry, connection state, routing, authorization, audit, event replay, storage adapters, transport adapters, and artifact access checks.
 
 ### Agent Runtime Sidecar
 
@@ -41,18 +42,22 @@ Owns stable client, backend, and sidecar contracts. The SDK should hide routing 
 For any proposal or implementation, answer:
 
 1. What durable object is being changed: session, worker, agent type, workspace, event, artifact, audit record, or configuration?
-2. Does the change preserve the separation between session identity and worker location?
-3. Where is authorization enforced before routing or access?
-4. What is persisted before a worker dies?
-5. Is recovery a true continuation, restart with context, or non-recoverable failure?
-6. Does the sidecar still allow existing agent processes to be adapted with minimal changes?
-7. Does the design require a model provider, agent framework, hosting platform, or marketplace responsibility that is out of scope?
-8. Is the proposal adding fallback behavior or compatibility layers instead of fixing the model or implementation?
-9. Are validation plans based on business behavior and public contracts rather than source-code shape?
-10. What is the smallest self-hosted MVP slice that validates this?
+2. Which ownership boundary owns this object or class: outer central, tenant runtime, sidecar, or shared contract?
+3. If it reads/writes AgentSpec, Session, Worker, Event, WorkspaceSnapshot, Policy, Audit, transport config, storage, or hosting config, why is it not tenant-scoped?
+4. Does the change preserve the separation between session identity and worker location?
+5. Where is authorization enforced before routing or access?
+6. What is persisted before a worker dies?
+7. Is recovery a true continuation, restart with context, or non-recoverable failure?
+8. Does the sidecar still allow existing agent processes to be adapted with minimal changes?
+9. Does the design require a model provider, agent framework, hosting platform, or marketplace responsibility that is out of scope?
+10. Is the proposal adding fallback behavior or compatibility layers instead of fixing the model or implementation?
+11. Are validation plans based on business behavior and public contracts rather than source-code shape?
+12. What is the smallest self-hosted MVP slice that validates this?
 
 ## Anti-Patterns
 
+- Putting tenant-owned adapters/controllers directly in the outer central layer because it is convenient to wire them there.
+- Passing `tenantId`, principal, owner, or tenant config as client-supplied business payload when those values should come from tenant resolution or connection/auth context.
 - Encoding a worker address into client-facing session APIs.
 - Treating conversation transcript as the whole session state.
 - Adding a broad protocol or context standard before validating runtime value.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Azure Web PubSub Selector"
+  short_description: "Choose the right Azure Web PubSub integration shape"
+  default_prompt: "Use $webpubsub-solution-selector to choose the correct Azure Web PubSub runtime and server role before generating code."

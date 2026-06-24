@@ -4,7 +4,10 @@ applyTo: "src/**,packages/**,services/**,sidecar/**,sdk/**,tests/**,**/*.ts,**/*
 ---
 # Implementation Change Guidelines
 
+- Do not treat design discussion as an implementation request. If the user is still debating architecture, terminology, workflow, or product boundary, stay in design/spec mode and do not edit implementation code. Edit code only after the user explicitly asks for implementation or the design discussion has converged into a clear implementation slice.
 - Start from the runtime contract. Identify whether the change belongs to central service, sidecar, storage, SDK/API, protocol adapter, auth/audit, deployment, or tests.
+- Before adding or wiring a class, identify its ownership boundary: outer central, tenant runtime, sidecar, or shared contract. Runtime state and implementation adapters are tenant-scoped by default. If a class reads/writes AgentSpec, Session, Worker, Event, WorkspaceSnapshot, Policy, Audit, transport config, storage, or hosting config, place it behind `TenantRuntime` or another tenant-owned boundary unless the design explicitly says it is cross-tenant.
+- Keep the outer central layer thin. It may create/resolve tenants, hold a tenant runtime registry, dispatch connections/events to a tenant, and expose cross-tenant administration. It must not directly use tenant-owned adapters/controllers such as WebPubSub transport, local storage, AgentSpec registry, Worker registry, Docker hosting, snapshot, policy, or audit implementations.
 - Keep durable session identity separate from ephemeral worker identity.
 - Route through explicit session and worker metadata. Do not let clients depend on worker location or process-local state.
 - Use structured events and typed payloads for session communication. Avoid ad hoc string parsing for protocol or storage boundaries.

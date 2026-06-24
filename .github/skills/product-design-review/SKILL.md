@@ -15,7 +15,8 @@ Use this skill when a design needs more than wording polish. The goal is to test
 4. For any bug, gap, or confusing behavior, review the design/model first, the implementation second, and missing explicit domain validation third.
 5. Compare at least two options when the decision is meaningful.
 6. Review operational consequences: routing, recovery, storage, auth, audit, deployment, observability, SDK, and any explicitly requested migration.
-7. Decide whether the proposal should change docs, contracts, implementation, tests, or all of them.
+7. If the decision changes a spec, describe the target-state edit. Do not suggest adding revision notes, addenda, or "latest discussion" paragraphs to the spec body.
+8. Decide whether the proposal should change docs, contracts, implementation, tests, or all of them.
 
 ## Review Rubric
 
@@ -27,6 +28,7 @@ Use this skill when a design needs more than wording polish. The goal is to test
 - **Root-cause integrity**: Does the design fix the underlying model or implementation issue instead of adding fallback behavior?
 - **No compatibility drift**: Does it avoid compatibility shims, legacy layers, dual paths, and default backward-compatibility work unless explicitly requested?
 - **Business-logic tests**: Are validation examples based on user-visible behavior, runtime invariants, and public contracts instead of source-code shape?
+- **Spec as finished artifact**: Would the resulting spec read as the current intended design rather than a record of how the design changed?
 - **Protocol restraint**: Does it avoid standardizing broad protocols before demand is validated?
 - **Operability**: Can it be self-hosted first, then clustered, then possibly managed?
 - **Conduit boundary**: Does it borrow principles without inheriting old host-centric assumptions?

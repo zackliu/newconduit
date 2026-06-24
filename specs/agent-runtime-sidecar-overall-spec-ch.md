@@ -12,7 +12,9 @@
 2. **为什么需要它？** 当 agent 从本地 CLI、IDE、聊天窗口进入 application backend 和 online service 调用链以后，session 不能再只存在于某个 worker process 的内存里。应用需要一个稳定服务入口，用户需要一段可恢复、可追溯的连续工作，平台需要权限、租户边界和审计。
 3. **每个部分先做什么，后做什么？** V1 要先验证一个已有 agent 能通过 sidecar daemon 接入同质化 worker capacity，并以 durable、interactive、self-hostable service 的方式运行。之后再扩展 cluster、异构环境、protocol adapter、managed service 和更强的 context portability。
 
-本文以 [agent-runtime-sidecar-brief-ch.md](agent-runtime-sidecar-brief-ch.md) 和 [agent-runtime-sidecar-brief-en.md](agent-runtime-sidecar-brief-en.md) 作为当前产品边界。旧项目 `C:\Users\chenyl\conduit` 是重要设计输入，但不是实现基线，也不是迁移兼容目标。
+本文以 [agent-runtime-sidecar-brief-ch.md](../agent-runtime-sidecar-brief-ch.md) 和 [agent-runtime-sidecar-brief-en.md](../agent-runtime-sidecar-brief-en.md) 作为当前产品边界。旧项目 `C:\Users\chenyl\conduit` 是重要设计输入，但不是实现基线，也不是迁移兼容目标。
+
+`specs/` 目录后续按 resource model、controller、adapter、API 和 deployment 拆分。目录组织原则见 [README.md](README.md)，核心资源模型见 [runtime-resource-model-ch.md](runtime-resource-model-ch.md)。本文只保留 overall narrative 和架构会议需要讨论的主线。
 
 ## 2. 核心判断
 
@@ -73,6 +75,8 @@ V1 明确不做：
 这些 non-goal 不是说永远不做，而是说它们不能阻塞第一条产品主线：durable session runtime。
 
 ## 5. Durable Object Model
+
+本节是资源模型摘要。完整定义、Kubernetes-style 类比、controller/watch 模式和可替换性边界见 [runtime-resource-model-ch.md](runtime-resource-model-ch.md)。
 
 在讨论 component 之前，先要确定 runtime 里有哪些大类资源和事实。这里不应该列一堆过早的 object class，而应该像 Kubernetes 先区分 workload spec、node、pod/status/event 那样，先把几类概念的职责说清楚。
 
@@ -395,7 +399,7 @@ V1 的 observability 先围绕 session 和 worker，而不是围绕 generic infr
 | Workspace snapshot | 工作现场可恢复 | agent 修改 workspace 后 snapshot，恢复到新 worker 可看到文件状态 |
 | SDK contract | 应用不用手写 protocol 细节 | client SDK 完成 create/connect/send/stream/reconnect happy path |
 
-当前仓库仍是文档优先状态，还没有 verified build/test/lint/run command。实现阶段出现代码后，应把实际验证命令写回 [AGENTS.md](AGENTS.md)。
+当前仓库仍是文档优先状态，还没有 verified build/test/lint/run command。实现阶段出现代码后，应把实际验证命令写回 [AGENTS.md](../AGENTS.md)。
 
 ## 18. 架构会议需要做出的决定
 
