@@ -2,6 +2,7 @@ import type { Clock, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, Sessio
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
+import { WorkerPoolManager } from './worker-pool-manager';
 
 export interface SessionLifecycleReconcileOutcome {
   workerCommands: Array<WorkerCommandOutput<SessionPauseCommandPayload> | WorkerCommandOutput>;
@@ -17,10 +18,12 @@ export class SessionLifecycleReconciler {
     private readonly sessionLifecycleManager: SessionLifecycleManager,
     private readonly eventLogManager: EventLogManager,
     private readonly sessionAssignmentManager: SessionAssignmentManager,
-    private readonly eventTransport: RuntimeEventTransport
+    private readonly eventTransport: RuntimeEventTransport,
+    private readonly workerPoolManager?: WorkerPoolManager
   ) {}
 
   async reconcile(): Promise<SessionLifecycleReconcileOutcome> {
+    await this.workerPoolManager?.reconcile();
     const workerCommands: SessionLifecycleReconcileOutcome['workerCommands'] = [];
     const sessions = await this.storage.readSessions();
     for (const session of sessions) {
@@ -38,6 +41,7 @@ export class SessionLifecycleReconciler {
         }
       }
     }
+    await this.workerPoolManager?.reconcile();
     return { workerCommands };
   }
 

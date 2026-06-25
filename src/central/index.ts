@@ -1,5 +1,5 @@
-export { DockerHostingAdapter, DockerVolumeAdapter, InMemoryRuntimeTransportAdapter, WebPubSubTransportAdapter } from './adapters';
-export type { WebPubSubTransportAdapterOptions } from './adapters';
+export { DockerHostPoolAdapter, DockerVolumeAdapter, InMemoryRuntimeTransportAdapter, WebPubSubTransportAdapter } from './adapters';
+export type { DockerHostPoolAdapterOptions, WebPubSubTransportAdapterOptions } from './adapters';
 export { CentralService } from './central-service';
 export { CentralHttpServer } from './http/central-http-server';
 export { registerPocCentralRoutes } from './http/poc-routes';
@@ -13,10 +13,9 @@ export {
 	RecoveryController,
 	SnapshotController,
 	TenantInboxController,
-	WorkerCapacityScaler,
 	WorkerRuntimeEventController
 } from './controllers';
-export type { VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerHostingAdapter } from './controllers';
+export type { VolumeRestoreAdapter, VolumeSnapshotAdapter } from './controllers';
 export {
 	AgentSpecAdmissionManager,
 	EventLogManager,
@@ -25,9 +24,10 @@ export {
 	SessionLeaseManager,
 	SessionManager,
 	WorkerManager,
+	WorkerPoolManager,
 	WorkerSelector
 } from './managers';
-export type { AcceptInputOutcome, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput } from './managers';
+export type { AcceptInputOutcome, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput, WorkerPoolManagerStatus } from './managers';
 export { POC_AGENT_SPEC } from './registries/poc-class-registry';
 export { StaticAgentSpecRegistry } from './registries/agent-spec-registry';
 export type { AgentSpecRegistry } from './registries/agent-spec-registry';

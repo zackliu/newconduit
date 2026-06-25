@@ -7,6 +7,4 @@ export type { VolumeRestoreAdapter } from './recovery-controller';
 export { SnapshotController } from './snapshot-controller';
 export type { VolumeSnapshotAdapter } from './snapshot-controller';
 export { TenantInboxController } from './tenant-inbox-controller';
-export { WorkerCapacityScaler } from './worker-capacity-scaler';
-export type { WorkerHostingAdapter } from './worker-capacity-scaler';
 export { WorkerRuntimeEventController } from './worker-runtime-event-controller';

@@ -1,4 +1,5 @@
-import { SystemClock, type Clock, type RequestContext, type RuntimeConnectionGrant, type RuntimeEventTransport, type RuntimeStorage, type TenantConnectionIssuer, type TenantContext, type WorkerRegisterPayload } from '../shared';
+import { SystemClock, type Clock, type RequestContext, type RuntimeConnectionGrant, type RuntimeEventTransport, type RuntimeStorage, type TenantConnectionIssuer, type TenantContext, type WorkerPoolRecord, type WorkerRegisterPayload } from '../shared';
+import type { HostPoolAdapter, WorkerPoolManagerStatus } from './managers';
 import { StaticAgentSpecRegistry, type AgentSpecRegistry } from './registries/agent-spec-registry';
 import { POC_AGENT_SPEC } from './registries/poc-class-registry';
 import { LocalFileStorage } from './storage/local-file-storage';
@@ -11,6 +12,8 @@ export interface CentralServiceOptions {
   clock?: Clock;
   tenant?: TenantContext;
   agentSpecRegistry?: AgentSpecRegistry;
+  workerPools?: WorkerPoolRecord[];
+  hostPoolAdapters?: Record<string, HostPoolAdapter>;
 }
 
 export class CentralService {
@@ -30,7 +33,9 @@ export class CentralService {
       eventTransport: options.eventTransport,
       connectionIssuer: options.connectionIssuer,
       clock,
-      agentSpecRegistry: options.agentSpecRegistry ?? new StaticAgentSpecRegistry([POC_AGENT_SPEC])
+      agentSpecRegistry: options.agentSpecRegistry ?? new StaticAgentSpecRegistry([POC_AGENT_SPEC]),
+      workerPools: options.workerPools,
+      hostPoolAdapters: options.hostPoolAdapters
     });
     this.tenantRuntimes.set(tenant.tenantId, tenantRuntime);
   }
@@ -49,6 +54,10 @@ export class CentralService {
 
   async reconcileSessionsForTenant(tenantId: string | null): Promise<void> {
     await this.resolveTenantRuntime(tenantId, 'session reconcile').reconcileSessions();
+  }
+
+  async describeWorkerPoolsForTenant(tenantId: string | null): Promise<WorkerPoolManagerStatus> {
+    return await this.resolveTenantRuntime(tenantId, 'worker pool status').describeWorkerPools();
   }
 
   private resolveTenantRuntime(tenantId: string | null, operation: string): TenantRuntime {

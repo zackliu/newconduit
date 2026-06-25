@@ -42,8 +42,13 @@ export type {
 	WorkerCondition,
 	WorkerCommandRejectedPayload,
 	WorkerHeartbeatPayload,
+	HostPoolControllerClass,
+	HostPoolInstanceRecord,
+	HostPoolInstanceState,
 	WorkerIdentityPayload,
 	WorkerLifecycleState,
+	WorkerPoolRecord,
+	WorkerPoolScalePolicy,
 	WorkerRecord,
 	WorkerRegisterPayload,
 	WorkspaceSnapshot

@@ -1,5 +1,6 @@
 export const POC_RUNTIME_HTTP_PATHS = {
   health: '/health',
+  runtimeStatus: '/runtime/status',
   clientNegotiate: '/client/negotiate',
   sidecarNegotiate: '/sidecar/negotiate'
 } as const;

@@ -1,4 +1,4 @@
-import type { RuntimeEvent, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../models';
+import type { HostPoolInstanceRecord, RuntimeEvent, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../models';
 
 export interface RuntimeStorage {
   writeSession(session: SessionRecord): Promise<void>;
@@ -9,6 +9,9 @@ export interface RuntimeStorage {
   writeWorker(worker: WorkerRecord): Promise<void>;
   readWorker(workerId: string): Promise<WorkerRecord | undefined>;
   readWorkers(): Promise<WorkerRecord[]>;
+  writeHostPoolInstance(instance: HostPoolInstanceRecord): Promise<void>;
+  readHostPoolInstance(instanceId: string): Promise<HostPoolInstanceRecord | undefined>;
+  readHostPoolInstances(): Promise<HostPoolInstanceRecord[]>;
   writeSnapshot(snapshot: WorkspaceSnapshot): Promise<void>;
   readSnapshot(sessionId: string, snapshotId: string): Promise<WorkspaceSnapshot | undefined>;
 }

@@ -9,4 +9,6 @@ export { SessionManager } from './session-manager';
 export type { AcceptInputOutcome, StartSessionOutcome } from './session-manager';
 export { SessionLeaseManager } from './worker-lease-manager';
 export { WorkerManager } from './worker-manager';
+export { WorkerPoolManager } from './worker-pool-manager';
+export type { HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, WorkerPoolManagerStatus } from './worker-pool-manager';
 export { WorkerSelector } from './worker-selector';

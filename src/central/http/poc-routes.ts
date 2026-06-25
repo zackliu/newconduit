@@ -25,6 +25,22 @@ export function registerPocCentralRoutes(server: CentralHttpServer, centralServi
     body: { status: 'ok' }
   }));
 
+  server.registerRoute('GET', POC_RUNTIME_HTTP_PATHS.runtimeStatus, async (request) => {
+    const url = new URL(request.url ?? '/', 'http://localhost');
+    const tenantId = url.searchParams.get(POC_RUNTIME_HTTP_QUERY.tenantId);
+    try {
+      return {
+        statusCode: 200,
+        body: await centralService.describeWorkerPoolsForTenant(tenantId)
+      };
+    } catch (error) {
+      return {
+        statusCode: 400,
+        body: { error: error instanceof Error ? error.message : 'invalid runtime status request' }
+      };
+    }
+  });
+
   server.registerRoute('POST', POC_RUNTIME_HTTP_PATHS.clientNegotiate, async (request) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const tenantId = url.searchParams.get(POC_RUNTIME_HTTP_QUERY.tenantId);

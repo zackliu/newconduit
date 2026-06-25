@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-tests
+sdk/dist
+sdk/dist-es
+sdk/dist-tests
+samples/*/node_modules
+samples/*/dist
+.runtime-poc
+.git
+copilot-state-path
+workspace-path

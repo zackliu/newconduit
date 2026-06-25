@@ -20,14 +20,14 @@ All implementation code lives in `src/`.
 ```text
 src/
   shared/
-    models/       # AgentSpec, Session, Worker, Event, Snapshot, Audit
+    models/       # AgentSpec, Session, Worker, WorkerPool, Event, Snapshot, Audit
     contracts/    # Generic controller/storage/transport contracts
   central/
     registries/   # POC predefined class/profile registry
     storage/      # Central local file storage
     controllers/  # Protocol-facing replaceable ingress controllers
     managers/     # Tenant-owned runtime workflows and state mechanisms
-    adapters/     # Web PubSub, Docker hosting, Docker volume adapters
+    adapters/     # Web PubSub, Docker host pool, Docker volume adapters
   sidecar/
     controllers/  # Worker registration, heartbeat, lease command handling
     adapters/     # Copilot process wrapper, Docker workspace, Web PubSub client
@@ -66,18 +66,23 @@ WEBPUBSUB_HUB=agentruntimepoc
 
 It uses `DefaultAzureCredential`, so run `az login` before enabling that test locally. The code does not use Web PubSub connection strings.
 
-Start the central framework entrypoint:
+Start the central framework entrypoint. Docker Desktop must be running for the default WorkerPool path because central now scales sidecar containers itself:
 
 ```powershell
 $env:WEBPUBSUB_ENDPOINT="https://<your-web-pubsub-name>.webpubsub.azure.com"
 $env:WEBPUBSUB_HUB="agentruntimepoc"
 $env:TENANT_ID="poc"
+$env:COPILOT_MODEL="<model-name>"
+$env:COPILOT_PROVIDER_TYPE="openai"
+$env:COPILOT_PROVIDER_BASE_URL="https://<provider-endpoint>"
 pnpm start:central
 ```
 
-`WEBPUBSUB_ENDPOINT` is required. `WEBPUBSUB_HUB` defaults to `agentruntimepoc`, `TENANT_ID` defaults to `poc`, `CENTRAL_PORT` defaults to `3000`, and `RUNTIME_STORAGE_ROOT` defaults to `.runtime-poc/tenants/<tenantId>`. The current server exposes `/health`, `/client/negotiate`, and `/sidecar/negotiate`; it does not create a session on startup.
+`WEBPUBSUB_ENDPOINT` is required. `WEBPUBSUB_HUB` defaults to `agentruntimepoc`, `TENANT_ID` defaults to `poc`, `CENTRAL_PORT` defaults to `3000`, and `RUNTIME_STORAGE_ROOT` defaults to `.runtime-poc/tenants/<tenantId>`. `CENTRAL_URL_FOR_WORKERS` defaults to `http://host.docker.internal:<CENTRAL_PORT>` so Docker sidecars can call central from inside the container. The current server exposes `/health`, `/runtime/status`, `/client/negotiate`, and `/sidecar/negotiate`; it does not create a session on startup.
 
-Start the sidecar framework entrypoint:
+By default, no standalone sidecar terminal is needed. When a queued session has no matching ready Worker, the tenant WorkerPool calls the Docker hostPoolAdapter, starts `containers/sidecar/Dockerfile`, mounts the host Azure CLI profile into `/home/sidecar/.azure`, and the containerized sidecar registers through `/sidecar/negotiate`.
+
+The standalone sidecar entrypoint remains a development wedge for earlier lifecycle tests:
 
 ```powershell
 $env:CENTRAL_URL="http://localhost:3000"
@@ -105,6 +110,8 @@ Optional provider knobs are `COPILOT_PROVIDER_TOKEN_SCOPE` (defaults to `https:/
 - `AgentSpec`: describes the Copilot POC agent and references predefined POC class/profile values.
 - `SessionRecord`: durable session identity and lifecycle state owned by central.
 - `WorkerRecord`: registered Docker-backed compute capacity created by sidecar registration.
+- `WorkerPoolRecord`: tenant-scoped capacity configuration that can scale out Workers through a hostPoolAdapter.
+- `HostPoolInstanceRecord`: adapter-owned host instance metadata that relates Docker container ids to registered Worker ids without entering Worker selection.
 - `RuntimeEvent`: append-only runtime fact used for routing and replay.
 - `WorkspaceSnapshot`: metadata for a snapshot boundary containing the workspace volume and Copilot session volume.
 - `CentralService`: central-facing runtime orchestration entrypoint.
@@ -117,13 +124,13 @@ Use this rule when adding files: controllers represent replaceable protocol or i
 | Category | Use it for | Examples |
 | --- | --- | --- |
 | Controller | Translates an external protocol or ingress shape into tenant-internal commands. It is replaceable when the ingress protocol changes. | `TenantInboxController`, `ClientRuntimeEventController`, `WorkerRuntimeEventController` |
-| Manager | Owns a tenant-internal workflow, state transition, sequence, assignment, lease, event log, or registry mechanism. It does not represent a replaceable protocol boundary. | `SessionManager`, `SessionLifecycleManager`, `SessionAssignmentManager`, `SessionLeaseManager`, `WorkerManager`, `EventLogManager` |
+| Manager | Owns a tenant-internal workflow, state transition, sequence, assignment, lease, event log, capacity scale loop, or registry mechanism. It does not represent a replaceable protocol boundary. | `SessionManager`, `SessionLifecycleManager`, `SessionAssignmentManager`, `SessionLeaseManager`, `WorkerManager`, `WorkerPoolManager`, `EventLogManager` |
 | Policy/selector | Makes a pure selection or policy decision without owning protocol ingress or durable state writes. | `WorkerSelector` |
-| Adapter | Connects a controller decision to a concrete implementation such as Web PubSub, Docker, local files, or the Copilot process. | `WebPubSubTransportAdapter`, `DockerHostingAdapter`, `DockerVolumeAdapter`, `CopilotProcessAdapter` |
+| Adapter | Connects a manager/controller decision to a concrete implementation such as Web PubSub, Docker, local files, or the Copilot process. | `WebPubSubTransportAdapter`, `DockerHostPoolAdapter`, `DockerVolumeAdapter`, `CopilotProcessAdapter` |
 | Model | Defines the shape of durable resources and public contracts. | `SessionRecord`, `WorkerRecord`, `AgentSpec`, `RuntimeEvent` |
 | Registry/Profile | Provides predefined POC class/profile configuration without advancing runtime state. | `POC_AGENT_SPEC`, POC class/profile registry |
 
-For example, `ClientRuntimeEventController` is a controller because it accepts Web PubSub runtime events and translates them into session commands. `SessionManager` is a manager because it owns the create/input workflow and coordinates session lifecycle, event log, turn sequence, and assignment managers. `WorkerSelector` is a selector because it only chooses a compatible Worker from facts it is given. `DockerHostingAdapter` is an adapter because it only performs the POC-specific act of starting a sidecar container.
+For example, `ClientRuntimeEventController` is a controller because it accepts Web PubSub runtime events and translates them into session commands. `SessionManager` is a manager because it owns the create/input workflow and coordinates session lifecycle, event log, turn sequence, and assignment managers. `WorkerPoolManager` is a manager because it owns the tenant capacity scale loop and host instance metadata. `WorkerSelector` is a selector because it only chooses a compatible Worker from facts it is given. `DockerHostPoolAdapter` is an adapter because it performs Docker build/run/stop operations for WorkerPool decisions.
 
 The same boundary applies to pause and resume. A protocol controller should translate `session.pause.requested` or `session.resume.requested` into a tenant-internal command. Managers decide the lifecycle, lease, snapshot, recovery, and event-log effects. `DockerVolumeAdapter` performs the actual copy and restore of Docker volumes. `WebPubSubTransportAdapter` is also an adapter: Web PubSub is the POC transport, not the owner of session lifecycle or event truth.
 
@@ -153,5 +160,17 @@ pnpm install
 pnpm build
 pnpm test
 ```
+
+Docker WorkerPool validation is opt-in because it builds a Linux sidecar image and starts real containers:
+
+```powershell
+$env:RUN_DOCKER_WORKERPOOL_E2E='1'
+node -e "require('fs').rmSync('dist-tests', { recursive: true, force: true })"
+pnpm exec tsc -p tsconfig.test.json
+node --test dist-tests/tests/workerpool/docker-sidecar-image.integration.test.js
+node --test dist-tests/tests/workerpool/docker-workerpool.integration.test.js
+```
+
+Those tests require Docker Desktop, `az login`, `tests/.env` Web PubSub settings, and Copilot provider env. They verify mounted Azure CLI auth inside the Ubuntu sidecar image, Docker WorkerPool scale-out, sidecar registration, SDK session routing, one agent turn, pause, and scale-in.
 
 After these commands are verified locally, keep this README and `AGENTS.md` in sync with any command changes.

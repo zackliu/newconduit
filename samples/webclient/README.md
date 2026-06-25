@@ -1,6 +1,6 @@
 # Agent Runtime Sidecar Web Client Sample
 
-This sample is a small browser application that demonstrates the project shape: an application talks to durable agent sessions through the customer SDK, while central routes work to a registered sidecar worker.
+This sample is a small browser application that demonstrates the project shape: an application talks to durable agent sessions through the customer SDK, while central scales Docker WorkerPool capacity and routes work to the sidecar worker that registers from that container.
 
 The app intentionally imports only `@agent-runtime-sidecar/sdk`. It does not import central, sidecar, storage, or shared runtime implementation code.
 
@@ -12,6 +12,7 @@ The app intentionally imports only `@agent-runtime-sidecar/sdk`. It does not imp
 - Agent responses in the main thread.
 - Agent progress/internal runtime events in the grey event rail.
 - The AgentSpec requested by the sample (`copilot-poc`) and its worker selector.
+- Docker WorkerPool, host instance, and worker capacity state from central diagnostics.
 
 ## Prerequisites
 
@@ -28,6 +29,8 @@ Authenticate to Azure for Web PubSub:
 ```powershell
 az login
 ```
+
+Docker Desktop must be running. The POC Docker WorkerPool mounts the local Azure CLI profile into sidecar containers so Azure Identity can use the same `az login` session during local development.
 
 Set runtime environment variables for central and the Copilot SDK agent provider. The Web PubSub values below match the POC test environment in `tests/.env`.
 
@@ -61,28 +64,11 @@ pnpm start:central
 ```
 
 Central listens on `http://localhost:3000` and owns session truth, event logs, worker registry, and routing.
-
-## Start A Standalone Sidecar Worker
-
-In terminal 2, from the repository root:
-
-```powershell
-$env:COPILOT_MODEL = "gpt-5.4-mini"
-$env:COPILOT_PROVIDER_TYPE = "openai"
-$env:COPILOT_PROVIDER_BASE_URL = "https://pmagent2.services.ai.azure.com/openai/v1"
-$env:CENTRAL_URL = "http://localhost:3000"
-$env:TENANT_ID = "poc"
-$env:SIDECAR_ID = "sample-sidecar"
-pnpm start:sidecar
-```
-
-The sidecar does not need the Web PubSub endpoint or hub. It only talks to central, registers as a worker during `/sidecar/negotiate`, receives its central-assigned `workerId` in the negotiate response, subscribes to worker commands, and starts agent work when sessions are assigned.
-
-`TENANT_ID` defaults to `poc` in this POC. Set it only when running a non-default tenant. Once central owns worker registration and tenant discovery, standalone worker startup should collapse fully to `CENTRAL_URL` plus worker labels/capacity/config.
+It also owns the POC Docker WorkerPool. When the sample creates a queued session and no matching ready Worker exists, central calls the Docker hostPoolAdapter, starts a sidecar container from `containers/sidecar/Dockerfile`, and the sidecar registers through `/sidecar/negotiate` like any other Worker.
 
 ## Start The Web Client
 
-In terminal 3, from the repository root:
+In terminal 2, from the repository root:
 
 ```powershell
 pnpm --dir samples/webclient dev
@@ -101,7 +87,7 @@ Central URL: http://localhost:3000
 Tenant: poc
 ```
 
-Click `Connect`, start a session, then send messages. The main transcript shows user/assistant messages. The grey event rail shows turn starts, progress events, tool events, approval events, and final turn completion as surfaced by the SDK.
+Click `Connect`, start a session, then watch the WorkerPool panel move from waiting to pending/ready as central scales a Docker sidecar. The main transcript shows user/assistant messages. The event rail shows turn starts, progress events, tool events, approval events, and final turn completion as surfaced by the SDK.
 
 ## Build The Sample
 

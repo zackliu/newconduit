@@ -7,3 +7,4 @@ export type { WorkspaceSnapshot } from './snapshot';
 export { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from './worker';
 export type { WorkerCondition, WorkerHeartbeatPayload, WorkerIdentityPayload, WorkerLifecycleState, WorkerRecord, WorkerRegisterPayload } from './worker';
 export type { SidecarClass } from './worker';
+export type { HostPoolControllerClass, HostPoolInstanceRecord, HostPoolInstanceState, WorkerPoolRecord, WorkerPoolScalePolicy } from './worker-pool';

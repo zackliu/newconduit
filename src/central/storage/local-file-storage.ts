@@ -1,6 +1,6 @@
 import { appendFile, cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { RuntimeEvent, RuntimeStorage, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../../shared';
+import type { HostPoolInstanceRecord, RuntimeEvent, RuntimeStorage, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../../shared';
 
 export class LocalFileStorage implements RuntimeStorage {
   constructor(private readonly root: string) {}
@@ -62,6 +62,28 @@ export class LocalFileStorage implements RuntimeStorage {
       const files = await readdir(directory);
       const workers = await Promise.all(files.filter((file) => file.endsWith('.json')).map((file) => this.readJson<WorkerRecord>(join(directory, file))));
       return workers.filter((worker): worker is WorkerRecord => worker !== undefined);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async writeHostPoolInstance(instance: HostPoolInstanceRecord): Promise<void> {
+    await this.writeJson(join(this.root, 'host-pool-instances', `${instance.instanceId}.json`), instance);
+  }
+
+  async readHostPoolInstance(instanceId: string): Promise<HostPoolInstanceRecord | undefined> {
+    return this.readJson(join(this.root, 'host-pool-instances', `${instanceId}.json`));
+  }
+
+  async readHostPoolInstances(): Promise<HostPoolInstanceRecord[]> {
+    const directory = join(this.root, 'host-pool-instances');
+    try {
+      const files = await readdir(directory);
+      const instances = await Promise.all(files.filter((file) => file.endsWith('.json')).map((file) => this.readJson<HostPoolInstanceRecord>(join(directory, file))));
+      return instances.filter((instance): instance is HostPoolInstanceRecord => instance !== undefined);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];

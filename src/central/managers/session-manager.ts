@@ -83,6 +83,11 @@ export class SessionManager {
     });
     const queuedSession = await this.sessionLifecycleManager.transitionAfterEvent(session, 'queued', event.sequence, event.timestamp, 'waiting-for-worker');
     const assignment = await this.sessionAssignmentManager.assignReadyWorker(queuedSession);
+    if (!assignment.workerCommand) {
+      void this.sessionLifecycleReconciler?.reconcile().catch((error: unknown) => {
+        console.error('session lifecycle reconcile after create failed', error);
+      });
+    }
     return {
       session: assignment.session,
       sessionCreatedEvent: event,

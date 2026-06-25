@@ -5,7 +5,7 @@ export {
 	CentralHttpServer,
 	CentralService,
 	ClientRuntimeEventController,
-	DockerHostingAdapter,
+	DockerHostPoolAdapter,
 	DockerVolumeAdapter,
 	EventLogManager,
 	InMemoryRuntimeTransportAdapter,
@@ -20,14 +20,14 @@ export {
 	TenantInboxController,
 	TenantRuntime,
 	WebPubSubTransportAdapter,
-	WorkerCapacityScaler,
 	SessionLeaseManager,
 	WorkerManager,
+	WorkerPoolManager,
 	WorkerRuntimeEventController,
 	WorkerSelector
 } from './central';
 export type { CentralHttpRouteHandler, CentralHttpServerOptions, JsonResponse } from './central';
-export type { AcceptInputOutcome, SessionAssignmentOutcome, StartSessionOutcome, TenantRuntimeOptions, VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerCommandOutput, WorkerHostingAdapter } from './central';
+export type { AcceptInputOutcome, DockerHostPoolAdapterOptions, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, TenantRuntimeOptions, VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerCommandOutput, WorkerPoolManagerStatus } from './central';
 export { SystemClock } from './shared';
 export type {
 	AgentSpec,
@@ -54,6 +54,11 @@ export type {
 	TenantConnectionIssuer,
 	TenantContext,
 	WorkerCondition,
+	HostPoolControllerClass,
+	HostPoolInstanceRecord,
+	HostPoolInstanceState,
+	WorkerPoolRecord,
+	WorkerPoolScalePolicy,
 	WorkerRecord,
 	WorkspaceSnapshot
 } from './shared';
