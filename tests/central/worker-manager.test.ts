@@ -42,6 +42,7 @@ test('scenario: standalone sidecar registers worker and becomes ready after firs
       allocatable: 1,
       conditions: ['ready']
     });
+    assert.ok(ready);
     assert.equal(ready.lifecycleState, 'active');
     assert.deepEqual(ready.conditions, ['ready']);
     assert.equal(selectWorker(ready)?.workerId, ready.workerId);
@@ -66,6 +67,7 @@ test('scenario: worker heartbeat refreshes active capacity', async () => {
       allocatable: 2,
       conditions: ['ready']
     });
+    assert.ok(updated);
 
     assert.equal(updated.heartbeatAt, '2026-06-24T00:00:10.000Z');
     assert.equal(updated.expiresAt, '2026-06-24T00:00:40.000Z');
@@ -225,6 +227,7 @@ test('scenario: stale heartbeat cannot resurrect terminal worker', async () => {
       allocatable: 1,
       conditions: ['ready']
     });
+    assert.ok(result);
 
     assert.equal(result.lifecycleState, 'closed');
     assert.equal(selectWorker(result), undefined);
@@ -234,6 +237,26 @@ test('scenario: stale heartbeat cannot resurrect terminal worker', async () => {
 
     const events = await readWorkerEvents(root, worker.workerId);
     assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.heartbeat', 'worker.closed', 'worker.heartbeat.rejected']);
+  });
+});
+
+test('scenario: unknown worker heartbeat is rejected without creating worker record', async () => {
+  await withStorage(async ({ storage, root, clock }) => {
+    const manager = new WorkerManager(storage, clock, 30_000);
+
+    const result = await manager.heartbeat({
+      workerId: 'missing-worker',
+      capacity: 1,
+      allocatable: 1,
+      conditions: ['ready']
+    });
+
+    assert.equal(result, undefined);
+    assert.equal(await storage.readWorker('missing-worker'), undefined);
+
+    const events = await readWorkerEvents(root, 'missing-worker');
+    assert.deepEqual(events.map((event) => event.type), ['worker.heartbeat.rejected']);
+    assert.deepEqual(events[0].payload, { reason: 'unknown-worker' });
   });
 });
 
@@ -247,6 +270,7 @@ test('scenario: new worker registration creates a separate active worker lifetim
 
     const second = await registerWorker(manager);
     const secondReady = await manager.heartbeat({ workerId: second.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    assert.ok(secondReady);
 
     const retired = await storage.readWorker(first.workerId);
     assert.equal(retired?.lifecycleState, 'active');
@@ -299,6 +323,7 @@ async function writeLeasedSession(storage: LocalFileStorage, worker: WorkerRecor
     eventCursor: 0,
     nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
+    lastEventUpdatedAt: now,
     createdAt: now,
     updatedAt: now
   };
@@ -319,6 +344,7 @@ async function writeStartingSessionWithInitialTurn(storage: LocalFileStorage, wo
     eventCursor: 1,
     nextTurnSeq: 2,
     workspaceRef: 'workspace-volume',
+    lastEventUpdatedAt: now,
     createdAt: now,
     updatedAt: now
   };
@@ -349,6 +375,7 @@ function selectWorker(worker: WorkerRecord): WorkerRecord | undefined {
     eventCursor: 0,
     nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
+    lastEventUpdatedAt: now,
     createdAt: now,
     updatedAt: now
   };

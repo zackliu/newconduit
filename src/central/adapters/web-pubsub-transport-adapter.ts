@@ -88,7 +88,13 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
   private async dispatchGroupMessage(args: OnGroupDataMessageArgs): Promise<void> {
     const event = this.parseRuntimeEvent(args.message.data);
     const context = this.contextFromGroupMessage(args);
-    await Promise.all((this.handlers.get(args.message.group) ?? []).map((handler) => handler({ event, context })));
+    await Promise.all((this.handlers.get(args.message.group) ?? []).map(async (handler) => {
+      try {
+        await handler({ event, context });
+      } catch (error) {
+        console.error('central runtime event handler failed', error);
+      }
+    }));
   }
 
   private parseRuntimeEvent(data: unknown): RuntimeEvent {

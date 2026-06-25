@@ -39,5 +39,6 @@ export type SidecarAgentProcessEventHandler = (event: SidecarAgentProcessEvent) 
 export interface SidecarAgentProcessAdapter {
   start(input: SidecarAgentProcessStartInput): Promise<void>;
   send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<void>;
+  pauseAtTurnBoundary?(input: { sessionId: string }): Promise<void>;
   stop?(input: { sessionId: string }): Promise<void>;
 }

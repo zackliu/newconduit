@@ -185,21 +185,16 @@ export class AgentRuntimeClient {
 
   async readSessionEvents(input: { sessionId: string; afterSequence?: number }): Promise<SdkRuntimeEvent[]> {
     const ackId = crypto.randomUUID();
-    const waiter = await this.createSessionAcknowledgementWaiter(input.sessionId, ackId, 'session.events.replayed');
-    let replayed: SdkRuntimeEvent;
-    try {
-      await this.publishTenantEvent({
-        type: 'session.events.requested',
-        sessionId: input.sessionId,
-        ackId,
-        payload: {
-          afterSequence: input.afterSequence ?? 0
-        }
-      });
-      replayed = await waiter.acknowledgement;
-    } finally {
-      await waiter.close();
-    }
+    const acknowledgement = this.waitForAcknowledgement(ackId, 'session.events.replayed');
+    await this.publishTenantEvent({
+      type: 'session.events.requested',
+      sessionId: input.sessionId,
+      ackId,
+      payload: {
+        afterSequence: input.afterSequence ?? 0
+      }
+    });
+    const replayed = await acknowledgement;
     if (replayed.sessionId !== input.sessionId) {
       throw new Error('session.events.replayed acknowledgement returned the wrong sessionId');
     }
@@ -208,40 +203,6 @@ export class AgentRuntimeClient {
       throw new Error('central returned invalid session events');
     }
     return payload.events.map((event) => this.parseEvent(event));
-  }
-
-  async createSessionAcknowledgementWaiter(sessionId: string, ackId: string, expectedType: SdkRuntimeEventType): Promise<{ acknowledgement: Promise<SdkRuntimeEvent>; close(): Promise<void> }> {
-    let timeout: NodeJS.Timeout;
-    let settled = false;
-    let resolveAcknowledgement!: (event: SdkRuntimeEvent) => void;
-    let rejectAcknowledgement!: (error: Error) => void;
-    const acknowledgement = new Promise<SdkRuntimeEvent>((resolve, reject) => {
-      resolveAcknowledgement = resolve;
-      rejectAcknowledgement = reject;
-      timeout = setTimeout(() => {
-        settled = true;
-        reject(new Error(`timed out waiting for ${expectedType} session acknowledgement`));
-      }, ACK_TIMEOUT_MS);
-    });
-    const subscription = await this.subscribeSessionEvents({ sessionId }, (event) => {
-      if (event.ackId !== ackId || settled) {
-        return;
-      }
-      clearTimeout(timeout);
-      settled = true;
-      if (event.type !== expectedType) {
-        rejectAcknowledgement(new Error(`expected ${expectedType} session acknowledgement but received ${event.type}`));
-        return;
-      }
-      resolveAcknowledgement(event);
-    });
-    return {
-      acknowledgement,
-      close: async () => {
-        clearTimeout(timeout);
-        await subscription.close();
-      }
-    };
   }
 
   private async negotiate(): Promise<RuntimeConnectionGrant> {

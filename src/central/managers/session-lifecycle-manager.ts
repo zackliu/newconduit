@@ -17,6 +17,7 @@ export class SessionLifecycleManager {
       eventCursor: 0,
       nextTurnSeq: input.nextTurnSeq,
       workspaceRef: input.workspaceRef,
+      lastEventUpdatedAt: now,
       createdAt: now,
       updatedAt: now
     };
@@ -30,6 +31,27 @@ export class SessionLifecycleManager {
     return next;
   }
 
+  async transitionAfterEvent(session: SessionRecord, status: SessionStatus, sequence: number, timestamp: string, reason?: string): Promise<SessionRecord> {
+    const next = { ...session, status, lifecycleReason: reason, eventCursor: sequence, lastEventUpdatedAt: timestamp, updatedAt: this.clock.now() };
+    await this.storage.writeSession(next);
+    return next;
+  }
+
+  async pauseAfterEvent(session: SessionRecord, sequence: number, timestamp: string, reason?: string): Promise<SessionRecord> {
+    const next = {
+      ...session,
+      status: 'paused' as const,
+      currentWorkerId: undefined,
+      sessionLeaseId: undefined,
+      lifecycleReason: reason,
+      eventCursor: sequence,
+      lastEventUpdatedAt: timestamp,
+      updatedAt: this.clock.now()
+    };
+    await this.storage.writeSession(next);
+    return next;
+  }
+
   async allocateNextTurn(session: SessionRecord): Promise<{ session: SessionRecord; turnSeq: number }> {
     const turnSeq = session.nextTurnSeq;
     const next = { ...session, nextTurnSeq: turnSeq + 1, updatedAt: this.clock.now() };
@@ -38,7 +60,8 @@ export class SessionLifecycleManager {
   }
 
   async advanceEventCursor(session: SessionRecord, sequence: number): Promise<SessionRecord> {
-    const next = { ...session, eventCursor: sequence, updatedAt: this.clock.now() };
+    const now = this.clock.now();
+    const next = { ...session, eventCursor: sequence, lastEventUpdatedAt: now, updatedAt: now };
     await this.storage.writeSession(next);
     return next;
   }

@@ -118,6 +118,25 @@ export interface StatusChangedPayload {
   reason?: string;
 }
 
+export interface SessionPauseRequestedPayload {
+  reason?: 'idle_timeout' | 'client_requested';
+}
+
+export interface SessionPausedPayload {
+  reason?: 'idle_timeout' | 'client_requested';
+}
+
+export interface SessionResumeRequestedPayload {
+  reason?: 'client_requested';
+}
+
+export interface SessionPauseCommandPayload {
+  sessionId: string;
+  workerId: string;
+  sessionLeaseId: string;
+  reason?: 'idle_timeout' | 'client_requested';
+}
+
 export interface WorkerCommandRejectedPayload {
   reason: 'stale_session_lease' | 'unknown_session' | 'agent_not_running';
   expectedSessionLeaseId?: string;

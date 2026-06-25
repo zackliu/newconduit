@@ -47,6 +47,10 @@ export class CentralService {
     return this.resolveTenantRuntime(tenantId, 'sidecar negotiate').negotiateSidecarConnection(context, registration);
   }
 
+  async reconcileSessionsForTenant(tenantId: string | null): Promise<void> {
+    await this.resolveTenantRuntime(tenantId, 'session reconcile').reconcileSessions();
+  }
+
   private resolveTenantRuntime(tenantId: string | null, operation: string): TenantRuntime {
     if (!tenantId) {
       throw new Error(`tenantId is required for ${operation}`);

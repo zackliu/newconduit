@@ -146,7 +146,7 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     this.sessions.delete(input.sessionId);
   }
 
-  async pauseAtTurnBoundary(): Promise<void> {
+  async pauseAtTurnBoundary(_input: { sessionId: string }): Promise<void> {
     return;
   }
 

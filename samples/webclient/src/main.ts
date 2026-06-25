@@ -39,6 +39,10 @@ render();
 function render(): void {
   const activeSession = getActiveSessionSummary();
   const canSend = Boolean(state.currentSession && activeSession?.status === 'running' && !state.pending);
+  const canPause = Boolean(state.currentSession && activeSession?.status === 'running' && !state.pending);
+  const canResume = Boolean(state.currentSession && activeSession?.status === 'paused' && !state.pending);
+  const canRefresh = Boolean(state.currentSession && state.connectionState === 'connected' && !state.pending);
+  const statusText = activeSession?.status ?? (state.pending ? 'working' : 'idle');
   appRoot.innerHTML = `
     <main class="shell">
       <aside class="rail">
@@ -93,8 +97,15 @@ function render(): void {
             <span class="eyebrow">Durable Session</span>
             <h2>${state.currentSession ? escapeHtml(shortId(state.currentSession.id)) : 'No active session'}</h2>
           </div>
-          <span class="statusPill ${state.pending ? 'busy' : ''}">${state.pending ? 'running' : escapeHtml(activeSession?.status ?? 'idle')}</span>
+          <div class="sessionActions">
+            ${canRefresh ? '<button id="refreshSessionButton" class="secondaryButton">Refresh</button>' : ''}
+            ${canPause ? '<button id="pauseSessionButton" class="secondaryButton">Pause</button>' : ''}
+            ${canResume ? '<button id="resumeSessionButton" class="secondaryButton">Resume</button>' : ''}
+            <span class="statusPill ${state.pending ? 'busy' : ''}">${escapeHtml(statusText)}</span>
+          </div>
         </header>
+
+        ${state.currentSession ? renderLifecycle(activeSession?.status ?? 'idle') : ''}
 
         <div class="chatBody" id="chatBody">
           <div class="messageStack" id="messageStack">
@@ -128,6 +139,15 @@ function wireEvents(): void {
   });
   document.querySelector<HTMLButtonElement>('#newSessionButton')?.addEventListener('click', () => {
     void startSession();
+  });
+  document.querySelector<HTMLButtonElement>('#resumeSessionButton')?.addEventListener('click', () => {
+    void resumeSession();
+  });
+  document.querySelector<HTMLButtonElement>('#pauseSessionButton')?.addEventListener('click', () => {
+    void pauseSession();
+  });
+  document.querySelector<HTMLButtonElement>('#refreshSessionButton')?.addEventListener('click', () => {
+    void refreshActiveSession();
   });
   document.querySelectorAll<HTMLButtonElement>('.sessionItem').forEach((button) => {
     button.addEventListener('click', () => {
@@ -184,6 +204,7 @@ async function connect(): Promise<void> {
       if (event.type !== 'session.catalog.updated' && event.type !== 'session.status.updated') {
         return;
       }
+      recordClientProjection(event);
       void refreshSessions().then(() => render()).catch((error: unknown) => {
         state.error = error instanceof Error ? error.message : String(error);
         render();
@@ -229,6 +250,7 @@ async function startSession(): Promise<void> {
     state.currentSession = result.session;
     await refreshSessions();
     state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: result.turn.sequence, label: 'session.created', detail: `turn ${result.turn.sequence}` });
+    appendLifecycleTrace('status.queued', result.session.id);
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
   } finally {
@@ -242,6 +264,7 @@ async function openSession(sessionId: string): Promise<void> {
   state.currentSession = await state.client!.sessions.open(sessionId);
   const history = await state.currentSession.history(0);
   restoreViewFromHistory(history);
+  appendLifecycleTrace('history.opened', sessionId);
   await refreshSessions();
   render();
 }
@@ -275,12 +298,84 @@ async function sendMessage(text: string): Promise<void> {
   }
 }
 
+async function resumeSession(): Promise<void> {
+  if (!state.currentSession) {
+    return;
+  }
+  state.pending = true;
+  state.error = '';
+  render();
+  try {
+    appendLifecycleTrace('resume.requested', state.currentSession.id);
+    await state.currentSession.resume();
+    await waitForActiveSessionStatus(['queued', 'starting', 'running'], 15_000);
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.pending = false;
+    render();
+  }
+}
+
+async function pauseSession(): Promise<void> {
+  if (!state.currentSession) {
+    return;
+  }
+  state.pending = true;
+  state.error = '';
+  render();
+  try {
+    appendLifecycleTrace('pause.requested', state.currentSession.id);
+    await state.currentSession.pause();
+    await waitForActiveSessionStatus(['pausing', 'paused'], 10_000);
+    await waitForActiveSessionStatus(['paused'], 30_000);
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.pending = false;
+    render();
+  }
+}
+
+async function refreshActiveSession(): Promise<void> {
+  if (!state.currentSession) {
+    return;
+  }
+  state.pending = true;
+  state.error = '';
+  render();
+  try {
+    const sessionId = state.currentSession.id;
+    const history = await state.currentSession.history(0);
+    restoreViewFromHistory(history);
+    await refreshSessions();
+    appendLifecycleTrace('history.refreshed', sessionId);
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.pending = false;
+    render();
+  }
+}
+
 async function refreshSessions(): Promise<void> {
   if (!state.client) {
     state.sessions = [];
     return;
   }
   state.sessions = await state.client.sessions.list();
+}
+
+async function waitForActiveSessionStatus(statuses: string[], timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    await refreshSessions();
+    const activeSession = getActiveSessionSummary();
+    if (activeSession && statuses.includes(activeSession.status)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 }
 
 function getActiveSessionSummary(): SessionSummary | undefined {
@@ -300,6 +395,21 @@ function clearMissingCurrentSession(): void {
   state.currentSession = undefined;
   state.messages = [];
   state.traceEvents = [];
+}
+
+function recordClientProjection(event: SdkRuntimeEvent): void {
+  const payload = toRecord(event.payload);
+  const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : event.sessionId;
+  if (!sessionId || sessionId !== state.currentSession?.id) {
+    return;
+  }
+  const status = typeof payload.status === 'string' ? payload.status : undefined;
+  const reason = typeof payload.reason === 'string' ? payload.reason : undefined;
+  appendLifecycleTrace(event.type, sessionId, [status, reason].filter(Boolean).join(' · '));
+}
+
+function appendLifecycleTrace(label: string, sessionId: string, detail?: string): void {
+  state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: 0, label, detail: detail || shortId(sessionId) });
 }
 
 function applyTurnEvent(event: AgentTurnEvent, setAssistantText: (text: string) => void): void {
@@ -355,10 +465,25 @@ function renderWelcome(): string {
   `;
 }
 
+function renderLifecycle(status: string): string {
+  const steps = ['queued', 'starting', 'running', 'pausing', 'paused'];
+  const activeIndex = steps.indexOf(status);
+  return `
+    <div class="lifecycleStrip" aria-label="Session lifecycle">
+      ${steps.map((step, index) => `
+        <span class="lifecycleStep ${status === step ? 'active' : ''} ${activeIndex > index ? 'done' : ''}">
+          <i></i>${escapeHtml(step)}
+        </span>
+      `).join('')}
+      ${activeIndex === -1 ? `<span class="lifecycleStep active"><i></i>${escapeHtml(status)}</span>` : ''}
+    </div>
+  `;
+}
+
 function restoreViewFromHistory(events: SdkRuntimeEvent[]): void {
   state.messages = [];
   state.traceEvents = [];
-  const assistantByTurn = new Map<number, string>();
+  const assistantMessagesByTurn = new Map<number, ChatMessage>();
   for (const event of events) {
     const payload = toRecord(event.payload);
     if (event.type === 'session.created') {
@@ -387,13 +512,26 @@ function restoreViewFromHistory(events: SdkRuntimeEvent[]): void {
         state.traceEvents.push({ id: `${event.eventId}:internal`, turnSeq, label: internalEvent.type, detail: stringifyBrief(internalEvent.data) });
       }
       if (typeof payload.message === 'string') {
-        assistantByTurn.set(turnSeq, payload.message);
+        upsertAssistantMessage(assistantMessagesByTurn, turnSeq, payload.message);
       }
     }
+    if (event.type === 'session.pause.requested' || event.type === 'session.paused' || event.type === 'session.resume.requested' || event.type === 'session.resumed' || event.type === 'status.changed') {
+      const status = typeof payload.status === 'string' ? payload.status : undefined;
+      const reason = typeof payload.reason === 'string' ? payload.reason : undefined;
+      state.traceEvents.push({ id: `${event.eventId}:lifecycle`, turnSeq: event.turnSeq ?? 0, label: event.type, detail: [status, reason].filter(Boolean).join(' · ') });
+    }
   }
-  for (const [turnSeq, text] of assistantByTurn) {
-    state.messages.push({ id: `assistant:${turnSeq}`, role: 'assistant', text, turnSeq });
+}
+
+function upsertAssistantMessage(assistantMessagesByTurn: Map<number, ChatMessage>, turnSeq: number, text: string): void {
+  const existingMessage = assistantMessagesByTurn.get(turnSeq);
+  if (existingMessage) {
+    existingMessage.text = text;
+    return;
   }
+  const message: ChatMessage = { id: `assistant:${turnSeq}`, role: 'assistant', text, turnSeq };
+  assistantMessagesByTurn.set(turnSeq, message);
+  state.messages.push(message);
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -414,7 +552,7 @@ function renderMessage(message: ChatMessage): string {
 function renderTraceEvent(event: TraceEvent): string {
   return `
     <div class="traceEvent">
-      <span>turn ${event.turnSeq}</span>
+      <span>${event.turnSeq > 0 ? `turn ${event.turnSeq}` : 'session'}</span>
       <strong>${escapeHtml(event.label)}</strong>
       ${event.detail ? `<p>${escapeHtml(event.detail)}</p>` : ''}
     </div>

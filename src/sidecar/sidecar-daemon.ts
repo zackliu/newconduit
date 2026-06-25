@@ -1,4 +1,4 @@
-import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentOutputPayload, type RuntimeConnectionGrant, type RuntimeEvent, type SessionAssignPayload, type SessionInputCommandPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
+import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentOutputPayload, type RuntimeConnectionGrant, type RuntimeEvent, type SessionAssignPayload, type SessionInputCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
 import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter } from './contracts';
 
 export interface StandaloneSidecarStartInput extends WorkerRegisterPayload {
@@ -57,6 +57,9 @@ export class SidecarDaemon {
         return;
       case 'session.input':
         await this.handleInput(event as RuntimeEvent<SessionInputCommandPayload>);
+        return;
+      case 'session.pause.requested':
+        await this.handlePause(event as RuntimeEvent<SessionPauseCommandPayload>);
         return;
       default:
         throw new Error(`unexpected sidecar command: ${event.type}`);
@@ -225,6 +228,31 @@ export class SidecarDaemon {
     });
   }
 
+  private async handlePause(event: RuntimeEvent<SessionPauseCommandPayload>): Promise<void> {
+    const payload = this.parsePausePayload(event.payload);
+    const active = this.activeRuns.get(payload.sessionId);
+    if (!active) {
+      await this.publishCommandRejected(event, 'unknown_session', undefined, payload.sessionLeaseId);
+      return;
+    }
+    if (active.sessionLeaseId !== payload.sessionLeaseId || event.sessionLeaseId !== active.sessionLeaseId) {
+      await this.publishCommandRejected(event, 'stale_session_lease', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
+      return;
+    }
+    await active.ready;
+    await this.options.agentProcessAdapter.pauseAtTurnBoundary?.({ sessionId: payload.sessionId });
+    await this.options.agentProcessAdapter.stop?.({ sessionId: payload.sessionId });
+    this.activeRuns.delete(payload.sessionId);
+    await this.publishTenantEvent<SessionPausedPayload>({
+      type: 'session.paused',
+      sessionId: payload.sessionId,
+      workerId: payload.workerId,
+      sessionLeaseId: payload.sessionLeaseId,
+      payload: { reason: payload.reason }
+    });
+    await this.publishHeartbeat();
+  }
+
   private async publishTurnTerminalEvent(input: SessionInputCommandPayload, output: AgentOutputPayload): Promise<void> {
     if (output.error) {
       await this.publishTenantEvent<TurnFailedPayload>({
@@ -332,5 +360,21 @@ export class SidecarDaemon {
       throw new Error('invalid session.input payload');
     }
     return payload as SessionInputCommandPayload;
+  }
+
+  private parsePausePayload(payload: unknown): SessionPauseCommandPayload {
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('invalid session.pause.requested payload');
+    }
+    const candidate = payload as Partial<SessionPauseCommandPayload>;
+    if (typeof candidate.sessionId !== 'string'
+      || typeof candidate.workerId !== 'string'
+      || typeof candidate.sessionLeaseId !== 'string') {
+      throw new Error('invalid session.pause.requested payload');
+    }
+    if (candidate.reason !== undefined && candidate.reason !== 'idle_timeout' && candidate.reason !== 'client_requested') {
+      throw new Error('invalid session.pause.requested reason');
+    }
+    return payload as SessionPauseCommandPayload;
   }
 }

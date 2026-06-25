@@ -21,10 +21,11 @@
 8. Worker 是注册进 tenant runtime 的可用 capacity。实现计划先用 standalone sidecar direct registration 验证 Worker lifecycle contract，再接入 POC 的 Docker WorkerPool controller/adaptor provisioned registration；注册成功后都进入同一套 Worker registry contract。Standalone path 是验证 wedge，不是新的 hosting model。
 9. Worker selection 只使用 AgentSpec selector 与 Worker record 上的 `sidecarClass`、labels、capacity、conditions；不按 standalone、Docker、WorkerPool source 分叉。
 10. Worker registry 必须区分 active Worker 和历史/tombstone record。只有 active、ready、allocatable 的 Worker 能被 selection；closed、expired、disconnected、draining 且无可分配容量的 Worker 都不能被分配新 session。
-11. 先跑通 standalone sidecar worker、Client SDK create session、assignment、Copilot process-wrapper 和多轮 session event loop，再接入 WorkerPool provisioning 和 WorkerCapacityScaler。
+11. 先跑通 standalone sidecar worker、Client SDK create session、assignment、Copilot process-wrapper、多轮 session event loop、queued session scheduler 和 idle pause policy，再接入 WorkerPool provisioning 和 WorkerCapacityScaler。
 12. Agent session history 由具体 agent adapter 自己的 state files 承载；POC 通过 sidecar-managed agent session state directory/volume 验证 process-wrapper 行为，通过 Docker volume snapshot/restore 保留这些文件。Event cursor、event log 和 snapshot marker 仍由 central-owned storage 表达，sidecar-local metadata 不作为 session truth。
 13. 每个 slice 的测试都用 scenario 名字描述系统结果。
 14. 不为 POC 添加 crash recovery、Kubernetes、完整 auth matrix、非 Web PubSub transport。
+15. Session lifecycle status 与 client connection/subscription 独立。Client connect、open、list、history replay 和 attach session events 不刷新 session activity，也不改变 session status；只有 create、input、resume、pause、agent/status output 等 session-scoped durable events 才刷新 session 的 `lastEventUpdatedAt`。
 
 ## 3. Slice 1：Durable Session Truth
 
@@ -394,7 +395,128 @@ Expect：
 
 Automated scenario test 使用实现同一 `agentProcessAdapter` contract 的 deterministic agent test harness；真实 smoke test 必须启动 GitHub Copilot SDK agent session 并验证同一路径能产生真实回复。测试必须经过 central-owned event log、worker command channel 和 session events channel，不允许使用任何 sidecar-local HTTP/WebSocket 旁路来满足 session 行为。
 
-## 8. Slice 6：Docker WorkerPool Provisioning
+## 8. Slice 6：Queued Session Scheduler And Idle Pause Policy
+
+目标：Central 对 active session 做 tenant-scoped lifecycle reconciliation：queued session 在 activity window 内持续尝试分配 Worker；超过 AgentSpec idle pause timeout 的 queued/running session 进入 paused，并释放 Worker lease。Client 重新打开 session 只读取 history/status，不唤醒 session；只有 client 明确 resume 才把 paused session 放回 queued，重新进入调度路径。
+
+实现范围：
+
+- AgentSpec 增加 `idlePauseTimeoutMs`，由 admission manager 解析为 resolved AgentSpec runtime policy。POC 静态 AgentSpec 默认值是 `60000`。
+- `SessionRecord` 增加 `lastEventUpdatedAt`。`session.created` 写入时初始化该字段；`input.accepted`、`agent.output`、`turn.completed`、`turn.failed`、`status.changed`、`session.pause.requested`、`session.paused`、`session.resume.requested`、`session.resumed` 等 session-scoped durable events 写入后刷新该字段。
+- Client connect、`sessions.open(sessionId)`、`sessions.list()`、`session.history()`、session events subscribe/replay 不刷新 `lastEventUpdatedAt`，也不改变 session status。
+- Tenant runtime 增加 session lifecycle reconciler。Central 周期性运行该 reconciler；Worker register 或 heartbeat 让 Worker 进入 ready selection path 后，central 立即运行同一个 reconciler 一次。
+- Reconciler 扫描当前 tenant 的 session。`queued` 且 `now - lastEventUpdatedAt < idlePauseTimeoutMs` 的 session 进入 assignment workflow；matching ready Worker 存在时写入新的 `sessionLeaseId` 和 `currentWorkerId`，status 变为 `starting`，并 publish `session.assign`。
+- `queued` 且 `now - lastEventUpdatedAt >= idlePauseTimeoutMs` 的 session 进入 `paused`，append `session.paused`，reason 是 `idle_timeout`。Paused session 不会被 reconciler 主动 assignment。
+- `running` 且 `now - lastEventUpdatedAt >= idlePauseTimeoutMs` 的 session 进入 central-initiated pause：central append `session.pause.requested`，reason 是 `idle_timeout`，status 变为 `pausing`，并向当前 Worker publish pause command。Sidecar 在 turn boundary 停止接收新 input、flush agent state，然后 ack pause；central append `session.paused`，清空 `currentWorkerId` 和 `sessionLeaseId`，释放 Worker capacity。Slice 9 再把这个 pause boundary 扩展为 Docker volume snapshot；本 slice 的完成条件是 durable event boundary、status truth 和 worker lease release 正确。
+- `running` session 收到 client `session.pause.requested` 后，central append `session.pause.requested`，reason 是 `client_requested`，status 变为 `pausing`，并向当前 Worker publish pause command。Sidecar ack `session.paused` 后，central 释放 Worker lease，并立即运行同一个 session lifecycle reconciler，让其他 eligible queued session 可以获得刚释放的 Worker。
+- `paused` session 收到 `session.resume.requested` 后，central append `session.resume.requested`，刷新 `lastEventUpdatedAt`，status 变为 `queued`。Resume 本身是 session activity，因此刚 resume 的 session 不会在同一轮 reconciler 中被 idle pause。后续 assignment 与普通 queued session 使用同一路径。
+- Sample web client 显示 paused/queued/running status，在 running session 上提供 Pause action，在 paused session 上提供 Resume action；打开历史不触发 resume。
+
+Scenario-based test：`scenario: queued session is assigned when matching worker becomes ready`
+
+Given：
+
+- Session status 是 `queued`。
+- Session `lastEventUpdatedAt` 距当前时间小于 resolved AgentSpec `idlePauseTimeoutMs`。
+- 创建 session 时没有 matching ready Worker。
+- 随后 standalone sidecar 通过 `/sidecar/negotiate` 注册，并 publish 首个 ready heartbeat。
+
+Expect：
+
+- Worker heartbeat 写入 active ready Worker record。
+- Session lifecycle reconciler 选择该 Worker。
+- Central 写入新的 `sessionLeaseId` 和 `currentWorkerId`。
+- Session status 变为 `starting`。
+- Central publish `session.assign` 到该 Worker 的 worker commands runtime channel。
+- Client 不需要保持连接，assignment 不依赖 client open/attach。
+
+Scenario-based test：`scenario: idle queued session pauses and is not auto-assigned`
+
+Given：
+
+- Session status 是 `queued`。
+- Session `lastEventUpdatedAt` 距当前时间达到 resolved AgentSpec `idlePauseTimeoutMs`。
+- Matching ready Worker 随后注册成功。
+
+Expect：
+
+- Reconciler append `session.paused`，reason 是 `idle_timeout`。
+- Session status 变为 `paused`。
+- Session 不写入 `currentWorkerId` 或 `sessionLeaseId`。
+- Central 不 publish `session.assign`。
+- 后续 Worker heartbeat 不会自动唤醒该 paused session。
+
+Scenario-based test：`scenario: idle running session pauses and releases worker lease`
+
+Given：
+
+- Session status 是 `running`。
+- Session 持有 `currentWorkerId` 和 `sessionLeaseId`。
+- Session `lastEventUpdatedAt` 距当前时间达到 resolved AgentSpec `idlePauseTimeoutMs`。
+- 当前 Worker 仍 active。
+
+Expect：
+
+- Central append `session.pause.requested`，reason 是 `idle_timeout`。
+- Session status 变为 `pausing`。
+- Central publish pause command 到当前 Worker。
+- Sidecar 到达 turn boundary 后停止接收新 input 并 flush agent session state。
+- Central append `session.paused`。
+- Session status 变为 `paused`。
+- Session 清空 `currentWorkerId` 和 `sessionLeaseId`。
+- Worker capacity 被释放，Worker selection 可把该 Worker 分配给其他 eligible queued session。
+
+Scenario-based test：`scenario: opening a session does not refresh activity or resume it`
+
+Given：
+
+- Session status 是 `paused`，并且有 persisted history。
+- Client SDK connect 后调用 `sessions.open(sessionId)` 和 `session.history(0)`。
+
+Expect：
+
+- Central 返回 session history。
+- Session status 仍是 `paused`。
+- Session `lastEventUpdatedAt` 不变。
+- Central 不 publish `session.assign`。
+- Central 不改变 Worker registry 或 Worker capacity。
+
+Scenario-based test：`scenario: client pause releases worker and assigns next queued session`
+
+Given：
+
+- Session A status 是 `running`，并持有 Worker lease。
+- Session B status 是 `queued`，且仍在 `idlePauseTimeoutMs` activity window 内。
+- Client SDK 对 Session A publish `session.pause.requested` 到 tenant inbox runtime channel。
+
+Expect：
+
+- Central append `session.pause.requested`，reason 是 `client_requested`。
+- Session A status 变为 `pausing`。
+- Central publish pause command 到 Session A 当前 Worker。
+- Sidecar ack `session.paused` 后，Session A status 变为 `paused`，并清空 `currentWorkerId` 和 `sessionLeaseId`。
+- Worker capacity 被释放。
+- Session lifecycle reconciler 立即选择刚释放的 Worker 给 Session B。
+- Session B status 变为 `starting`，并收到 `session.assign` worker command。
+
+Scenario-based test：`scenario: resume moves paused session back to queued before assignment`
+
+Given：
+
+- Session status 是 `paused`。
+- Session 有 `lastEventUpdatedAt` 和 resolved AgentSpec `idlePauseTimeoutMs`。
+- Client SDK publish `session.resume.requested` 到 tenant inbox runtime channel。
+
+Expect：
+
+- Central append `session.resume.requested`。
+- Central 刷新 `lastEventUpdatedAt`。
+- Session status 变为 `queued`。
+- Reconciler 对该 queued session 运行 assignment workflow。
+- 如果存在 matching ready Worker，session status 变为 `starting`，并 publish `session.assign`。
+- Resume 不使用 client open/history 作为隐式触发。
+
+## 9. Slice 7：Docker WorkerPool Provisioning
 
 目标：在 standalone sidecar worker 闭环已经跑通后，增加一个 POC Docker WorkerPool controller/adaptor。它负责 provision sidecar，但 provision 出来的 sidecar 仍然通过同一个 `/sidecar/negotiate` registration contract 成为普通 Worker。
 
@@ -427,7 +549,7 @@ Expect：
 - Session assignment 后，sidecar 使用 Docker workspace volume 和 Copilot session volume 启动 Copilot-backed agent runtime。
 - 该 Worker 能完成至少一轮 input/output event loop。
 
-## 9. Slice 7：WorkerCapacityScaler Uses WorkerPool
+## 10. Slice 8：WorkerCapacityScaler Uses WorkerPool
 
 目标：只有在 standalone sidecar worker 和 Docker WorkerPool provisioned Worker 都已验证后，WorkerCapacityScaler 才负责在没有 matching ready Worker 时调用 matching WorkerPool controller/adaptor provision 新 Worker。
 
@@ -437,7 +559,7 @@ Expect：
 - WorkerPool registry/controller selection。
 - Docker WorkerPool controller/adaptor integration。
 - create/queued 后的 capacity ensure path。
-- 新 Worker registration 后触发 queued session assignment。
+- WorkerCapacityScaler 只负责 provision matching Worker capacity；queued session assignment 继续由 Slice 6 的 session lifecycle reconciler 执行。
 
 Scenario-based test：`scenario: queued session causes scaler to provision a worker from matching worker pool`
 
@@ -452,21 +574,18 @@ Expect：
 
 - WorkerCapacityScaler 选择 matching WorkerPool 并调用其 controller/adaptor provision sidecar。
 - Provisioned sidecar 注册 ready Worker。
-- Central 把 queued session assignment 给新 Worker。
+- Provisioned Worker ready 后，Slice 6 的 session lifecycle reconciler 把 queued session assignment 给新 Worker。
 - Session status 变为 `starting`，随后在 sidecar 启动 Copilot 后变为 `running`。
 - Worker selection 仍然只看注册后的 Worker record，不走 WorkerPool 旁路匹配路径。
 - Client SDK 仍然只面向 session 通信，不知道 WorkerPool、Docker container、Worker endpoint。
 
-## 10. Slice 8：Pause Session With Volume Snapshot
+## 11. Slice 9：Pause Session With Volume Snapshot
 
-目标：Running session 能进入 paused，并生成同一 event boundary 下的 workspace volume snapshot 和 Copilot session volume snapshot。
+目标：基于 Slice 6 的 pause lifecycle，Running session 进入 paused 时生成同一 event boundary 下的 workspace volume snapshot 和 Copilot session volume snapshot。
 
 实现范围：
 
-- `session.pause.requested` handling。
-- Session status `running -> pausing -> paused`。
-- Pause command to worker commands runtime channel。
-- Sidecar reaches turn-boundary pause。
+- Slice 6 已建立的 `session.pause.requested` handling、`running -> pausing -> paused` status truth、pause command 和 turn-boundary pause。
 - Copilot session files flushed to Copilot session volume。
 - Snapshot controller。
 - Docker volume adapter。
@@ -495,9 +614,9 @@ Expect：
 - Worker lease is released。
 - Session status 变为 `paused`。
 
-## 11. Slice 9：Resume Session From Volume Snapshot
+## 12. Slice 10：Resume Session From Volume Snapshot
 
-目标：Paused session 能恢复 workspace volume 和 Copilot session volume，重启 Copilot，并回到 running。
+目标：Paused session resume 后先回到 queued，再通过统一 assignment path 恢复 workspace volume 和 Copilot session volume，重启 Copilot，并回到 running。
 
 实现范围：
 
@@ -507,7 +626,7 @@ Expect：
 - Docker volume adapter restore。
 - Worker lease assignment。
 - Sidecar starts Copilot after restore。
-- Session status `paused -> resuming -> running`。
+- Session status `paused -> queued -> starting -> running`。
 
 Scenario-based test：`scenario: resume restores volumes before starting Copilot`
 
@@ -519,6 +638,7 @@ Given：
 
 Expect：
 
+- Central append `session.resume.requested`，刷新 `lastEventUpdatedAt`，并把 session status 变为 `queued`。
 - Central reads latest snapshot。
 - Docker volume adapter restores workspace volume。
 - Docker volume adapter restores Copilot session volume。
@@ -529,7 +649,7 @@ Expect：
 - Central append `session.resumed`。
 - Session status 变为 `running`。
 
-## 12. Slice 10：Reconnect And Replay
+## 13. Slice 11：Reconnect And Replay
 
 目标：Client SDK 断线后能用 event cursor 追上 session history。
 
@@ -553,7 +673,7 @@ Expect：
 - Replay does not depend on Web PubSub message history。
 - Client SDK still does not know Worker endpoint。
 
-## 13. Slice 11：Thin Auth And Audit Boundary
+## 14. Slice 12：Thin Auth And Audit Boundary
 
 目标：POC 保留 central-owned negotiate 和 audit hook，但不展开完整 production auth matrix。
 
@@ -578,7 +698,7 @@ Expect：
 - Browser and sidecar do not choose their own `userId`。
 - Audit log records token issuance as record-only。
 
-## 14. Recommended Order
+## 15. Recommended Order
 
 按下面顺序实现和 review：
 
@@ -587,16 +707,17 @@ Expect：
 3. Standalone sidecar worker lifecycle。
 4. Client SDK create session and assignment。
 5. Sidecar Copilot process-wrapper event loop。
-6. Docker WorkerPool provisioning。
-7. WorkerCapacityScaler uses WorkerPool。
-8. Pause with volume snapshot。
-9. Resume from volume snapshot。
-10. Reconnect and replay。
-11. Thin auth and audit boundary。
+6. Queued session scheduler and idle pause policy。
+7. Docker WorkerPool provisioning。
+8. WorkerCapacityScaler uses WorkerPool。
+9. Pause with volume snapshot。
+10. Resume from volume snapshot。
+11. Reconnect and replay。
+12. Thin auth and audit boundary。
 
-前五个 slices 跑通后，POC 已经形成可交互主线：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot-backed agent runtime，并把回复持久化后推回 Client SDK。WorkerPool provisioning 和 WorkerCapacityScaler 在这条主线之后接入，验证它们只是 capacity source，不改变 Worker registration、selection、assignment、event loop 的统一路径。
+前六个 slices 跑通后，POC 已经形成可交互主线和基本 lifecycle reconciliation：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot-backed agent runtime，并把回复持久化后推回 Client SDK；queued session 会在 Worker ready 后被主动分配，idle session 会按 AgentSpec policy 进入 paused，client open/history 不会隐式唤醒 session。WorkerPool provisioning 和 WorkerCapacityScaler 在这条主线之后接入，验证它们只是 capacity source，不改变 Worker registration、selection、assignment、event loop 的统一路径。
 
-## 15. Validation Commands
+## 16. Validation Commands
 
 每个 slice 完成后都运行：
 
@@ -613,3 +734,5 @@ Slice 3 必须包含真实 Web PubSub e2e integration test，覆盖 standalone s
 Slice 4 必须包含真实 Web PubSub e2e integration test，覆盖 Client SDK 从 central URL 和 tenant id 启动、生成 client 启动级随机 `clientConnectionId`、调用 central `/client/negotiate`、连接 Web PubSub、join tenant client inbox 和 client private inbox、publish `session.create.requested`、central 写入 session truth、central 选择 registered Worker、worker commands runtime channel 收到 `session.assign`。Public protocol 变化必须同步 `sdk/public-protocol-spec-ch.md`、SDK code、runtime handlers、e2e tests。
 
 Slice 5 必须包含 deterministic agent process adapter scenario test，覆盖 sidecar 收到 `session.assign` 后准备 workspace/session state 目录、把 resolved runtime config 传给 `agentProcessAdapter`、启动 Copilot SDK agent session、报告 running、处理同一 session 的两轮 input/output、为每轮发布 explicit `turn.completed`，并拒绝 stale session lease command。真实 smoke test 必须走 GitHub Copilot SDK agent session；缺少 Copilot runtime/auth 配置时 skip。
+
+Slice 6 必须包含 session lifecycle reconciler scenario tests，覆盖 queued session 在 Worker ready 后无需 client 连接即可被 assignment、idle queued session 进入 paused 且不再自动 assignment、idle running session pause 后释放 Worker lease、client pause 释放 Worker 并让另一个 queued session 获得 assignment、client open/history 不刷新 `lastEventUpdatedAt`、resume 刷新 activity 并把 paused session 放回 queued。Sample webclient 验证必须覆盖打开 paused session 只读 history/status，点击 Pause 后进入 pausing/paused，以及点击 Resume 后 session 回到 queued/starting/running 路径。

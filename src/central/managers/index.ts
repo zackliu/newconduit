@@ -3,6 +3,8 @@ export { EventLogManager } from './event-log-manager';
 export { SessionAssignmentManager } from './session-assignment-manager';
 export type { SessionAssignmentOutcome, WorkerCommandOutput } from './session-assignment-manager';
 export { SessionLifecycleManager } from './session-lifecycle-manager';
+export { SessionLifecycleReconciler } from './session-lifecycle-reconciler';
+export type { SessionLifecycleReconcileOutcome } from './session-lifecycle-reconciler';
 export { SessionManager } from './session-manager';
 export type { AcceptInputOutcome, StartSessionOutcome } from './session-manager';
 export { SessionLeaseManager } from './worker-lease-manager';

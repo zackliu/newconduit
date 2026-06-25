@@ -49,6 +49,8 @@ class PassthroughWorkspaceAdapter implements SidecarWorkspaceAdapter {
 class DeterministicAgentProcessAdapter implements SidecarAgentProcessAdapter {
   readonly starts: SidecarAgentProcessStartInput[] = [];
   readonly sends: SidecarAgentProcessInput[] = [];
+  readonly pauses: string[] = [];
+  readonly stops: string[] = [];
 
   async start(input: SidecarAgentProcessStartInput): Promise<void> {
     this.starts.push(input);
@@ -65,6 +67,14 @@ class DeterministicAgentProcessAdapter implements SidecarAgentProcessAdapter {
         }
       }
     });
+  }
+
+  async pauseAtTurnBoundary(input: { sessionId: string }): Promise<void> {
+    this.pauses.push(input.sessionId);
+  }
+
+  async stop(input: { sessionId: string }): Promise<void> {
+    this.stops.push(input.sessionId);
   }
 }
 
@@ -283,6 +293,28 @@ function workerRegistration(): WorkerRegisterPayload {
   };
 }
 
+test('scenario: pause command stops agent run and publishes paused event', async () => {
+  const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+  const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
+  const agentProcessAdapter = new DeterministicAgentProcessAdapter();
+  const sidecar = new SidecarDaemon({
+    runtimeTransport: sidecarTransport,
+    workspaceAdapter: new PassthroughWorkspaceAdapter(),
+    agentProcessAdapter
+  });
+
+  await sidecar.handleWorkerCommand(sessionAssignEvent({ sessionLeaseId: 'lease-2' }));
+  await sidecar.handleWorkerCommand(sessionPauseCommandEvent({ sessionLeaseId: 'lease-2', reason: 'client_requested' }));
+
+  assert.deepEqual(agentProcessAdapter.pauses, ['session-1']);
+  assert.deepEqual(agentProcessAdapter.stops, ['session-1']);
+  const paused = sidecarTransport.publishedEvents.find((event) => event.type === 'session.paused');
+  assert.equal(paused?.sessionId, 'session-1');
+  assert.equal(paused?.sessionLeaseId, 'lease-2');
+  assert.deepEqual(paused?.payload, { reason: 'client_requested' });
+});
+
+
 function workerHeartbeatEvent(workerId: string): RuntimeEvent {
   return {
     eventId: 'evt-worker-heartbeat',
@@ -372,6 +404,27 @@ function sessionInputCommandEvent(input: { sessionLeaseId: string; turnSeq: numb
       sessionLeaseId: input.sessionLeaseId,
       turnSeq: input.turnSeq,
       input: { message: input.message }
+    }
+  };
+}
+
+function sessionPauseCommandEvent(input: { sessionLeaseId: string; reason: 'idle_timeout' | 'client_requested'; sessionId?: string; workerId?: string }): RuntimeEvent {
+  const sessionId = input.sessionId ?? 'session-1';
+  const workerId = input.workerId ?? 'worker-1';
+  return {
+    eventId: 'evt-session-pause',
+    sessionId,
+    workerId,
+    sequence: 2,
+    type: 'session.pause.requested',
+    timestamp: new Date().toISOString(),
+    actor: 'central',
+    sessionLeaseId: input.sessionLeaseId,
+    payload: {
+      sessionId,
+      workerId,
+      sessionLeaseId: input.sessionLeaseId,
+      reason: input.reason
     }
   };
 }

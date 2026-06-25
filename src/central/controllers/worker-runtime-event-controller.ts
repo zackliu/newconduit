@@ -1,5 +1,5 @@
-import { type RuntimeEvent, type WorkerCondition, type WorkerHeartbeatPayload, type WorkerIdentityPayload } from '../../shared';
-import { WorkerManager } from '../managers';
+import { type RuntimeEvent, type RuntimeEventTransport, type WorkerCondition, type WorkerHeartbeatPayload, type WorkerIdentityPayload } from '../../shared';
+import { SessionLifecycleReconciler, WorkerManager } from '../managers';
 
 export interface WorkerRuntimeEventOutcome {
   handled: boolean;
@@ -9,13 +9,14 @@ export interface WorkerRuntimeEventOutcome {
  * Accepts worker lifecycle signals from sidecars and turns them into tenant-owned capacity state that assignment can trust.
  */
 export class WorkerRuntimeEventController {
-  constructor(private readonly workerManager: WorkerManager) {}
+  constructor(private readonly workerManager: WorkerManager, private readonly sessionLifecycleReconciler?: SessionLifecycleReconciler, private readonly eventTransport?: RuntimeEventTransport) {}
 
   async handleRuntimeEvent(tenantId: string, event: RuntimeEvent): Promise<WorkerRuntimeEventOutcome> {
     switch (event.type) {
       case 'worker.heartbeat': {
         const payload = this.parseWorkerHeartbeatPayload(event.payload);
         await this.workerManager.heartbeat(payload);
+        await this.reconcileSessions();
         return { handled: true };
       }
       case 'worker.drain.requested': {
@@ -30,6 +31,16 @@ export class WorkerRuntimeEventController {
       }
       default:
         return { handled: false };
+    }
+  }
+
+  async reconcileSessions(): Promise<void> {
+    const outcome = await this.sessionLifecycleReconciler?.reconcile();
+    if (!outcome || !this.eventTransport) {
+      return;
+    }
+    for (const command of outcome.workerCommands) {
+      await this.eventTransport.publish({ kind: 'worker-commands', workerId: command.workerId }, command.event);
     }
   }
 

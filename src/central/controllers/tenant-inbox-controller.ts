@@ -25,4 +25,8 @@ export class TenantInboxController {
     }
     await this.clientRuntimeEventController.handleRuntimeEvent(context, event);
   }
+
+  async reconcileSessions(): Promise<void> {
+    await this.workerRuntimeEventController.reconcileSessions();
+  }
 }

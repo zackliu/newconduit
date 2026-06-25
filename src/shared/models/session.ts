@@ -15,6 +15,7 @@ export interface SessionRecord {
   workspaceRef: string;
   latestSnapshotRef?: string;
   lifecycleReason?: string;
+  lastEventUpdatedAt: string;
   createdAt: string;
   updatedAt: string;
 }

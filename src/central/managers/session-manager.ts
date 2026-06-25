@@ -1,9 +1,10 @@
 import type { AgentSpecRegistry } from '../registries/agent-spec-registry';
-import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionRecord, TenantContext, TurnFailedPayload } from '../../shared';
+import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionPauseCommandPayload, SessionPauseRequestedPayload, SessionRecord, SessionResumeRequestedPayload, TenantContext, TurnFailedPayload } from '../../shared';
 import { AgentSpecAdmissionManager } from './agent-spec-admission-manager';
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
+import { SessionLifecycleReconciler } from './session-lifecycle-reconciler';
 
 export interface StartSessionOutcome {
   session: SessionRecord;
@@ -26,6 +27,18 @@ export interface ReadSessionEventsOutcome {
   responseEvent: RuntimeEvent<{ events: RuntimeEvent[] }>;
 }
 
+export interface ResumeSessionOutcome {
+  session: SessionRecord;
+  resumeRequestedEvent: RuntimeEvent<SessionResumeRequestedPayload>;
+  workerCommands: WorkerCommandOutput[];
+}
+
+export interface PauseSessionOutcome {
+  session: SessionRecord;
+  pauseRequestedEvent: RuntimeEvent<SessionPauseRequestedPayload>;
+  workerCommand: WorkerCommandOutput<SessionPauseCommandPayload>;
+}
+
 /**
  * Runs the tenant's session command workflow, turning app requests into durable session facts and worker-routable commands.
  */
@@ -37,7 +50,8 @@ export class SessionManager {
     private readonly agentSpecAdmissionManager: AgentSpecAdmissionManager,
     private readonly sessionLifecycleManager: SessionLifecycleManager,
     private readonly eventLogManager: EventLogManager,
-    private readonly sessionAssignmentManager: SessionAssignmentManager
+    private readonly sessionAssignmentManager: SessionAssignmentManager,
+    private readonly sessionLifecycleReconciler?: SessionLifecycleReconciler
   ) {}
 
   async startSession(context: RequestContext, ackId: string | undefined, request: CreateSessionRequest): Promise<StartSessionOutcome> {
@@ -67,7 +81,7 @@ export class SessionManager {
       sequence: 1,
       sessionId: session.sessionId
     });
-    const queuedSession = await this.sessionLifecycleManager.transition({ ...session, eventCursor: event.sequence }, 'queued', 'waiting-for-worker');
+    const queuedSession = await this.sessionLifecycleManager.transitionAfterEvent(session, 'queued', event.sequence, event.timestamp, 'waiting-for-worker');
     const assignment = await this.sessionAssignmentManager.assignReadyWorker(queuedSession);
     return {
       session: assignment.session,
@@ -182,6 +196,79 @@ export class SessionManager {
           events: await this.storage.readEvents(sessionId, afterSequence)
         }
       }
+    };
+  }
+
+  async pauseSession(context: RequestContext, sessionId: string, ackId: string | undefined): Promise<PauseSessionOutcome> {
+    const session = await this.storage.readSession(sessionId);
+    if (!session || session.owner !== context.principal.principalId) {
+      throw new Error(`session ${sessionId} was not found`);
+    }
+    if (session.status !== 'running') {
+      throw new Error(`session ${sessionId} is not running`);
+    }
+    if (!session.currentWorkerId || !session.sessionLeaseId) {
+      throw new Error(`session ${sessionId} has no current worker lease`);
+    }
+    const event = await this.eventLogManager.append<SessionPauseRequestedPayload>({
+      type: 'session.pause.requested',
+      actor: 'client',
+      payload: { reason: 'client_requested' },
+      ackId,
+      sequence: session.eventCursor + 1,
+      sessionId,
+      workerId: session.currentWorkerId,
+      sessionLeaseId: session.sessionLeaseId
+    });
+    const pausing = await this.sessionLifecycleManager.transitionAfterEvent(session, 'pausing', event.sequence, event.timestamp, 'client_requested');
+    return {
+      session: pausing,
+      pauseRequestedEvent: event,
+      workerCommand: {
+        workerId: session.currentWorkerId,
+        event: {
+          eventId: crypto.randomUUID(),
+          sessionId,
+          workerId: session.currentWorkerId,
+          sequence: event.sequence,
+          type: 'session.pause.requested',
+          timestamp: event.timestamp,
+          actor: 'central',
+          sessionLeaseId: session.sessionLeaseId,
+          payload: {
+            sessionId,
+            workerId: session.currentWorkerId,
+            sessionLeaseId: session.sessionLeaseId,
+            reason: 'client_requested'
+          }
+        }
+      }
+    };
+  }
+
+  async resumeSession(context: RequestContext, sessionId: string, ackId: string | undefined): Promise<ResumeSessionOutcome> {
+    const session = await this.storage.readSession(sessionId);
+    if (!session || session.owner !== context.principal.principalId) {
+      throw new Error(`session ${sessionId} was not found`);
+    }
+    if (session.status !== 'paused') {
+      throw new Error(`session ${sessionId} is not paused`);
+    }
+    const event = await this.eventLogManager.append<SessionResumeRequestedPayload>({
+      type: 'session.resume.requested',
+      actor: 'client',
+      payload: { reason: 'client_requested' },
+      ackId,
+      sequence: session.eventCursor + 1,
+      sessionId
+    });
+    const queued = await this.sessionLifecycleManager.transitionAfterEvent(session, 'queued', event.sequence, event.timestamp, 'resume_requested');
+    const reconcileOutcome = await this.sessionLifecycleReconciler?.reconcile();
+    const current = await this.storage.readSession(sessionId) ?? queued;
+    return {
+      session: current,
+      resumeRequestedEvent: event,
+      workerCommands: reconcileOutcome?.workerCommands.filter((command): command is WorkerCommandOutput => command.event.type === 'session.assign') ?? []
     };
   }
 }

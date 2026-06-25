@@ -1,5 +1,5 @@
-import type { AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionRecord, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
-import { EventLogManager, SessionLifecycleManager, SessionLeaseManager } from '../managers';
+import type { AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
+import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
 
 /**
  * Handles events that originate from a running agent on a leased worker, making sure they become central-owned session history before clients see them.
@@ -10,6 +10,8 @@ export class AgentRuntimeEventController {
     private readonly eventLogManager: EventLogManager,
     private readonly sessionLifecycleManager: SessionLifecycleManager,
     private readonly sessionLeaseManager: SessionLeaseManager,
+    private readonly workerManager: WorkerManager,
+    private readonly sessionLifecycleReconciler: SessionLifecycleReconciler,
     private readonly eventTransport: RuntimeEventTransport
   ) {}
 
@@ -55,6 +57,30 @@ export class AgentRuntimeEventController {
       case 'worker.command.rejected': {
         const payload = this.parseWorkerCommandRejectedPayload(event.payload);
         await this.appendSessionEvent(event, payload, { assertCurrentLease: false });
+        return true;
+      }
+      case 'session.paused': {
+        const payload = this.parseSessionPausedPayload(event.payload);
+        const appended = await this.appendSessionEvent(event, payload);
+        const session = await this.requireSession(event);
+        if (session.currentWorkerId) {
+          await this.workerManager.releaseSessionLease(session.currentWorkerId);
+        }
+        await this.sessionLifecycleManager.pauseAfterEvent(session, appended.sequence, appended.timestamp, payload.reason);
+        const reconcileOutcome = await this.sessionLifecycleReconciler.reconcile();
+        for (const workerCommand of reconcileOutcome.workerCommands) {
+          await this.eventTransport.publish({ kind: 'worker-commands', workerId: workerCommand.workerId }, workerCommand.event);
+        }
+        await this.eventTransport.publish({ kind: 'client-inbox' }, {
+          ...appended,
+          ackId: undefined,
+          type: 'session.status.updated',
+          payload: {
+            sessionId: appended.sessionId,
+            status: 'paused',
+            reason: payload.reason
+          }
+        });
         return true;
       }
       default:
@@ -187,6 +213,18 @@ export class AgentRuntimeEventController {
         code: typeof payload.error.code === 'string' ? payload.error.code : undefined,
         details: payload.error.details
       }
+    };
+  }
+
+  private parseSessionPausedPayload(payload: unknown): SessionPausedPayload {
+    if (!this.isRecord(payload)) {
+      throw new Error('invalid session.paused payload');
+    }
+    if (payload.reason !== undefined && payload.reason !== 'idle_timeout' && payload.reason !== 'client_requested') {
+      throw new Error('invalid session.paused reason');
+    }
+    return {
+      reason: payload.reason
     };
   }
 

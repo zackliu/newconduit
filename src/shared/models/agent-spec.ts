@@ -18,6 +18,7 @@ export interface AgentSpec {
   pausePolicy: 'turn-boundary-durable-pause';
   recoveryPolicy: 'restart-with-context';
   agentStatePolicy: 'copilot-session-volume-snapshot';
+  idlePauseTimeoutMs: number;
   version: string;
 }
 

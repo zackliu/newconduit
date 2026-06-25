@@ -46,6 +46,24 @@ export class ClientRuntimeEventController {
         await this.eventTransport.publish({ kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) }, outcome.responseEvent);
         return true;
       }
+      case 'session.pause.requested': {
+        const sessionId = this.parseSessionCommandSessionId(event.sessionId, event.type);
+        const outcome = await this.sessionManager.pauseSession(context, sessionId, event.ackId);
+        await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.pauseRequestedEvent);
+        await this.eventTransport.publish({ kind: 'client-inbox' }, this.toClientProjectionEvent(outcome.pauseRequestedEvent, 'session.status.updated', { sessionId: outcome.session.sessionId, status: outcome.session.status }));
+        await this.eventTransport.publish({ kind: 'worker-commands', workerId: outcome.workerCommand.workerId }, outcome.workerCommand.event);
+        return true;
+      }
+      case 'session.resume.requested': {
+        const sessionId = this.parseSessionCommandSessionId(event.sessionId, event.type);
+        const outcome = await this.sessionManager.resumeSession(context, sessionId, event.ackId);
+        await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.resumeRequestedEvent);
+        await this.eventTransport.publish({ kind: 'client-inbox' }, this.toClientProjectionEvent(outcome.resumeRequestedEvent, 'session.status.updated', { sessionId: outcome.session.sessionId, status: outcome.session.status }));
+        for (const workerCommand of outcome.workerCommands) {
+          await this.eventTransport.publish({ kind: 'worker-commands', workerId: workerCommand.workerId }, workerCommand.event);
+        }
+        return true;
+      }
       default:
         return false;
     }

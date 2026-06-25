@@ -42,8 +42,12 @@ export class WorkerManager {
     return worker;
   }
 
-  async heartbeat(input: WorkerHeartbeatPayload): Promise<WorkerRecord> {
-    const worker = await this.requireWorker(input.workerId);
+  async heartbeat(input: WorkerHeartbeatPayload): Promise<WorkerRecord | undefined> {
+    const worker = await this.storage.readWorker(input.workerId);
+    if (!worker) {
+      await this.appendUnknownHeartbeatRejected(input.workerId);
+      return undefined;
+    }
     if (!this.isHeartbeatAcceptable(worker)) {
       await this.appendHeartbeatRejected(worker, 'terminal-worker');
       return worker;
@@ -100,6 +104,24 @@ export class WorkerManager {
       terminatedWorkers.push(await this.terminate(worker, 'expired', 'worker_keepalive_expired', 'worker.expired'));
     }
     return terminatedWorkers;
+  }
+
+  async releaseSessionLease(workerId: string): Promise<WorkerRecord> {
+    const worker = await this.requireWorker(workerId);
+    if (worker.lifecycleState !== 'active') {
+      return worker;
+    }
+    const currentSessionCount = Math.max(0, worker.currentSessionCount - 1);
+    const allocatable = Math.min(worker.capacity, worker.allocatable + 1);
+    const next: WorkerRecord = {
+      ...worker,
+      currentSessionCount,
+      allocatable,
+      conditions: allocatable > 0 ? ['ready'] : worker.conditions,
+      updatedAt: this.clock.now()
+    };
+    await this.storage.writeWorker(next);
+    return next;
   }
 
   private async terminate(worker: WorkerRecord, lifecycleState: 'closed' | 'expired', reason: string, eventType: 'worker.closed' | 'worker.expired'): Promise<WorkerRecord> {
@@ -256,6 +278,18 @@ export class WorkerManager {
 
   private async appendHeartbeatRejected(worker: WorkerRecord, reason: string): Promise<void> {
     await this.appendWorkerEvent(worker, 'worker.heartbeat.rejected', { reason });
+  }
+
+  private async appendUnknownHeartbeatRejected(workerId: string): Promise<void> {
+    await this.storage.appendEvent({
+      eventId: crypto.randomUUID(),
+      workerId,
+      sequence: 0,
+      type: 'worker.heartbeat.rejected',
+      timestamp: this.clock.now(),
+      actor: 'central',
+      payload: { reason: 'unknown-worker' }
+    });
   }
 
   private expiresAt(timestamp: string): string {

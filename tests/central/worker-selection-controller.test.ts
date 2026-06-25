@@ -17,6 +17,7 @@ test('scenario: queued session is assigned to matching ready worker', () => {
     eventCursor: 0,
     nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
+    lastEventUpdatedAt: now,
     createdAt: now,
     updatedAt: now
   };

@@ -17,6 +17,7 @@ test('scenario: queued session is assigned to matching ready worker', () => {
     eventCursor: 0,
     nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
+    lastEventUpdatedAt: now,
     createdAt: now,
     updatedAt: now
   };
@@ -54,6 +55,7 @@ test('scenario: expired ready worker is not selected for queued session', () => 
     eventCursor: 0,
     nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
+    lastEventUpdatedAt: new Date(now).toISOString(),
     createdAt: new Date(now).toISOString(),
     updatedAt: new Date(now).toISOString()
   };

@@ -30,6 +30,13 @@ export class SessionAssignmentManager {
     }
 
     const assignedSession = await this.sessionLeaseManager.assign(session, worker);
+    await this.storage.writeWorker({
+      ...worker,
+      allocatable: Math.max(0, worker.allocatable - 1),
+      conditions: worker.allocatable - 1 > 0 ? worker.conditions : ['busy'],
+      currentSessionCount: worker.currentSessionCount + 1,
+      updatedAt: this.clock.now()
+    });
     const payload: SessionAssignPayload = {
       sessionId: assignedSession.sessionId,
       workerId: worker.workerId,
