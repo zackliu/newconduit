@@ -69,16 +69,36 @@ It uses `DefaultAzureCredential`, so run `az login` before enabling that test lo
 Start the central framework entrypoint:
 
 ```powershell
+$env:WEBPUBSUB_ENDPOINT="https://<your-web-pubsub-name>.webpubsub.azure.com"
+$env:WEBPUBSUB_HUB="agentruntimepoc"
+$env:TENANT_ID="poc"
 pnpm start:central
 ```
 
-This starts the central HTTP server framework on `CENTRAL_PORT` or port `3000`. The current server exposes `/health`, `/client/negotiate`, and `/sidecar/negotiate`; it does not create a session on startup.
+`WEBPUBSUB_ENDPOINT` is required. `WEBPUBSUB_HUB` defaults to `agentruntimepoc`, `TENANT_ID` defaults to `poc`, `CENTRAL_PORT` defaults to `3000`, and `RUNTIME_STORAGE_ROOT` defaults to `.runtime-poc/tenants/<tenantId>`. The current server exposes `/health`, `/client/negotiate`, and `/sidecar/negotiate`; it does not create a session on startup.
 
 Start the sidecar framework entrypoint:
 
 ```powershell
+$env:CENTRAL_URL="http://localhost:3000"
+$env:TENANT_ID="poc"
+$env:SIDECAR_WORK_ROOT=".runtime-poc/sidecar"
 pnpm start:sidecar
 ```
+
+`CENTRAL_URL` is required for the sidecar. `TENANT_ID` must match the central tenant and defaults to `poc`. `SIDECAR_WORK_ROOT` is optional; it controls where the sidecar prepares local workspace and Copilot session-state directories.
+
+The sidecar wraps the Copilot SDK process. For GitHub-backed Copilot auth, set one of these in your shell before starting the sidecar: `COPILOT_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`. Do not commit token values to the repo.
+
+If the Copilot SDK session should use an explicit provider endpoint, set these sidecar env vars as a group:
+
+```powershell
+$env:COPILOT_PROVIDER_BASE_URL="https://<provider-endpoint>"
+$env:COPILOT_MODEL="<model-name>"
+$env:COPILOT_PROVIDER_TYPE="azure" # or "openai"
+```
+
+Optional provider knobs are `COPILOT_PROVIDER_TOKEN_SCOPE` (defaults to `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`. Azure provider auth uses `DefaultAzureCredential`, so run `az login` locally unless the sidecar runs with managed identity. `COPILOT_CLI_PATH` can point at a specific Copilot CLI runtime path when needed.
 
 ## Important Concepts
 
@@ -97,7 +117,7 @@ Use this rule when adding files: controllers represent replaceable protocol or i
 | Category | Use it for | Examples |
 | --- | --- | --- |
 | Controller | Translates an external protocol or ingress shape into tenant-internal commands. It is replaceable when the ingress protocol changes. | `TenantInboxController`, `ClientRuntimeEventController`, `WorkerRuntimeEventController` |
-| Manager | Owns a tenant-internal workflow, state transition, sequence, assignment, lease, event log, or registry mechanism. It does not represent a replaceable protocol boundary. | `SessionManager`, `SessionLifecycleManager`, `SessionAssignmentManager`, `WorkerManager`, `WorkerLeaseManager`, `EventLogManager` |
+| Manager | Owns a tenant-internal workflow, state transition, sequence, assignment, lease, event log, or registry mechanism. It does not represent a replaceable protocol boundary. | `SessionManager`, `SessionLifecycleManager`, `SessionAssignmentManager`, `SessionLeaseManager`, `WorkerManager`, `EventLogManager` |
 | Policy/selector | Makes a pure selection or policy decision without owning protocol ingress or durable state writes. | `WorkerSelector` |
 | Adapter | Connects a controller decision to a concrete implementation such as Web PubSub, Docker, local files, or the Copilot process. | `WebPubSubTransportAdapter`, `DockerHostingAdapter`, `DockerVolumeAdapter`, `CopilotProcessAdapter` |
 | Model | Defines the shape of durable resources and public contracts. | `SessionRecord`, `WorkerRecord`, `AgentSpec`, `RuntimeEvent` |

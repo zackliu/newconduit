@@ -1,5 +1,8 @@
 import type { RuntimeEvent, WorkerHeartbeatPayload, WorkerIdentityPayload } from '../../shared';
 
+/**
+ * Produces sidecar lifecycle signals that let central keep worker capacity fresh without knowing sidecar internals.
+ */
 export class HeartbeatController {
   createHeartbeat(payload: WorkerHeartbeatPayload): RuntimeEvent<WorkerHeartbeatPayload> {
     return {

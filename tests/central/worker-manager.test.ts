@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { AgentSpecAdmissionManager, WorkerManager, WorkerSelector } from '../../src/central/managers';
 import { POC_AGENT_SPEC } from '../../src/central/registries/poc-class-registry';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
@@ -20,21 +21,30 @@ class FixedClock implements Clock {
   }
 }
 
-test('scenario: standalone sidecar registers ready worker capacity', async () => {
+test('scenario: standalone sidecar registers worker and becomes ready after first heartbeat', async () => {
   await withStorage(async ({ storage, root, clock }) => {
     const manager = new WorkerManager(storage, clock, 30_000);
 
     const worker = await registerWorker(manager);
 
     assert.equal(worker.tenantId, 'poc');
-    assert.equal(worker.sidecarId, 'sidecar-1');
     assert.equal(worker.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
     assert.deepEqual(worker.labels, { agent: 'copilot' });
     assert.equal(worker.capacity, 1);
-    assert.equal(worker.allocatable, 1);
-    assert.deepEqual(worker.conditions, ['ready']);
-    assert.equal(worker.lifecycleState, 'active');
-    assert.equal(worker.generation, 1);
+    assert.equal(worker.allocatable, 0);
+    assert.deepEqual(worker.conditions, ['disconnected']);
+    assert.equal(worker.lifecycleState, 'registered');
+    assert.equal(selectWorker(worker), undefined);
+
+    const ready = await manager.heartbeat({
+      workerId: worker.workerId,
+      capacity: 1,
+      allocatable: 1,
+      conditions: ['ready']
+    });
+    assert.equal(ready.lifecycleState, 'active');
+    assert.deepEqual(ready.conditions, ['ready']);
+    assert.equal(selectWorker(ready)?.workerId, ready.workerId);
 
     const stored = await storage.readWorker(worker.workerId);
     assert.equal(stored?.workerId, worker.workerId);
@@ -52,7 +62,6 @@ test('scenario: worker heartbeat refreshes active capacity', async () => {
 
     const updated = await manager.heartbeat({
       workerId: worker.workerId,
-      generation: worker.generation,
       capacity: 2,
       allocatable: 2,
       conditions: ['ready']
@@ -72,7 +81,8 @@ test('scenario: graceful worker close removes worker from active selection', asy
     const manager = new WorkerManager(storage, clock, 30_000);
     const worker = await registerWorker(manager);
 
-    const closed = await manager.close({ workerId: worker.workerId, generation: worker.generation });
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    const closed = await manager.close({ workerId: worker.workerId });
 
     assert.equal(closed.lifecycleState, 'closed');
     assert.equal(closed.terminalReason, 'worker_closed');
@@ -81,7 +91,7 @@ test('scenario: graceful worker close removes worker from active selection', asy
     assert.equal(selectWorker(closed), undefined);
 
     const events = await readWorkerEvents(root, worker.workerId);
-    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.closed']);
+    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.heartbeat', 'worker.closed']);
   });
 });
 
@@ -90,7 +100,8 @@ test('scenario: draining worker stops new assignment while existing lease finish
     const manager = new WorkerManager(storage, clock, 30_000);
     const worker = await registerWorker(manager);
 
-    const draining = await manager.drain({ workerId: worker.workerId, generation: worker.generation });
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    const draining = await manager.drain({ workerId: worker.workerId });
 
     assert.equal(draining.lifecycleState, 'active');
     assert.equal(draining.allocatable, 0);
@@ -98,7 +109,7 @@ test('scenario: draining worker stops new assignment while existing lease finish
     assert.equal(selectWorker(draining), undefined);
 
     const events = await readWorkerEvents(root, worker.workerId);
-    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.draining']);
+    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.heartbeat', 'worker.draining']);
   });
 });
 
@@ -106,6 +117,7 @@ test('scenario: expired worker keepalive removes worker from active selection', 
   await withStorage(async ({ storage, root, clock }) => {
     const manager = new WorkerManager(storage, clock, 1_000);
     const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
     clock.set('2026-06-24T00:00:01.001Z');
 
     const expiredWorkers = await manager.expireWorkers();
@@ -117,7 +129,7 @@ test('scenario: expired worker keepalive removes worker from active selection', 
     assert.equal(selectWorker(expiredWorkers[0]), undefined);
 
     const events = await readWorkerEvents(root, worker.workerId);
-    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.expired']);
+    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.heartbeat', 'worker.expired']);
   });
 });
 
@@ -125,9 +137,10 @@ test('scenario: leased worker close marks lease lost without crash recovery', as
   await withStorage(async ({ storage, clock }) => {
     const manager = new WorkerManager(storage, clock, 30_000);
     const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
     const session = await writeLeasedSession(storage, worker);
 
-    await manager.close({ workerId: worker.workerId, generation: worker.generation });
+    await manager.close({ workerId: worker.workerId });
 
     const failed = await storage.readSession(session.sessionId);
     assert.equal(failed?.status, 'failed');
@@ -136,9 +149,9 @@ test('scenario: leased worker close marks lease lost without crash recovery', as
 
     const events = await storage.readEvents(session.sessionId, 0);
     assert.equal(events.length, 1);
-    assert.equal(events[0].type, 'worker.lease.lost');
+    assert.equal(events[0].type, 'session.lease.lost');
     assert.equal(events[0].workerId, worker.workerId);
-    assert.equal(events[0].workerLeaseGeneration, 1);
+    assert.equal(events[0].sessionLeaseId, session.sessionLeaseId);
   });
 });
 
@@ -146,6 +159,7 @@ test('scenario: leased worker expiry marks lease lost without crash recovery', a
   await withStorage(async ({ storage, clock }) => {
     const manager = new WorkerManager(storage, clock, 1_000);
     const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
     const session = await writeLeasedSession(storage, worker);
     clock.set('2026-06-24T00:00:01.001Z');
 
@@ -156,8 +170,45 @@ test('scenario: leased worker expiry marks lease lost without crash recovery', a
     assert.equal(failed?.lifecycleReason, 'worker_lost');
 
     const events = await storage.readEvents(session.sessionId, 0);
-    assert.equal(events[0].type, 'worker.lease.lost');
+    assert.equal(events[0].type, 'session.lease.lost');
     assert.deepEqual(events[0].payload, { reason: 'worker_lost', workerState: 'expired' });
+  });
+});
+
+test('scenario: worker expiry fails in-flight turn and fans out lease loss', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const transport = new InMemoryRuntimeTransportAdapter();
+    const manager = new WorkerManager(storage, clock, 1_000, transport);
+    const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    const session = await writeStartingSessionWithInitialTurn(storage, worker);
+    const sessionEvents: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'session-events', sessionId: session.sessionId }, async (envelope) => {
+      sessionEvents.push(envelope.event);
+    });
+    clock.set('2026-06-24T00:00:01.001Z');
+
+    await manager.expireWorkers();
+
+    const failed = await storage.readSession(session.sessionId);
+    assert.equal(failed?.status, 'failed');
+    assert.equal(failed?.currentWorkerId, undefined);
+    assert.equal(failed?.sessionLeaseId, undefined);
+    assert.equal(failed?.eventCursor, 3);
+
+    const events = await storage.readEvents(session.sessionId, 0);
+    assert.deepEqual(events.map((event) => event.type), ['session.created', 'turn.failed', 'session.lease.lost']);
+    assert.equal(events[1].turnSeq, 1);
+    assert.deepEqual(events[1].payload, {
+      error: {
+        message: 'worker was lost before the turn completed',
+        code: 'worker_lost',
+        details: {
+          workerState: 'expired'
+        }
+      }
+    });
+    assert.deepEqual(sessionEvents.map((event) => event.type), ['turn.failed', 'session.lease.lost']);
   });
 });
 
@@ -165,11 +216,11 @@ test('scenario: stale heartbeat cannot resurrect terminal worker', async () => {
   await withStorage(async ({ storage, root, clock }) => {
     const manager = new WorkerManager(storage, clock, 30_000);
     const worker = await registerWorker(manager);
-    await manager.close({ workerId: worker.workerId, generation: worker.generation });
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    await manager.close({ workerId: worker.workerId });
 
     const result = await manager.heartbeat({
       workerId: worker.workerId,
-      generation: worker.generation,
       capacity: 1,
       allocatable: 1,
       conditions: ['ready']
@@ -182,7 +233,28 @@ test('scenario: stale heartbeat cannot resurrect terminal worker', async () => {
     assert.equal(stored?.lifecycleState, 'closed');
 
     const events = await readWorkerEvents(root, worker.workerId);
-    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.closed', 'worker.heartbeat.rejected']);
+    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.heartbeat', 'worker.closed', 'worker.heartbeat.rejected']);
+  });
+});
+
+test('scenario: new worker registration creates a separate active worker lifetime', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const manager = new WorkerManager(storage, clock, 30_000);
+    const first = await registerWorker(manager);
+    await manager.heartbeat({ workerId: first.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    const leasedSession = await writeLeasedSession(storage, first);
+    clock.set('2026-06-24T00:00:10.000Z');
+
+    const second = await registerWorker(manager);
+    const secondReady = await manager.heartbeat({ workerId: second.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+
+    const retired = await storage.readWorker(first.workerId);
+    assert.equal(retired?.lifecycleState, 'active');
+    assert.equal(secondReady.lifecycleState, 'active');
+    assert.equal(selectWorker(secondReady)?.workerId, second.workerId);
+
+    const unchanged = await storage.readSession(leasedSession.sessionId);
+    assert.equal(unchanged?.status, 'running');
   });
 });
 
@@ -202,7 +274,6 @@ async function withStorage(testBody: (input: { root: string; storage: LocalFileS
 async function registerWorker(manager: WorkerManager): Promise<WorkerRecord> {
   return manager.register({
     tenantId: 'poc',
-    sidecarId: 'sidecar-1',
     sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
     labels: { agent: 'copilot' },
     capacity: 1,
@@ -224,7 +295,7 @@ async function writeLeasedSession(storage: LocalFileStorage, worker: WorkerRecor
     resolvedAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
     status: 'running',
     currentWorkerId: worker.workerId,
-    workerLeaseGeneration: 1,
+    sessionLeaseId: `lease-${worker.workerId}`,
     eventCursor: 0,
     nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
@@ -232,6 +303,38 @@ async function writeLeasedSession(storage: LocalFileStorage, worker: WorkerRecor
     updatedAt: now
   };
   await storage.writeSession(session);
+  return session;
+}
+
+async function writeStartingSessionWithInitialTurn(storage: LocalFileStorage, worker: WorkerRecord): Promise<SessionRecord> {
+  const now = new Date().toISOString();
+  const session: SessionRecord = {
+    sessionId: `session-${worker.workerId}`,
+    tenantId: worker.tenantId,
+    owner: 'owner-1',
+    resolvedAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
+    status: 'starting',
+    currentWorkerId: worker.workerId,
+    sessionLeaseId: `lease-${worker.workerId}`,
+    eventCursor: 1,
+    nextTurnSeq: 2,
+    workspaceRef: 'workspace-volume',
+    createdAt: now,
+    updatedAt: now
+  };
+  await storage.writeSession(session);
+  await storage.appendEvent({
+    eventId: `event-${worker.workerId}`,
+    sessionId: session.sessionId,
+    sequence: 1,
+    type: 'session.created',
+    timestamp: now,
+    actor: 'central',
+    turnSeq: 1,
+    payload: {
+      status: 'queued'
+    }
+  });
   return session;
 }
 
@@ -243,12 +346,11 @@ function selectWorker(worker: WorkerRecord): WorkerRecord | undefined {
     owner: 'owner-1',
     resolvedAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
     status: 'queued',
-    workerLeaseGeneration: 0,
     eventCursor: 0,
     nextTurnSeq: 1,
     workspaceRef: 'workspace-volume',
     createdAt: now,
     updatedAt: now
   };
-  return new WorkerSelector().select(session, [worker]);
+  return new WorkerSelector(() => Date.parse(worker.updatedAt)).select(session, [worker]);
 }

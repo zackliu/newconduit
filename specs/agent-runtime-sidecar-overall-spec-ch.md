@@ -352,7 +352,7 @@ V1 的恢复判断可以按顺序执行：
 5. Adapter 是否声明支持 true continuation 或 restart with context？
 6. 是否存在未完成 approval、tool call、file operation 或 external side effect？如果存在，如何向用户展示？
 
-恢复成功后，系统应该写入 recovery event，说明 source worker、target worker、worker lease generation、snapshot ID、event index、recovery mode 和任何降级原因。恢复失败也应该是 session lifecycle 的可见状态，而不是普通 error log。
+恢复成功后，系统应该写入 recovery event，说明 source worker、target worker、session lease、snapshot ID、event index、recovery mode 和任何降级原因。恢复失败也应该是 session lifecycle 的可见状态，而不是普通 error log。
 
 后续如果要做 semantic context portability，也应该作为恢复能力的增强项，而不是 V1 的先决条件。否则 runtime 会被迫理解每个 agent framework 的私有记忆、压缩策略和 prompt assembly。
 

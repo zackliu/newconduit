@@ -7,10 +7,10 @@ import { CentralService } from '../../src/central/central-service';
 import { CentralHttpServer } from '../../src/central/http/central-http-server';
 import { registerPocCentralRoutes } from '../../src/central/http/poc-routes';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import { CopilotProcessAdapter, DockerWorkspaceAdapter, WebPubSubClientAdapter } from '../../src/sidecar/adapters';
-import { WorkerRegistrationController } from '../../src/sidecar/controllers';
+import { DockerWorkspaceAdapter, WebPubSubClientAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar';
 import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, WebPubSubRuntimeChannelMapper, type RuntimeEvent, type SessionAssignPayload, type SessionRecord, type WorkerRecord } from '../../src/shared';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput } from '../../src/sidecar/contracts';
 import { isCredentialUnavailable, loadTestEnv } from '../support/test-env';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,6 +18,22 @@ import { join } from 'node:path';
 
 const TENANT_ID = 'poc';
 const WEB_PUBSUB_TENANT_INBOX_GROUP = new WebPubSubRuntimeChannelMapper(TENANT_ID).toGroup({ kind: 'tenant-inbox' });
+
+class NoopAgentProcessAdapter implements SidecarAgentProcessAdapter {
+  async start(_input: SidecarAgentProcessStartInput): Promise<void> {
+    return;
+  }
+
+  async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<void> {
+    await emit({
+      type: 'output',
+      payload: {
+        message: `noop:${input.message}`
+      }
+    });
+  }
+}
+
 test('scenario: real Web PubSub client event reaches tenant inbox channel', async (context) => {
   const env = loadTestEnv();
   const endpoint = process.env.WEBPUBSUB_ENDPOINT ?? env.WEBPUBSUB_ENDPOINT;
@@ -124,8 +140,7 @@ test('scenario: sidecar negotiates real Web PubSub connection and registers work
   const sidecar = new SidecarDaemon({
     runtimeTransport: new WebPubSubClientAdapter({ tenantId }),
     workspaceAdapter: new DockerWorkspaceAdapter(),
-    agentProcessAdapter: new CopilotProcessAdapter(),
-    workerRegistrationEvents: new WorkerRegistrationController()
+    agentProcessAdapter: new NoopAgentProcessAdapter()
   });
   registerPocCentralRoutes(server, central);
 
@@ -136,16 +151,14 @@ test('scenario: sidecar negotiates real Web PubSub connection and registers work
     await sidecar.startStandaloneWorker({
       centralUrl: `http://localhost:${port}`,
       tenantId,
-      sidecarId: 'e2e-sidecar-1',
       sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
       labels: { agent: 'copilot' },
       capacity: 1,
       allocatable: 1
     });
 
-    const worker = await waitForWorker(storage, 'e2e-sidecar-1');
+    const worker = await waitForReadyWorker(storage);
     assert.equal(worker.tenantId, tenantId);
-    assert.equal(worker.sidecarId, 'e2e-sidecar-1');
     assert.equal(worker.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
     assert.deepEqual(worker.labels, { agent: 'copilot' });
     assert.equal(worker.lifecycleState, 'active');
@@ -192,8 +205,7 @@ test('scenario: client SDK creates session and assignment reaches registered wor
   const sidecar = new SidecarDaemon({
     runtimeTransport: new WebPubSubClientAdapter({ tenantId }),
     workspaceAdapter: new DockerWorkspaceAdapter(),
-    agentProcessAdapter: new CopilotProcessAdapter(),
-    workerRegistrationEvents: new WorkerRegistrationController()
+    agentProcessAdapter: new NoopAgentProcessAdapter()
   });
   const channelMapper = new WebPubSubRuntimeChannelMapper(tenantId);
   let commandClient: WebPubSubClient | undefined;
@@ -208,13 +220,12 @@ test('scenario: client SDK creates session and assignment reaches registered wor
     await sidecar.startStandaloneWorker({
       centralUrl,
       tenantId,
-      sidecarId: 'e2e-sidecar-assignment',
       sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
       labels: { agent: 'copilot' },
       capacity: 1,
       allocatable: 1
     });
-    const worker = await waitForWorker(storage, 'e2e-sidecar-assignment');
+    const worker = await waitForReadyWorker(storage);
     const workerCommandGrant = await transport.issueSidecarConnection({
       principal: { principalId: 'assignment-worker-subscriber', type: 'service' },
       channels: [{ kind: 'worker-commands', workerId: worker.workerId }]
@@ -253,7 +264,7 @@ test('scenario: client SDK creates session and assignment reaches registered wor
     const assignment = await assignmentReceived;
     assert.equal(assignment.workerId, worker.workerId);
     assert.equal(assignment.payload.workerId, worker.workerId);
-    assert.equal(assignment.payload.workerLeaseGeneration, 1);
+    assert.equal(typeof assignment.payload.sessionLeaseId, 'string');
     assert.equal(assignment.payload.resolvedAgentSpec.agentSpecId, 'copilot-poc');
     assert.equal(assignment.payload.resolvedAgentSpec.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
     assert.equal(typeof assignment.payload.workspaceRef, 'string');
@@ -263,7 +274,7 @@ test('scenario: client SDK creates session and assignment reaches registered wor
     assert.equal(storedSession?.nextTurnSeq, 2);
     assert.equal(storedSession?.status, 'starting');
     assert.equal(storedSession?.currentWorkerId, worker.workerId);
-    assert.equal(storedSession?.workerLeaseGeneration, 1);
+    assert.equal(storedSession?.sessionLeaseId, assignment.payload.sessionLeaseId);
   } catch (error) {
     if (isCredentialUnavailable(error)) {
       context.skip('DefaultAzureCredential is unavailable; run az login to enable this integration test');
@@ -280,16 +291,16 @@ test('scenario: client SDK creates session and assignment reaches registered wor
   }
 });
 
-async function waitForWorker(storage: LocalFileStorage, sidecarId: string): Promise<WorkerRecord> {
+async function waitForReadyWorker(storage: LocalFileStorage): Promise<WorkerRecord> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    const worker = (await storage.readWorkers()).find((candidate) => candidate.sidecarId === sidecarId);
+    const worker = (await storage.readWorkers()).find((candidate) => candidate.lifecycleState === 'active' && candidate.conditions.includes('ready'));
     if (worker) {
       return worker;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`timed out waiting for worker ${sidecarId}`);
+  throw new Error('timed out waiting for ready worker');
 }
 
 async function stopWebPubSubClient(client: WebPubSubClient | undefined): Promise<void> {

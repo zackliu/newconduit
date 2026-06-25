@@ -10,11 +10,16 @@ Use this skill for domain decisions in this repo. Load the current brief docs be
 ## Domain Invariants
 
 - Session is the durable object; worker compute is replaceable.
+- Worker lifetime and session lifetime are separate state machines. A worker can register, heartbeat, drain, close, expire, or be replaced without changing durable session identity. A session can queue, start, run, pause, resume, fail, or recover across workers. The session lease (`sessionLeaseId`) is the bridge between them; do not repair lifecycle bugs by only changing worker selection, UI status, or sidecar-local state.
 - Tenant is a high-level runtime boundary. Most runtime state, registries, controllers, adapters, storage, transport config, policy, audit, worker capacity, and AgentSpec defaults are tenant-scoped. The outer central layer handles tenant discovery, tenant creation, tenant registry, and cross-tenant administration, then delegates to tenant runtimes.
 - Central session service is the public/session-facing control plane and communication entry point.
 - Sidecar sits close to the agent process and adapts existing agents into the runtime.
 - Persistent storage provides session metadata, event log, workspace snapshots, artifacts, runtime metadata, and audit records.
 - SDK/API surfaces exist for clients, application backends, and sidecars.
+- The sidecar adapts and starts the GitHub Copilot SDK agent process for this POC. Copilot's backing model may use Azure or OpenAI-compatible providers, but sidecar code must accept only explicit Copilot SDK provider config env (`COPILOT_MODEL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_BASE_URL`) and pass it to `CopilotClient.createSession()`. Provider auth is Azure Identity/MSI: the sidecar acquires a bearer token for the provider and hands it to Copilot SDK, but it must not call Azure OpenAI/OpenAI chat completions directly, infer provider type from URLs, rewrite provider URLs, or treat model-provider HTTP as the sidecar agent loop.
+- After an implementation direction changes, clean up obsolete branches, tests, env names, docs, and examples before finishing. Leave only the final chosen mechanism in code and specs. Test-only runtime configuration belongs in `tests/.env`; do not rely on ad hoc shell-only env setup for repeatable validation.
+- End-to-end tests are not unit tests: they must use the same startup flows and runtime behavior a user or operator would use. Do not make e2e tests pass by reading storage directly, injecting worker IDs, manually subscribing channels on behalf of a daemon, or otherwise bypassing the public/runtime contract being validated.
+- The `samples/webclient` app is the durable-session system demonstration surface. Any change meant to showcase or validate end-to-end product behavior should be tested by launching the real webclient and driving it with Playwright, not only by exercising SDK or Node-level tests.
 - Customer-facing SDK code lives under `sdk/` and stays separate from service-provider runtime code under `src/`. Shared understanding comes from public protocol specs and e2e tests, not code imports from `src/`.
 - V1 focuses on homogeneous worker pools and self-hostable deployment.
 - Recovery begins with workspace snapshots and event logs. Unified semantic context is a later validation area.
@@ -62,13 +67,16 @@ For any proposal or implementation, answer:
 6. What is persisted before a worker dies?
 7. Is recovery a true continuation, restart with context, or non-recoverable failure?
 8. Does the sidecar still allow existing agent processes to be adapted with minimal changes?
-9. Does the design require a model provider, agent framework, hosting platform, or marketplace responsibility that is out of scope?
-10. Is the proposal adding fallback behavior or compatibility layers instead of fixing the model or implementation?
-11. Are validation plans based on business behavior and public contracts rather than source-code shape?
-12. What is the smallest self-hosted MVP slice that validates this?
-13. For SDK/API changes, what would the natural app-code call site look like before it is lowered to protocol events?
-14. Which details are app concepts, and which details are runtime plumbing that should stay out of the default public SDK surface?
-15. Is a new class a protocol-facing replaceable controller, a tenant-internal workflow/state manager, a pure policy/selector, or the tenant composition root?
+9. Does the Copilot agent runtime auth path work in the target worker environment without making sidecar own model-provider credentials?
+10. Does the design require a model provider, agent framework, hosting platform, or marketplace responsibility that is out of scope?
+11. Is the proposal adding fallback behavior or compatibility layers instead of fixing the model or implementation?
+12. Are validation plans based on business behavior and public contracts rather than source-code shape?
+13. If this is an e2e test, does it use the same process startup, negotiation, registration, routing, and adapter behavior as a real run, without test-only storage reads or manual channel wiring?
+14. If the behavior is user-visible in the system demo, has `samples/webclient` been launched and validated with Playwright screenshots/interactions?
+15. What is the smallest self-hosted MVP slice that validates this?
+16. For SDK/API changes, what would the natural app-code call site look like before it is lowered to protocol events?
+17. Which details are app concepts, and which details are runtime plumbing that should stay out of the default public SDK surface?
+18. Is a new class a protocol-facing replaceable controller, a tenant-internal workflow/state manager, a pure policy/selector, or the tenant composition root?
 
 ## Anti-Patterns
 
@@ -80,6 +88,7 @@ For any proposal or implementation, answer:
 - Putting tenant policy only in the application backend while central routing remains blind.
 - Making sidecar integration require a full rewrite of the agent loop.
 - Reusing Conduit directory or protocol assumptions without revalidating the product boundary.
+- Making interactive GitHub Copilot login or personal user credentials the default auth path for worker containers.
 - Adding fallback paths, compatibility shims, or dual behavior because the current design is unclear.
 - Keeping placeholder sidecar, central, storage, transport, worker, session, and test paths after the real runtime path exists.
 - Letting a sidecar daemon, tenant runtime controller, central service, or runtime orchestrator directly construct Web PubSub, Docker, Copilot, storage, or hosting adapters instead of receiving a role-named dependency.
@@ -90,6 +99,9 @@ For any proposal or implementation, answer:
 - Designing customer-facing SDK methods by directly exposing current runtime event names, channel names, cursors, request correlation, worker assignment, or Web PubSub mechanics as the default app API.
 - Adding both HTTP and Web PubSub command handlers for the same client-facing session lifecycle operation instead of choosing one public command path.
 - Adding conditional logic that hides inconsistent state instead of naming and fixing the invalid state transition.
+- Treating worker expiry, worker replacement, session assignment, agent readiness, and turn completion as one status flag instead of distinct lifecycle facts connected by leases and events.
+- Writing e2e tests that pass by peeking into storage, injecting runtime IDs, or manually wiring channels that production startup code is supposed to discover through runtime events.
+- Treating the webclient as a static sample when it is the product demonstration surface; user-visible e2e behavior must be exercised through the running browser app with Playwright.
 - Testing private helper shape, source snippets, or implementation structure instead of session/runtime behavior.
 
 ## Output Format

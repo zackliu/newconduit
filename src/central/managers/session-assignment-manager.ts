@@ -1,5 +1,5 @@
 import type { Clock, RuntimeEvent, RuntimeStorage, SessionAssignPayload, SessionRecord } from '../../shared';
-import { WorkerLeaseManager } from './worker-lease-manager';
+import { SessionLeaseManager } from './worker-lease-manager';
 import { WorkerSelector } from './worker-selector';
 
 export interface WorkerCommandOutput<TPayload = unknown> {
@@ -12,12 +12,15 @@ export interface SessionAssignmentOutcome {
   workerCommand?: WorkerCommandOutput<SessionAssignPayload>;
 }
 
+/**
+ * Bridges queued durable sessions to replaceable worker capacity by creating the lease and the command a sidecar can act on.
+ */
 export class SessionAssignmentManager {
   constructor(
     private readonly storage: RuntimeStorage,
     private readonly clock: Clock,
     private readonly workerSelector: WorkerSelector,
-    private readonly workerLeaseManager: WorkerLeaseManager
+    private readonly sessionLeaseManager: SessionLeaseManager
   ) {}
 
   async assignReadyWorker(session: SessionRecord): Promise<SessionAssignmentOutcome> {
@@ -26,17 +29,14 @@ export class SessionAssignmentManager {
       return { session };
     }
 
-    const assignedSession = await this.workerLeaseManager.assign(session, worker);
+    const assignedSession = await this.sessionLeaseManager.assign(session, worker);
     const payload: SessionAssignPayload = {
       sessionId: assignedSession.sessionId,
       workerId: worker.workerId,
-      workerLeaseGeneration: assignedSession.workerLeaseGeneration,
+      sessionLeaseId: assignedSession.sessionLeaseId!,
       workspaceRef: assignedSession.workspaceRef,
-      resolvedAgentSpec: {
-        agentSpecId: assignedSession.resolvedAgentSpec.agentSpecId,
-        sidecarClass: assignedSession.resolvedAgentSpec.sidecarClass,
-        digest: assignedSession.resolvedAgentSpec.digest
-      }
+      copilotSessionStateRef: `copilot-session:${assignedSession.sessionId}`,
+      resolvedAgentSpec: assignedSession.resolvedAgentSpec
     };
     return {
       session: assignedSession,
@@ -50,7 +50,7 @@ export class SessionAssignmentManager {
           type: 'session.assign',
           timestamp: this.clock.now(),
           actor: 'central',
-          workerLeaseGeneration: assignedSession.workerLeaseGeneration,
+          sessionLeaseId: assignedSession.sessionLeaseId,
           payload
         }
       }

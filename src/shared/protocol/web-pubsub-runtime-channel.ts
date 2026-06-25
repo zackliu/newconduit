@@ -13,7 +13,9 @@ export class WebPubSubRuntimeChannelMapper {
       case 'tenant-inbox':
         return `${tenantPrefix}:central:events`;
       case 'client-inbox':
-        return `${tenantPrefix}:client:${this.toGroupSegment(channel.principalId)}:events`;
+        return `${tenantPrefix}:clients`;
+      case 'client-private-inbox':
+        return `${tenantPrefix}:client:${this.toGroupSegment(channel.clientConnectionId)}:inbox`;
       case 'session-events':
         return `${tenantPrefix}:session:${this.toGroupSegment(channel.sessionId)}`;
       case 'worker-commands':

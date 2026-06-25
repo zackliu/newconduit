@@ -15,6 +15,7 @@
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
   },
@@ -26,6 +27,7 @@
   "dependencies": {
     "@azure/identity": "^4.13.1",
     "@azure/web-pubsub": "^1.2.0",
-    "@azure/web-pubsub-client": "^1.0.4"
+    "@azure/web-pubsub-client": "^1.0.4",
+    "@github/copilot-sdk": "1.0.3"
   }
 }

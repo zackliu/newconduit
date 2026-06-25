@@ -21,7 +21,7 @@ export {
 	TenantRuntime,
 	WebPubSubTransportAdapter,
 	WorkerCapacityScaler,
-	WorkerLeaseManager,
+	SessionLeaseManager,
 	WorkerManager,
 	WorkerRuntimeEventController,
 	WorkerSelector
@@ -63,7 +63,6 @@ export {
 	HeartbeatController,
 	LeaseCommandController,
 	SidecarDaemon,
-	WebPubSubClientAdapter,
-	WorkerRegistrationController
+	WebPubSubClientAdapter
 } from './sidecar';
-export type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount, WorkerRegistrationEventFactory } from './sidecar';
+export type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount } from './sidecar';

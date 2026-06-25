@@ -1,16 +1,19 @@
 import type { RuntimeEvent } from '../../shared';
 
+/**
+ * Tracks the session lease accepted by the sidecar so worker commands are scoped to the assignment central issued.
+ */
 export class LeaseCommandController {
-  private generation = 0;
+  private sessionLeaseId: string | undefined;
 
   acceptAssign(event: RuntimeEvent): void {
     if (event.type !== 'session.assign') {
       throw new Error(`unexpected sidecar command: ${event.type}`);
     }
-    this.generation = event.workerLeaseGeneration ?? 0;
+    this.sessionLeaseId = event.sessionLeaseId;
   }
 
-  currentGeneration(): number {
-    return this.generation;
+  currentSessionLeaseId(): string | undefined {
+    return this.sessionLeaseId;
   }
 }

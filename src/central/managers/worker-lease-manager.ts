@@ -1,22 +1,25 @@
 import type { RuntimeStorage, SessionRecord, WorkerRecord } from '../../shared';
 
-export class WorkerLeaseManager {
+/**
+ * Protects the session-to-worker binding so commands and agent events can be checked against the current session lease.
+ */
+export class SessionLeaseManager {
   constructor(private readonly storage: RuntimeStorage) {}
 
   async assign(session: SessionRecord, worker: WorkerRecord): Promise<SessionRecord> {
     const next: SessionRecord = {
       ...session,
       currentWorkerId: worker.workerId,
-      workerLeaseGeneration: session.workerLeaseGeneration + 1,
+      sessionLeaseId: crypto.randomUUID(),
       status: 'starting'
     };
     await this.storage.writeSession(next);
     return next;
   }
 
-  assertCurrent(session: SessionRecord, generation: number): void {
-    if (session.workerLeaseGeneration !== generation) {
-      throw new Error(`stale worker lease generation for session ${session.sessionId}`);
+  assertCurrent(session: SessionRecord, sessionLeaseId: string): void {
+    if (session.sessionLeaseId !== sessionLeaseId) {
+      throw new Error(`stale session lease for session ${session.sessionId}`);
     }
   }
 }

@@ -6,9 +6,20 @@ export interface AgentRuntimeClientOptions {
 export interface RuntimeConnectionGrant {
   url: string;
   expiresAt?: string;
-  clientInbox?: {
-    principalId: string;
+  clientInbox?: Record<string, never>;
+  clientPrivateInbox?: {
+    clientConnectionId: string;
   };
+}
+
+export interface SessionSummary {
+  sessionId: string;
+  status: SessionStatus;
+  agentSpecId: string;
+  owner: string;
+  eventCursor: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentSpecRef {
@@ -47,6 +58,7 @@ export interface WaitForResultOptions {
 export type AgentTurnEvent =
   | { type: 'turn.started'; sessionId: string; turnSeq: number }
   | { type: 'assistant.delta'; sessionId: string; turnSeq: number; text: string }
+  | { type: 'agent.internal'; sessionId: string; turnSeq: number; label: string; detail?: unknown }
   | { type: 'agent.progress'; sessionId: string; turnSeq: number; message: string }
   | { type: 'tool.started'; sessionId: string; turnSeq: number; toolCallId: string; toolName: string; inputSummary?: unknown }
   | { type: 'tool.completed'; sessionId: string; turnSeq: number; toolCallId: string; toolName: string; outputSummary?: unknown }
@@ -83,9 +95,20 @@ export interface CreateSessionInput {
 
 export type SdkRuntimeEventType =
   | 'session.create.requested'
+  | 'session.created.ack'
+  | 'session.catalog.updated'
+  | 'session.status.updated'
+  | 'session.list.requested'
+  | 'session.listed'
+  | 'session.events.requested'
+  | 'session.events.replayed'
   | 'input.received'
+  | 'input.accepted.ack'
   | 'input.accepted'
   | 'agent.output'
+  | 'turn.completed'
+  | 'turn.failed'
+  | 'status.changed'
   | 'session.pause.requested'
   | 'session.resume.requested'
   | 'session.cancel.requested'
@@ -93,7 +116,8 @@ export type SdkRuntimeEventType =
   | 'session.assign'
   | 'session.paused'
   | 'session.resumed'
-  | 'session.cancelled';
+  | 'session.cancelled'
+  | 'session.lease.lost';
 
 export interface SdkRuntimeEvent<TPayload = unknown> {
   eventId: string;
@@ -105,7 +129,7 @@ export interface SdkRuntimeEvent<TPayload = unknown> {
   type: SdkRuntimeEventType;
   timestamp: string;
   actor: 'client' | 'central' | 'sidecar' | 'system';
-  workerLeaseGeneration?: number;
+  sessionLeaseId?: string;
   payload: TPayload;
 }
 

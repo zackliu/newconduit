@@ -1,5 +1,5 @@
 import type { AgentSpecRegistry } from '../registries/agent-spec-registry';
-import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputRequest, SessionRecord, TenantContext } from '../../shared';
+import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionRecord, TenantContext, TurnFailedPayload } from '../../shared';
 import { AgentSpecAdmissionManager } from './agent-spec-admission-manager';
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
@@ -14,8 +14,21 @@ export interface StartSessionOutcome {
 export interface AcceptInputOutcome {
   session: SessionRecord;
   inputAcceptedEvent: RuntimeEvent;
+  workerCommand?: WorkerCommandOutput<SessionInputCommandPayload>;
+  turnFailedEvent?: RuntimeEvent<TurnFailedPayload>;
 }
 
+export interface ListSessionsOutcome {
+  responseEvent: RuntimeEvent<{ sessions: SessionRecord[] }>;
+}
+
+export interface ReadSessionEventsOutcome {
+  responseEvent: RuntimeEvent<{ events: RuntimeEvent[] }>;
+}
+
+/**
+ * Runs the tenant's session command workflow, turning app requests into durable session facts and worker-routable commands.
+ */
 export class SessionManager {
   constructor(
     private readonly tenant: TenantContext,
@@ -83,9 +96,92 @@ export class SessionManager {
       sessionId
     });
     const nextSession = await this.sessionLifecycleManager.advanceEventCursor(allocation.session, event.sequence);
+    if (!nextSession.currentWorkerId) {
+      const failedEvent = await this.eventLogManager.append<TurnFailedPayload>({
+        type: 'turn.failed',
+        actor: 'central',
+        payload: {
+          error: {
+            message: `session ${sessionId} has no current worker for input.received`,
+            code: 'no_current_worker'
+          }
+        },
+        turnSeq: allocation.turnSeq,
+        sequence: nextSession.eventCursor + 1,
+        sessionId
+      });
+      const failedSession = await this.sessionLifecycleManager.advanceEventCursor(nextSession, failedEvent.sequence);
+      return {
+        session: failedSession,
+        inputAcceptedEvent: event,
+        turnFailedEvent: failedEvent
+      };
+    }
+    const workerCommand = {
+      workerId: nextSession.currentWorkerId,
+      event: {
+        eventId: crypto.randomUUID(),
+        sessionId,
+        workerId: nextSession.currentWorkerId,
+        turnSeq: allocation.turnSeq,
+        sequence: event.sequence,
+        type: 'session.input' as const,
+        timestamp: event.timestamp,
+        actor: 'central' as const,
+        sessionLeaseId: nextSession.sessionLeaseId,
+        payload: {
+          sessionId,
+          workerId: nextSession.currentWorkerId,
+          sessionLeaseId: nextSession.sessionLeaseId!,
+          turnSeq: allocation.turnSeq,
+          input: request.input
+        }
+      }
+    };
     return {
       session: nextSession,
-      inputAcceptedEvent: event
+      inputAcceptedEvent: event,
+      workerCommand
+    };
+  }
+
+  async listSessions(context: RequestContext, ackId: string | undefined): Promise<ListSessionsOutcome> {
+    const sessions = await this.storage.readSessions();
+    return {
+      responseEvent: {
+        eventId: crypto.randomUUID(),
+        ackId,
+        sequence: 0,
+        type: 'session.listed',
+        timestamp: new Date().toISOString(),
+        actor: 'central',
+        payload: {
+          sessions: sessions
+            .filter((session) => session.owner === context.principal.principalId)
+            .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        }
+      }
+    };
+  }
+
+  async readSessionEvents(context: RequestContext, sessionId: string, ackId: string | undefined, afterSequence: number): Promise<ReadSessionEventsOutcome> {
+    const session = await this.storage.readSession(sessionId);
+    if (!session || session.owner !== context.principal.principalId) {
+      throw new Error(`session ${sessionId} was not found`);
+    }
+    return {
+      responseEvent: {
+        eventId: crypto.randomUUID(),
+        sessionId,
+        ackId,
+        sequence: 0,
+        type: 'session.events.replayed',
+        timestamp: new Date().toISOString(),
+        actor: 'central',
+        payload: {
+          events: await this.storage.readEvents(sessionId, afterSequence)
+        }
+      }
     };
   }
 }

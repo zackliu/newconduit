@@ -1,4 +1,4 @@
-import { SystemClock, type Clock, type RequestContext, type RuntimeConnectionGrant, type RuntimeEventTransport, type RuntimeStorage, type TenantConnectionIssuer, type TenantContext } from '../shared';
+import { SystemClock, type Clock, type RequestContext, type RuntimeConnectionGrant, type RuntimeEventTransport, type RuntimeStorage, type TenantConnectionIssuer, type TenantContext, type WorkerRegisterPayload } from '../shared';
 import { StaticAgentSpecRegistry, type AgentSpecRegistry } from './registries/agent-spec-registry';
 import { POC_AGENT_SPEC } from './registries/poc-class-registry';
 import { LocalFileStorage } from './storage/local-file-storage';
@@ -43,8 +43,8 @@ export class CentralService {
     return this.resolveTenantRuntime(tenantId, 'client negotiate').negotiateClientConnection(context);
   }
 
-  async negotiateSidecarConnectionForTenant(tenantId: string | null, context: RequestContext): Promise<RuntimeConnectionGrant> {
-    return this.resolveTenantRuntime(tenantId, 'sidecar negotiate').negotiateSidecarConnection(context);
+  async negotiateSidecarConnectionForTenant(tenantId: string | null, context: RequestContext, registration: WorkerRegisterPayload): Promise<RuntimeConnectionGrant> {
+    return this.resolveTenantRuntime(tenantId, 'sidecar negotiate').negotiateSidecarConnection(context, registration);
   }
 
   private resolveTenantRuntime(tenantId: string | null, operation: string): TenantRuntime {

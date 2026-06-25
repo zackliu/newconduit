@@ -118,12 +118,15 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
   }
 
   private toUserId(principal: PrincipalContext): string {
-    return `${principal.type}:${encodeURIComponent(principal.principalId)}`;
+    const encodedPrincipal = `${principal.type}:${encodeURIComponent(principal.principalId)}`;
+    return principal.connectionId ? `${encodedPrincipal}:connection:${encodeURIComponent(principal.connectionId)}` : encodedPrincipal;
   }
 
   private contextFromGroupMessage(args: OnGroupDataMessageArgs): RequestContext {
+    const principal = this.principalFromUserId(args.message.fromUserId);
     return {
-      principal: this.principalFromUserId(args.message.fromUserId)
+      principal,
+      connectionId: principal.connectionId
     };
   }
 
@@ -136,9 +139,19 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
     if (type !== 'user' && type !== 'service') {
       return { principalId: userId, type: 'user' };
     }
+    const rest = userId.slice(separatorIndex + 1);
+    const connectionMarker = ':connection:';
+    const connectionIndex = rest.indexOf(connectionMarker);
+    if (connectionIndex < 0) {
+      return {
+        principalId: decodeURIComponent(rest),
+        type
+      };
+    }
     return {
-      principalId: decodeURIComponent(userId.slice(separatorIndex + 1)),
-      type
+      principalId: decodeURIComponent(rest.slice(0, connectionIndex)),
+      type,
+      connectionId: decodeURIComponent(rest.slice(connectionIndex + connectionMarker.length))
     };
   }
 }

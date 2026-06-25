@@ -9,7 +9,7 @@ export interface SessionRecord {
   resolvedAgentSpec: ResolvedAgentSpec;
   status: SessionStatus;
   currentWorkerId?: string;
-  workerLeaseGeneration: number;
+  sessionLeaseId?: string;
   eventCursor: number;
   nextTurnSeq: number;
   workspaceRef: string;

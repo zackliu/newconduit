@@ -4,6 +4,9 @@ export interface VolumeSnapshotAdapter {
   copyVolumeToDirectory(volumePath: string, targetDirectory: string): Promise<void>;
 }
 
+/**
+ * Coordinates a durable pause boundary by capturing workspace and agent state volumes under the same session snapshot record.
+ */
 export class SnapshotController {
   constructor(
     private readonly storage: RuntimeStorage,

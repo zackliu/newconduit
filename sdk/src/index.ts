@@ -12,6 +12,7 @@ export type {
 	SdkRuntimeEventType,
 	SdkSubscription,
 	SessionInput,
+	SessionSummary,
 	SessionStatus,
 	StartSessionInput,
 	TurnEventOptions,

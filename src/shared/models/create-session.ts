@@ -22,6 +22,7 @@ export interface CreateSessionRequest {
 export interface PrincipalContext {
   principalId: string;
   type: 'user' | 'service';
+  connectionId?: string;
 }
 
 export interface RequestContext {

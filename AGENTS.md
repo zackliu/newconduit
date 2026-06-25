@@ -55,6 +55,7 @@ This repository is the design and future implementation workspace for **Agent Ru
 - Customer-facing TypeScript SDK package is present under `sdk/`; SDK source is under `sdk/src/`, SDK tests are under `sdk/tests/`, and SDK public protocol source of truth is `sdk/public-protocol-spec-ch.md`.
 - Scenario-based tests are under `tests/`; `pnpm test` compiles them to ignored `dist-tests/` output before running Node's test runner.
 - Web PubSub integration tests read `tests/.env` for `WEBPUBSUB_ENDPOINT` and use `DefaultAzureCredential`; run `az login` before expecting those tests to exercise the real Azure service.
+- Real Copilot SDK agent smoke tests read `tests/.env` for `RUN_REAL_COPILOT_AGENT_E2E`, `COPILOT_MODEL`, `COPILOT_PROVIDER_TYPE`, and `COPILOT_PROVIDER_BASE_URL`; provider auth uses Azure Identity/MSI, so run `az login` locally.
 - Verified bootstrap command: `pnpm install`.
 - Verified build command: `pnpm build`.
 - Verified typecheck command: `pnpm typecheck`.

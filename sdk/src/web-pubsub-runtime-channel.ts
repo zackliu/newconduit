@@ -1,6 +1,7 @@
 export type SdkRuntimeChannel =
   | { kind: 'tenant-inbox' }
-  | { kind: 'client-inbox'; principalId: string }
+  | { kind: 'client-inbox' }
+  | { kind: 'client-private-inbox'; clientConnectionId: string }
   | { kind: 'session-events'; sessionId: string };
 
 export class SdkWebPubSubRuntimeChannelMapper {
@@ -16,7 +17,9 @@ export class SdkWebPubSubRuntimeChannelMapper {
       case 'tenant-inbox':
         return `${tenantPrefix}:central:events`;
       case 'client-inbox':
-        return `${tenantPrefix}:client:${this.toGroupSegment(channel.principalId)}:events`;
+        return `${tenantPrefix}:clients`;
+      case 'client-private-inbox':
+        return `${tenantPrefix}:client:${this.toGroupSegment(channel.clientConnectionId)}:inbox`;
       case 'session-events':
         return `${tenantPrefix}:session:${this.toGroupSegment(channel.sessionId)}`;
     }

@@ -12,6 +12,7 @@ import type {
   SdkRuntimeEventType,
   SdkSubscription,
   SessionInput,
+  SessionSummary,
   SessionStatus,
   StartSessionInput,
   TurnEventOptions,
@@ -20,6 +21,7 @@ import type {
 
 const CLIENT_NEGOTIATE_PATH = '/client/negotiate';
 const TENANT_ID_QUERY = 'tenantId';
+const CLIENT_CONNECTION_ID_QUERY = 'clientConnectionId';
 const ACK_TIMEOUT_MS = 20_000;
 
 interface PendingAcknowledgement {
@@ -39,8 +41,11 @@ export class AgentRuntimeClient {
 
   private readonly channelMapper: SdkWebPubSubRuntimeChannelMapper;
   private readonly pendingAcknowledgements = new Map<string, PendingAcknowledgement>();
+  private readonly clientEventHandlers = new Set<(event: SdkRuntimeEvent) => void>();
+  private readonly clientConnectionId = crypto.randomUUID();
   private client: WebPubSubClient | undefined;
   private clientInboxGroup: string | undefined;
+  private clientPrivateInboxGroup: string | undefined;
 
   constructor(private readonly options: AgentRuntimeClientOptions) {
     this.channelMapper = new SdkWebPubSubRuntimeChannelMapper(options.tenantId);
@@ -56,20 +61,27 @@ export class AgentRuntimeClient {
       autoReconnect: false,
       autoRejoinGroups: false
     });
-    const clientInboxGroup = grant.clientInbox
-      ? this.channelMapper.toGroup({ kind: 'client-inbox', principalId: grant.clientInbox.principalId })
+    const clientInboxGroup = grant.clientInbox ? this.channelMapper.toGroup({ kind: 'client-inbox' }) : undefined;
+    const clientPrivateInboxGroup = grant.clientPrivateInbox
+      ? this.channelMapper.toGroup({ kind: 'client-private-inbox', clientConnectionId: grant.clientPrivateInbox.clientConnectionId })
       : undefined;
     client.on('group-message', (message: { message: { group: string; data: unknown } }) => {
-      if (message.message.group !== this.clientInboxGroup) {
-        return;
+      if (message.message.group === this.clientPrivateInboxGroup) {
+        this.dispatchPrivateAcknowledgement(message.message.data);
       }
-      this.dispatchAcknowledgement(message.message.data);
+      if (message.message.group === this.clientInboxGroup) {
+        this.dispatchClientProjectionEvent(message.message.data);
+      }
     });
     await client.start();
     if (clientInboxGroup) {
       await client.joinGroup(clientInboxGroup);
     }
+    if (clientPrivateInboxGroup) {
+      await client.joinGroup(clientPrivateInboxGroup);
+    }
     this.clientInboxGroup = clientInboxGroup;
+    this.clientPrivateInboxGroup = clientPrivateInboxGroup;
     this.client = client;
   }
 
@@ -79,15 +91,29 @@ export class AgentRuntimeClient {
       acknowledgement.reject(new Error('AgentRuntimeClient was closed before acknowledgement arrived'));
     }
     this.pendingAcknowledgements.clear();
+    this.clientEventHandlers.clear();
     await stopWebPubSubClient(this.client);
     this.client = undefined;
     this.clientInboxGroup = undefined;
+    this.clientPrivateInboxGroup = undefined;
   }
 
   async stop(): Promise<void> {
     await stopWebPubSubClient(this.client);
+    this.clientEventHandlers.clear();
     this.client = undefined;
     this.clientInboxGroup = undefined;
+    this.clientPrivateInboxGroup = undefined;
+  }
+
+  async subscribeClientEvents(handler: (event: SdkRuntimeEvent) => void): Promise<SdkSubscription> {
+    await this.connect();
+    this.clientEventHandlers.add(handler);
+    return {
+      close: async () => {
+        this.clientEventHandlers.delete(handler);
+      }
+    };
   }
 
   async publishTenantEvent<TPayload>(input: {
@@ -141,9 +167,87 @@ export class AgentRuntimeClient {
     };
   }
 
+  async listSessions(): Promise<SessionSummary[]> {
+    const ackId = crypto.randomUUID();
+    const acknowledgement = this.waitForAcknowledgement(ackId, 'session.listed');
+    await this.publishTenantEvent({
+      type: 'session.list.requested',
+      ackId,
+      payload: {}
+    });
+    const listed = await acknowledgement;
+    const payload = listed.payload as { sessions?: unknown[] };
+    if (!Array.isArray(payload.sessions)) {
+      throw new Error('central returned invalid session list');
+    }
+    return payload.sessions.map((session) => this.toSessionSummary(session));
+  }
+
+  async readSessionEvents(input: { sessionId: string; afterSequence?: number }): Promise<SdkRuntimeEvent[]> {
+    const ackId = crypto.randomUUID();
+    const waiter = await this.createSessionAcknowledgementWaiter(input.sessionId, ackId, 'session.events.replayed');
+    let replayed: SdkRuntimeEvent;
+    try {
+      await this.publishTenantEvent({
+        type: 'session.events.requested',
+        sessionId: input.sessionId,
+        ackId,
+        payload: {
+          afterSequence: input.afterSequence ?? 0
+        }
+      });
+      replayed = await waiter.acknowledgement;
+    } finally {
+      await waiter.close();
+    }
+    if (replayed.sessionId !== input.sessionId) {
+      throw new Error('session.events.replayed acknowledgement returned the wrong sessionId');
+    }
+    const payload = replayed.payload as { events?: unknown[] };
+    if (!Array.isArray(payload.events)) {
+      throw new Error('central returned invalid session events');
+    }
+    return payload.events.map((event) => this.parseEvent(event));
+  }
+
+  async createSessionAcknowledgementWaiter(sessionId: string, ackId: string, expectedType: SdkRuntimeEventType): Promise<{ acknowledgement: Promise<SdkRuntimeEvent>; close(): Promise<void> }> {
+    let timeout: NodeJS.Timeout;
+    let settled = false;
+    let resolveAcknowledgement!: (event: SdkRuntimeEvent) => void;
+    let rejectAcknowledgement!: (error: Error) => void;
+    const acknowledgement = new Promise<SdkRuntimeEvent>((resolve, reject) => {
+      resolveAcknowledgement = resolve;
+      rejectAcknowledgement = reject;
+      timeout = setTimeout(() => {
+        settled = true;
+        reject(new Error(`timed out waiting for ${expectedType} session acknowledgement`));
+      }, ACK_TIMEOUT_MS);
+    });
+    const subscription = await this.subscribeSessionEvents({ sessionId }, (event) => {
+      if (event.ackId !== ackId || settled) {
+        return;
+      }
+      clearTimeout(timeout);
+      settled = true;
+      if (event.type !== expectedType) {
+        rejectAcknowledgement(new Error(`expected ${expectedType} session acknowledgement but received ${event.type}`));
+        return;
+      }
+      resolveAcknowledgement(event);
+    });
+    return {
+      acknowledgement,
+      close: async () => {
+        clearTimeout(timeout);
+        await subscription.close();
+      }
+    };
+  }
+
   private async negotiate(): Promise<RuntimeConnectionGrant> {
     const url = new URL(CLIENT_NEGOTIATE_PATH, this.options.centralUrl);
     url.searchParams.set(TENANT_ID_QUERY, this.options.tenantId);
+    url.searchParams.set(CLIENT_CONNECTION_ID_QUERY, this.clientConnectionId);
     const response = await fetch(url, { method: 'POST' });
     if (!response.ok) {
       throw new Error(`client negotiate failed with HTTP ${response.status}`);
@@ -171,7 +275,19 @@ export class AgentRuntimeClient {
     throw new Error('received invalid SDK runtime event');
   }
 
-  private dispatchAcknowledgement(data: unknown): void {
+  private dispatchClientProjectionEvent(data: unknown): void {
+    let event: SdkRuntimeEvent;
+    try {
+      event = this.parseEvent(data);
+    } catch {
+      return;
+    }
+    for (const handler of this.clientEventHandlers) {
+      handler(event);
+    }
+  }
+
+  private dispatchPrivateAcknowledgement(data: unknown): void {
     let event: SdkRuntimeEvent;
     try {
       event = this.parseEvent(data);
@@ -208,14 +324,46 @@ export class AgentRuntimeClient {
       && typeof candidate.actor === 'string'
       && 'payload' in candidate;
   }
+
+  private toSessionSummary(value: unknown): SessionSummary {
+    if (typeof value !== 'object' || value === null) {
+      throw new Error('central returned invalid session summary');
+    }
+    const candidate = value as Record<string, unknown>;
+    const resolvedAgentSpec = typeof candidate.resolvedAgentSpec === 'object' && candidate.resolvedAgentSpec !== null
+      ? candidate.resolvedAgentSpec as Record<string, unknown>
+      : {};
+    if (typeof candidate.sessionId !== 'string'
+      || typeof candidate.status !== 'string'
+      || typeof resolvedAgentSpec.agentSpecId !== 'string'
+      || typeof candidate.owner !== 'string'
+      || typeof candidate.eventCursor !== 'number'
+      || typeof candidate.createdAt !== 'string'
+      || typeof candidate.updatedAt !== 'string') {
+      throw new Error('central returned invalid session summary');
+    }
+    return {
+      sessionId: candidate.sessionId,
+      status: candidate.status as SessionStatus,
+      agentSpecId: resolvedAgentSpec.agentSpecId,
+      owner: candidate.owner,
+      eventCursor: candidate.eventCursor,
+      createdAt: candidate.createdAt,
+      updatedAt: candidate.updatedAt
+    };
+  }
 }
 
 export class SessionClient {
   constructor(private readonly runtime: AgentRuntimeClient) {}
 
+  async list(): Promise<SessionSummary[]> {
+    return this.runtime.listSessions();
+  }
+
   async start(input: StartSessionInput): Promise<StartSessionResult> {
     const ackId = crypto.randomUUID();
-    const acknowledgement = this.runtime.waitForAcknowledgement(ackId, 'session.created');
+    const acknowledgement = this.runtime.waitForAcknowledgement(ackId, 'session.created.ack');
     await this.runtime.publishTenantEvent<CreateSessionInput>({
       type: 'session.create.requested',
       ackId,
@@ -231,7 +379,7 @@ export class SessionClient {
     });
     const created = await acknowledgement;
     const sessionId = this.requireSessionId(created);
-    const turnSeq = this.requireTurnSeq(created, 'session.created');
+    const turnSeq = this.requireTurnSeq(created, 'session.created.ack');
     const session = new SessionHandle(this.runtime, sessionId, 'created');
     const turn = new AgentTurn(this.runtime, sessionId, turnSeq);
     return { session, turn };
@@ -268,7 +416,7 @@ export class SessionHandle {
 
   async send(input: SessionInput): Promise<AgentTurn> {
     const ackId = crypto.randomUUID();
-    const acknowledgement = this.runtime.waitForAcknowledgement(ackId, 'input.accepted');
+    const acknowledgement = this.runtime.waitForAcknowledgement(ackId, 'input.accepted.ack');
     await this.runtime.publishTenantEvent({
       type: 'input.received',
       sessionId: this.id,
@@ -279,16 +427,20 @@ export class SessionHandle {
     });
     const accepted = await acknowledgement;
     if (accepted.sessionId !== this.id) {
-      throw new Error('input.accepted acknowledgement returned the wrong sessionId');
+      throw new Error('input.accepted.ack acknowledgement returned the wrong sessionId');
     }
     if (typeof accepted.turnSeq !== 'number') {
-      throw new Error('input.accepted acknowledgement did not include turnSeq');
+      throw new Error('input.accepted.ack acknowledgement did not include turnSeq');
     }
     return new AgentTurn(this.runtime, this.id, accepted.turnSeq);
   }
 
   async status(): Promise<SessionStatus> {
     return this.currentStatus;
+  }
+
+  async history(afterSequence = 0): Promise<SdkRuntimeEvent[]> {
+    return this.runtime.readSessionEvents({ sessionId: this.id, afterSequence });
   }
 
   async pause(): Promise<void> {
@@ -329,14 +481,14 @@ export class AgentTurn {
   async *events(options?: TurnEventOptions): AsyncIterable<AgentTurnEvent> {
     this.throwIfAborted(options?.signal);
     const pendingEvents: AgentTurnEvent[] = [];
+    const seenEventIds = new Set<string>();
     let notify: (() => void) | undefined;
     let closed = false;
-    const abortListener = (): void => {
-      closed = true;
-      notify?.();
-    };
-    options?.signal?.addEventListener('abort', abortListener, { once: true });
-    const subscription = await this.runtime.subscribeSessionEvents({ sessionId: this.sessionId }, (event) => {
+    const enqueue = (event: SdkRuntimeEvent): void => {
+      if (seenEventIds.has(event.eventId)) {
+        return;
+      }
+      seenEventIds.add(event.eventId);
       const turnEvent = this.toTurnEvent(event);
       if (!turnEvent) {
         return;
@@ -346,9 +498,32 @@ export class AgentTurn {
         closed = true;
       }
       notify?.();
-    });
-
+    };
+    const abortListener = (): void => {
+      closed = true;
+      notify?.();
+    };
+    options?.signal?.addEventListener('abort', abortListener, { once: true });
     pendingEvents.push({ type: 'turn.started', sessionId: this.sessionId, turnSeq: this.sequence });
+    const subscription = await this.runtime.subscribeSessionEvents({ sessionId: this.sessionId }, enqueue);
+    void this.runtime.readSessionEvents({ sessionId: this.sessionId, afterSequence: 0 }).then((events) => {
+      for (const event of events) {
+        enqueue(event);
+      }
+      notify?.();
+    }).catch((error: unknown) => {
+      pendingEvents.push({
+        type: 'turn.failed',
+        sessionId: this.sessionId,
+        turnSeq: this.sequence,
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          code: 'event_replay_failed'
+        }
+      });
+      closed = true;
+      notify?.();
+    });
     notify?.();
 
     try {
@@ -391,6 +566,19 @@ export class AgentTurn {
     if (event.turnSeq !== this.sequence && payloadTurnSeq !== this.sequence) {
       return undefined;
     }
+    if (event.type === 'turn.completed') {
+      const resultPayload = this.toRecord(payload.result);
+      const result: AgentTurnResult = {
+        sessionId: this.sessionId,
+        turnSeq: this.sequence,
+        message: typeof resultPayload.message === 'string' ? resultPayload.message : undefined,
+        output: 'output' in resultPayload ? resultPayload.output : undefined
+      };
+      return { type: 'turn.completed', sessionId: this.sessionId, turnSeq: this.sequence, result };
+    }
+    if (event.type === 'turn.failed') {
+      return { type: 'turn.failed', sessionId: this.sessionId, turnSeq: this.sequence, error: this.toTurnError(payload.error) };
+    }
     if (event.type !== 'agent.output') {
       return undefined;
     }
@@ -400,16 +588,39 @@ export class AgentTurn {
     if (typeof payload.progress === 'string') {
       return { type: 'agent.progress', sessionId: this.sessionId, turnSeq: this.sequence, message: payload.progress };
     }
-    if (payload.error) {
-      return { type: 'turn.failed', sessionId: this.sessionId, turnSeq: this.sequence, error: this.toTurnError(payload.error) };
+    const toolStarted = this.toRecord(payload.toolStarted);
+    if (typeof toolStarted.toolCallId === 'string' && typeof toolStarted.toolName === 'string') {
+      return {
+        type: 'tool.started',
+        sessionId: this.sessionId,
+        turnSeq: this.sequence,
+        toolCallId: toolStarted.toolCallId,
+        toolName: toolStarted.toolName,
+        inputSummary: toolStarted.inputSummary
+      };
     }
-    const result: AgentTurnResult = {
-      sessionId: this.sessionId,
-      turnSeq: this.sequence,
-      message: typeof payload.message === 'string' ? payload.message : undefined,
-      output: 'output' in payload ? payload.output : payload
-    };
-    return { type: 'turn.completed', sessionId: this.sessionId, turnSeq: this.sequence, result };
+    const toolCompleted = this.toRecord(payload.toolCompleted);
+    if (typeof toolCompleted.toolCallId === 'string' && typeof toolCompleted.toolName === 'string') {
+      return {
+        type: 'tool.completed',
+        sessionId: this.sessionId,
+        turnSeq: this.sequence,
+        toolCallId: toolCompleted.toolCallId,
+        toolName: toolCompleted.toolName,
+        outputSummary: toolCompleted.outputSummary
+      };
+    }
+    if (payload.approvalRequested) {
+      return { type: 'approval.requested', sessionId: this.sessionId, turnSeq: this.sequence, approval: payload.approvalRequested };
+    }
+    if (payload.error) {
+      return { type: 'agent.internal', sessionId: this.sessionId, turnSeq: this.sequence, label: 'agent.error', detail: payload.error };
+    }
+    const internalEvent = this.toRecord(payload.internalEvent);
+    if (typeof internalEvent.type === 'string') {
+      return { type: 'agent.internal', sessionId: this.sessionId, turnSeq: this.sequence, label: internalEvent.type, detail: internalEvent.data };
+    }
+    return undefined;
   }
 
   private toRecord(value: unknown): Record<string, unknown> {

@@ -29,7 +29,8 @@ export class InMemoryRuntimeTransportAdapter implements RuntimeEventTransport, T
   }
 
   private issueConnection(principal: PrincipalContext, channels: RuntimeChannel[]): RuntimeConnectionGrant {
-    return { url: `memory://poc?principal=${encodeURIComponent(principal.principalId)}&channels=${encodeURIComponent(channels.map((channel) => this.channelKey(channel)).join(','))}` };
+    const connection = principal.connectionId ? `&connection=${encodeURIComponent(principal.connectionId)}` : '';
+    return { url: `memory://poc?principal=${encodeURIComponent(principal.principalId)}${connection}&channels=${encodeURIComponent(channels.map((channel) => this.channelKey(channel)).join(','))}` };
   }
 
   private contextFromEvent(event: RuntimeEvent): RequestContext {
@@ -46,7 +47,9 @@ export class InMemoryRuntimeTransportAdapter implements RuntimeEventTransport, T
       case 'tenant-inbox':
         return 'tenant-inbox';
       case 'client-inbox':
-        return `client-inbox:${channel.principalId}`;
+        return 'client-inbox';
+      case 'client-private-inbox':
+        return `client-private-inbox:${channel.clientConnectionId}`;
       case 'session-events':
         return `session-events:${channel.sessionId}`;
       case 'worker-commands':

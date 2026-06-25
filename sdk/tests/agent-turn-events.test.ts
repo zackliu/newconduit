@@ -1,0 +1,164 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { AgentTurn } from '../src/agent-runtime-client';
+
+test('scenario: explicit turn completed event completes the turn after final agent output', async () => {
+  const runtime = {
+    async subscribeSessionEvents(_input: { sessionId: string }, handler: (event: unknown) => void) {
+      queueMicrotask(() => {
+        handler({
+          eventId: 'event-agent-output',
+          sequence: 1,
+          type: 'agent.output',
+          timestamp: '2026-06-25T00:00:00.000Z',
+          actor: 'sidecar',
+          sessionId: 'session-1',
+          turnSeq: 2,
+          payload: {
+            message: 'done',
+            output: { content: 'done' },
+            internalEvent: {
+              type: 'assistant.message',
+              data: { content: 'done' }
+            }
+          }
+        });
+        handler({
+          eventId: 'event-turn-completed',
+          sequence: 2,
+          type: 'turn.completed',
+          timestamp: '2026-06-25T00:00:01.000Z',
+          actor: 'sidecar',
+          sessionId: 'session-1',
+          turnSeq: 2,
+          payload: {
+            result: {
+              message: 'done',
+              output: { content: 'done' }
+            }
+          }
+        });
+      });
+      return { close: async () => undefined };
+    },
+    async readSessionEvents() {
+      return [];
+    }
+  };
+
+  const turn = new AgentTurn(runtime as never, 'session-1', 2);
+  const events = [];
+  for await (const event of turn.events()) {
+    events.push(event);
+  }
+
+  assert.deepEqual(events, [
+    { type: 'turn.started', sessionId: 'session-1', turnSeq: 2 },
+    { type: 'agent.internal', sessionId: 'session-1', turnSeq: 2, label: 'assistant.message', detail: { content: 'done' } },
+    {
+      type: 'turn.completed',
+      sessionId: 'session-1',
+      turnSeq: 2,
+      result: {
+        sessionId: 'session-1',
+        turnSeq: 2,
+        message: 'done',
+        output: { content: 'done' }
+      }
+    }
+  ]);
+});
+
+test('scenario: persisted terminal event completes a turn even when live subscription missed it', async () => {
+  const runtime = {
+    async subscribeSessionEvents() {
+      return { close: async () => undefined };
+    },
+    async readSessionEvents() {
+      return [{
+        eventId: 'event-turn-failed-before-subscribe',
+        sequence: 3,
+        type: 'turn.failed',
+        timestamp: '2026-06-25T00:00:01.000Z',
+        actor: 'central',
+        sessionId: 'session-1',
+        turnSeq: 2,
+        payload: {
+          error: {
+            message: 'session has no current worker',
+            code: 'no_current_worker'
+          }
+        }
+      }];
+    }
+  };
+
+  const turn = new AgentTurn(runtime as never, 'session-1', 2);
+  const events = [];
+  for await (const event of turn.events()) {
+    events.push(event);
+  }
+
+  assert.deepEqual(events, [
+    { type: 'turn.started', sessionId: 'session-1', turnSeq: 2 },
+    {
+      type: 'turn.failed',
+      sessionId: 'session-1',
+      turnSeq: 2,
+      error: {
+        message: 'session has no current worker',
+        code: 'no_current_worker',
+        details: undefined
+      }
+    }
+  ]);
+});
+
+test('scenario: live terminal event completes a turn while replay acknowledgement is pending', async () => {
+  const runtime = {
+    async subscribeSessionEvents(_input: { sessionId: string }, handler: (event: unknown) => void) {
+      queueMicrotask(() => {
+        handler({
+          eventId: 'event-turn-completed-live',
+          sequence: 2,
+          type: 'turn.completed',
+          timestamp: '2026-06-25T00:00:01.000Z',
+          actor: 'sidecar',
+          sessionId: 'session-1',
+          turnSeq: 2,
+          payload: {
+            result: {
+              message: 'live done'
+            }
+          }
+        });
+      });
+      return { close: async () => undefined };
+    },
+    async readSessionEvents() {
+      await new Promise(() => undefined);
+      return [];
+    }
+  };
+
+  const turn = new AgentTurn(runtime as never, 'session-1', 2);
+  const events = [];
+  for await (const event of turn.events()) {
+    events.push(event);
+  }
+
+  assert.deepEqual(events, [
+    { type: 'turn.started', sessionId: 'session-1', turnSeq: 2 },
+    {
+      type: 'turn.completed',
+      sessionId: 'session-1',
+      turnSeq: 2,
+      result: {
+        sessionId: 'session-1',
+        turnSeq: 2,
+        message: 'live done',
+        output: undefined
+      }
+    }
+  ]);
+});

@@ -22,8 +22,8 @@ export {
 	EventLogManager,
 	SessionAssignmentManager,
 	SessionLifecycleManager,
+	SessionLeaseManager,
 	SessionManager,
-	WorkerLeaseManager,
 	WorkerManager,
 	WorkerSelector
 } from './managers';

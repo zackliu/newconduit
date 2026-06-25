@@ -5,6 +5,6 @@ export type { SessionAssignmentOutcome, WorkerCommandOutput } from './session-as
 export { SessionLifecycleManager } from './session-lifecycle-manager';
 export { SessionManager } from './session-manager';
 export type { AcceptInputOutcome, StartSessionOutcome } from './session-manager';
-export { WorkerLeaseManager } from './worker-lease-manager';
+export { SessionLeaseManager } from './worker-lease-manager';
 export { WorkerManager } from './worker-manager';
 export { WorkerSelector } from './worker-selector';

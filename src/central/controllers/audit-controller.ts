@@ -1,5 +1,8 @@
 import type { AuditRecord, Clock } from '../../shared';
 
+/**
+ * Creates audit records at central control-plane boundaries where runtime actions need a durable accountability trail.
+ */
 export class AuditController {
   constructor(private readonly clock: Clock) {}
 

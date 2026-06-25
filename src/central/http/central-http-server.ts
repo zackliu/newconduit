@@ -57,6 +57,11 @@ export class CentralHttpServer {
   }
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204, this.corsHeaders());
+      response.end();
+      return;
+    }
     const path = new URL(request.url ?? '/', 'http://localhost').pathname;
     const route = this.routes.find((candidate) => candidate.method === request.method && candidate.path === path);
     if (route) {
@@ -69,7 +74,15 @@ export class CentralHttpServer {
   }
 
   private writeJson(response: ServerResponse, statusCode: number, body: unknown): void {
-    response.writeHead(statusCode, { 'content-type': 'application/json' });
+    response.writeHead(statusCode, { 'content-type': 'application/json', ...this.corsHeaders() });
     response.end(JSON.stringify(body));
+  }
+
+  private corsHeaders(): Record<string, string> {
+    return {
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'GET,POST,OPTIONS',
+      'access-control-allow-headers': 'content-type'
+    };
   }
 }

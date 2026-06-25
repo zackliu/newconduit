@@ -1,7 +1,9 @@
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
-import type { Clock, RequestContext, RuntimeConnectionGrant, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext } from '../shared';
-import { ClientRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
-import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionManager, WorkerLeaseManager, WorkerManager, WorkerSelector } from './managers';
+import type { Clock, RequestContext, RuntimeConnectionGrant, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext, WorkerRegisterPayload } from '../shared';
+import { AgentRuntimeEventController, ClientRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
+import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionLeaseManager, SessionManager, WorkerManager, WorkerSelector } from './managers';
+
+const WORKER_EXPIRY_SCAN_INTERVAL_MS = 5_000;
 
 export interface TenantRuntimeOptions {
   tenant: TenantContext;
@@ -14,21 +16,24 @@ export interface TenantRuntimeOptions {
 
 export class TenantRuntime {
   private readonly tenant: TenantContext;
+  private readonly storage: RuntimeStorage;
   private readonly eventTransport: RuntimeEventTransport;
   private readonly connectionIssuer: TenantConnectionIssuer;
   private readonly tenantInboxController: TenantInboxController;
   private readonly workerManager: WorkerManager;
+  private workerExpiryTimer: NodeJS.Timeout | undefined;
 
   constructor(options: TenantRuntimeOptions) {
     this.tenant = options.tenant;
+    this.storage = options.storage;
     this.eventTransport = options.eventTransport;
     this.connectionIssuer = options.connectionIssuer;
     const agentSpecAdmissionManager = new AgentSpecAdmissionManager(options.clock);
     const sessionLifecycleManager = new SessionLifecycleManager(options.storage, options.clock);
     const eventLogManager = new EventLogManager(options.storage, options.clock);
     const workerSelector = new WorkerSelector();
-    const workerLeaseManager = new WorkerLeaseManager(options.storage);
-    const sessionAssignmentManager = new SessionAssignmentManager(options.storage, options.clock, workerSelector, workerLeaseManager);
+    const sessionLeaseManager = new SessionLeaseManager(options.storage);
+    const sessionAssignmentManager = new SessionAssignmentManager(options.storage, options.clock, workerSelector, sessionLeaseManager);
     const sessionManager = new SessionManager(
       options.tenant,
       options.storage,
@@ -38,36 +43,52 @@ export class TenantRuntime {
       eventLogManager,
       sessionAssignmentManager
     );
-    this.workerManager = new WorkerManager(options.storage, options.clock);
+    this.workerManager = new WorkerManager(options.storage, options.clock, undefined, options.eventTransport);
     this.tenantInboxController = new TenantInboxController(
       options.tenant.tenantId,
       new WorkerRuntimeEventController(this.workerManager),
-      new ClientRuntimeEventController(sessionManager, options.eventTransport)
+      new AgentRuntimeEventController(options.storage, eventLogManager, sessionLifecycleManager, sessionLeaseManager, options.eventTransport),
+      new ClientRuntimeEventController(sessionManager, options.eventTransport),
+      options.eventTransport
     );
   }
 
   async start(): Promise<void> {
     await this.eventTransport.subscribe({ kind: 'tenant-inbox' }, (envelope) => this.tenantInboxController.handleRuntimeEvent(envelope.context, envelope.event));
+    this.workerExpiryTimer = setInterval(() => {
+      void this.expireWorkers().catch((error: unknown) => {
+        console.error('worker expiry scan failed', error);
+      });
+    }, WORKER_EXPIRY_SCAN_INTERVAL_MS);
+    this.workerExpiryTimer.unref?.();
   }
 
   async negotiateClientConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
+    if (!context.connectionId) {
+      throw new Error('clientConnectionId is required for client negotiate');
+    }
+    const clientConnectionId = context.connectionId;
     const grant = await this.connectionIssuer.issueClientConnection({
-      principal: context.principal,
-      channels: [{ kind: 'tenant-inbox' }, { kind: 'client-inbox', principalId: context.principal.principalId }]
+      principal: { ...context.principal, connectionId: clientConnectionId },
+      channels: [{ kind: 'tenant-inbox' }, { kind: 'client-inbox' }, { kind: 'client-private-inbox', clientConnectionId }]
     });
     return {
       ...grant,
-      clientInbox: {
-        principalId: context.principal.principalId
-      }
+      clientInbox: {},
+      clientPrivateInbox: { clientConnectionId }
     };
   }
 
-  async negotiateSidecarConnection(context: RequestContext): Promise<RuntimeConnectionGrant> {
-    return this.connectionIssuer.issueSidecarConnection({
+  async negotiateSidecarConnection(context: RequestContext, registration: WorkerRegisterPayload): Promise<RuntimeConnectionGrant> {
+    const worker = await this.workerManager.register({ tenantId: this.tenant.tenantId, ...registration });
+    const grant = await this.connectionIssuer.issueSidecarConnection({
       principal: context.principal,
-      channels: [{ kind: 'tenant-inbox' }]
+      channels: [
+        { kind: 'tenant-inbox' },
+        { kind: 'worker-commands', workerId: worker.workerId }
+      ]
     });
+    return { ...grant, worker };
   }
 
   async expireWorkers(): Promise<void> {

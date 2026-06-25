@@ -4,6 +4,9 @@ export interface VolumeRestoreAdapter {
   restoreDirectoryToVolume(sourceDirectory: string, volumePath: string): Promise<void>;
 }
 
+/**
+ * Rebuilds the worker-side volumes for a planned resume, keeping recovery as a central-orchestrated session transition.
+ */
 export class RecoveryController {
   constructor(private readonly volumeAdapter: VolumeRestoreAdapter) {}
 

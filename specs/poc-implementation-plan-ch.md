@@ -18,11 +18,11 @@
 5. Principal 来自 negotiate/connection context；runtime message ingress 使用 transport envelope 中的同一 RequestContext。Create session payload 不自报 `principal`、`owner`。
 6. SDK 是客户侧代码，放在 `sdk/`，不 import `src/`。`src/` 是服务提供商 runtime implementation；SDK 只按 `sdk/public-protocol-spec-ch.md` 实现 public protocol。
 7. Public protocol 变化必须同步更新 `sdk/public-protocol-spec-ch.md`、SDK 类型、central/sidecar public protocol 处理、e2e tests。
-8. Worker 是注册进 tenant runtime 的可用 capacity。POC 支持两类 capacity source：standalone sidecar direct registration、WorkerPool controller/adaptor provisioned registration；注册成功后都进入同一套 Worker registry contract。
+8. Worker 是注册进 tenant runtime 的可用 capacity。实现计划先用 standalone sidecar direct registration 验证 Worker lifecycle contract，再接入 POC 的 Docker WorkerPool controller/adaptor provisioned registration；注册成功后都进入同一套 Worker registry contract。Standalone path 是验证 wedge，不是新的 hosting model。
 9. Worker selection 只使用 AgentSpec selector 与 Worker record 上的 `sidecarClass`、labels、capacity、conditions；不按 standalone、Docker、WorkerPool source 分叉。
 10. Worker registry 必须区分 active Worker 和历史/tombstone record。只有 active、ready、allocatable 的 Worker 能被 selection；closed、expired、disconnected、draining 且无可分配容量的 Worker 都不能被分配新 session。
 11. 先跑通 standalone sidecar worker、Client SDK create session、assignment、Copilot process-wrapper 和多轮 session event loop，再接入 WorkerPool provisioning 和 WorkerCapacityScaler。
-12. Copilot session history 由 Copilot 自己的 session files 承载；POC 通过本地 session 目录验证 process-wrapper 行为，通过 Docker volume snapshot/restore 保留这些文件。
+12. Agent session history 由具体 agent adapter 自己的 state files 承载；POC 通过 sidecar-managed agent session state directory/volume 验证 process-wrapper 行为，通过 Docker volume snapshot/restore 保留这些文件。Event cursor、event log 和 snapshot marker 仍由 central-owned storage 表达，sidecar-local metadata 不作为 session truth。
 13. 每个 slice 的测试都用 scenario 名字描述系统结果。
 14. 不为 POC 添加 crash recovery、Kubernetes、完整 auth matrix、非 Web PubSub transport。
 
@@ -86,25 +86,26 @@ Expect：
 
 ## 5. Slice 3：Standalone Sidecar Worker Lifecycle
 
-目标：先不依赖 WorkerPool provisioning 和 WorkerCapacityScaler，手动启动一个 standalone sidecar，让它通过同一个 Worker lifecycle contract 注册、保活、更新容量、退出和过期摘除。这个 slice 要把 Worker 作为可用 capacity 的完整生命周期做好，而不是只证明一次 register 成功。
+目标：先不依赖 WorkerPool provisioning 和 WorkerCapacityScaler，手动启动一个 standalone sidecar，让它作为 Worker 运行实体通过同一个 Worker lifecycle contract 注册、首个 heartbeat 后进入 ready、持续保活、drain/evacuate/close、以及过期摘除。这个 slice 要把 Worker 作为可用 capacity 的完整生命周期做好，而不是只证明一次 register 成功。
 
 实现范围：
 
-- Sidecar daemon 的 standalone worker mode，启动参数包含 central URL、tenant id、sidecar identity、labels、capacity。
-- Sidecar 使用 central URL 和 tenant id 调用 `/sidecar/negotiate?tenantId=<tenantId>`，拿到 Web PubSub client access URL。
-- Sidecar 使用 `/sidecar/negotiate` 连接 runtime transport；scenario test 可使用 in-memory runtime transport。
-- Sidecar publish `worker.register` 到 tenant inbox runtime channel。
+- Sidecar daemon 的 standalone worker mode，启动参数包含 central URL、tenant id、sidecarClass、labels、capacity 和可选 description。Worker runtime identity 是 `workerId`；hostname、pod name、container id 只能作为 labels 或 description。
+- Sidecar 使用 central URL 和 tenant id 调用 `/sidecar/negotiate?tenantId=<tenantId>`，在 JSON body 中提交 sidecarClass、labels、capacity、allocatable 和可选 description。
+- Central 在 `/sidecar/negotiate` boundary 内创建 WorkerRecord，写 central-authored `worker.registered` lifecycle event，并返回 Web PubSub client access URL 与 central 分配的 `workerId`。
+- Sidecar 使用 access URL 连接 runtime transport 后，订阅 `worker-commands:{workerId}` runtime channel。
+- Register 只创建 registered Worker fact；Worker 必须 publish 首个 `worker.heartbeat` 后才进入 active ready selection path。
 - Sidecar 定期 publish `worker.heartbeat`，刷新 `heartbeatAt`、`expiresAt`、capacity、allocatable、conditions。
-- Sidecar graceful shutdown 时先 publish `worker.drain.requested`；没有 active lease 后再 publish `worker.close.requested`。
-- `WorkerManager` 写 `workers/<workerId>.json`，并维护 active worker state。
-- Worker record 包含 `workerId`、`sidecarId`、`sidecarClass`、labels、capacity、allocatable、conditions、`heartbeatAt`、`expiresAt`、`generation`、terminal reason。
-- `WorkerRuntimeEventController` 解析 worker runtime events，`WorkerManager` 处理 register、heartbeat、condition/capacity update、draining、close、disconnect/TTL expiry、active state removal。
-- Keepalive expiry scan 使用 central time 判断过期 Worker，并把它从 active worker index 摘掉。
-- Worker close 发生在 active lease 上时，central append lease lost event；keepalive expiry 发生在 active lease 上时，central append lease lost event。POC 不自动 crash recovery，session 进入 `failed`，并记录 `worker_lost` reason。
-- Terminal Worker 不会被旧 heartbeat 复活；sidecar restart 与 WorkerPool reprovision 必须重新走 `worker.register` 并获得新的 active Worker generation。
-- `WorkerSelector` 只读取 ready 且 allocatable 的 active Worker facts。
+- Central Worker lifecycle reconciler 周期性调用 keepalive expiry scan。过期 Worker 触发 evacuate：central 从 active registry 移除 Worker，append `worker.expired`，对其持有的 session lease append `session.lease.lost`，POC 默认把 session 置为 `failed`。
+- Drain 是主动迁移流程：central 把 Worker 标记为 `draining`，停止新 assignment，尝试让该 Worker 上的 session 离开并在其他 active 且 label 匹配的 Worker 上启动。POC 迁移能力不足时按 session policy 默认 failed。Drain 完成后 central publish `worker.close.requested`，Worker graceful 退出。
+- Close 是 terminal：central append `worker.closed`，从 active registry 移除 Worker；后续 heartbeat 必须 rejected，不能复活。
+- `WorkerManager` 写 `workers/<workerId>.json` 作为历史 record，并维护 active worker registry view。Terminal record 可以保留供 debug/audit，但 selection/list active 不能返回。
+- Worker record 包含 `workerId`、`sidecarClass`、labels、description、capacity、allocatable、conditions、`heartbeatAt`、`expiresAt`、terminal reason。
+- `WorkerRuntimeEventController` 解析 worker runtime events，`WorkerManager` 处理 register、first heartbeat readiness、heartbeat refresh、condition/capacity update、drain、evacuate、close、active state removal。
+- Session assignment 写 `currentWorkerId` 和 `sessionLeaseId`。Sidecar 写 session-scoped events 必须携带当前 `sessionLeaseId`；central 拒绝旧 lease 或未知 lease。
+- `WorkerSelector` 只读取 active registry 中 ready、未过期、allocatable、label 匹配的 Worker facts。
 
-Scenario-based test：`scenario: standalone sidecar registers ready worker capacity`
+Scenario-based test：`scenario: standalone sidecar registers worker and becomes ready after first heartbeat`
 
 Given：
 
@@ -115,12 +116,10 @@ Given：
 Expect：
 
 - Central 分配 `workerId`。
-- Worker record 包含 `sidecarId`。
 - Worker record 的 `sidecarClass` 是 `copilot-process-wrapper`。
 - Worker labels 包含 `agent=copilot`。
-- Worker capacity/allocatable 是 1。
-- Worker condition 是 `ready`。
-- Worker registry 让该 Worker 进入和后续 WorkerPool provisioned Worker 相同的 selection path。
+- Register 后但首个 heartbeat 前，Worker 不在 ready selection path。
+- 首个 heartbeat 后，Worker capacity/allocatable 是 1，condition 是 `ready`，并进入和后续 WorkerPool provisioned Worker 相同的 selection path。
 - Central 不调用 WorkerPool controller/adaptor，也不调用 WorkerCapacityScaler。
 
 Scenario-based test：`scenario: sidecar negotiates real Web PubSub connection and registers worker`
@@ -130,17 +129,17 @@ Given：
 - `tests/.env` 提供 `WEBPUBSUB_ENDPOINT`。
 - Central HTTP server 已启动，并暴露 `/sidecar/negotiate?tenantId=<tenantId>`。
 - Central runtime 使用真实 Web PubSub client connection 订阅 tenant inbox runtime channel。
-- Standalone sidecar 只拿到 central URL、tenant id、sidecar identity、labels、capacity。
+- Standalone sidecar 只拿到 central URL、tenant id、labels、capacity 和可选 description。
 
 Expect：
 
-- Sidecar 调用 central `/sidecar/negotiate?tenantId=<tenantId>`。
-- Central 为该 tenant 的 sidecar runtime channels 颁发 Web PubSub client access URL。
+- Sidecar 调用 central `/sidecar/negotiate?tenantId=<tenantId>`，body 中包含 sidecarClass、labels、capacity、allocatable。
+- Central 创建 WorkerRecord，并为该 tenant 的 tenant inbox 与 `worker-commands:{workerId}` runtime channels 颁发 Web PubSub client access URL。
 - Sidecar 使用 access URL 建立真实 Web PubSub client connection。
-- Sidecar publish `worker.register` 到 tenant inbox runtime channel。
-- Central runtime connection 从真实 Web PubSub 收到 `worker.register`。
-- Central 写入 active Worker record。
-- Worker record 的 tenant 来自 sidecar 启动时使用的 tenant id。
+- Sidecar 使用 negotiate response 中的 `workerId` 订阅 worker commands runtime channel。
+- Sidecar 使用该 `workerId` publish 首个 `worker.heartbeat`。
+- Central 收到首个 heartbeat 后写入 active ready Worker record。
+- Worker record 的 tenant 来自 `/sidecar/negotiate` 解析出的 tenant runtime；sidecar negotiate body 不自报 `tenantId`。
 - Worker record 的 labels、capacity、allocatable、conditions 满足后续 selection contract。
 
 Scenario-based test：`scenario: worker heartbeat refreshes active capacity`
@@ -157,37 +156,37 @@ Expect：
 - Worker 仍在 active worker index 中。
 - 如果 Worker condition 是 `ready` 且 allocatable 大于 0，Worker selection 可以选择它。
 
-Scenario-based test：`scenario: graceful worker close removes worker from active selection`
+Scenario-based test：`scenario: drain evacuates sessions then closes worker`
 
 Given：
 
-- Worker 已注册且没有 active lease。
-- Sidecar publish `worker.close.requested`。
+- Worker 已注册且可能持有 active session lease。
+- Central 收到 `worker.drain.requested`。
+
+Expect：
+
+- Central append `worker.draining` event。
+- Worker condition 变为 `draining`，allocatable 变为 0，Worker selection 不再返回该 Worker。
+- Central 对该 Worker 上的每个 session lease 执行 drain：尝试选择其他 active 且 label 匹配的 Worker 并写入新的 `sessionLeaseId`。
+- POC 若不能恢复该 session，则 append `session.lease.lost`，session 进入 `failed`，记录 `worker_lost` reason。
+- Worker 上没有 active lease 后，central publish `worker.close.requested`。
+- Worker graceful 退出后停止 heartbeat；central append `worker.closed` 并从 active registry 移除 Worker。
+
+Scenario-based test：`scenario: graceful worker close removes worker from active registry`
+
+Given：
+
+- Worker 已 drain 完成且没有 active lease。
+- Central publish `worker.close.requested`，Worker graceful 退出或 sidecar publish `worker.close.requested`。
 
 Expect：
 
 - Central append `worker.closed` event。
 - Worker record 进入 terminal closed state，并记录 reason。
-- Worker 从 active worker index 摘掉。
-- Worker selection 不再返回该 Worker。
-- Close 行为不读取 Worker source。
+- Worker 从 active registry 移除，Worker selection 不再返回该 Worker。
+- 后续 heartbeat 被 rejected，不能让该 Worker 回到 active。
 
-Scenario-based test：`scenario: draining worker stops new assignment while existing lease finishes`
-
-Given：
-
-- Worker 已注册且可能持有 active lease。
-- Sidecar publish `worker.drain.requested`。
-
-Expect：
-
-- Central append `worker.draining` event。
-- Worker condition 变为 `draining`。
-- Worker 保留已有 lease，但 allocatable 对新 assignment 变为 0。
-- Worker selection 不再为新 queued session 返回该 Worker。
-- Existing lease 正常 release 后，sidecar 可以 close，central 再把 Worker 从 active worker index 摘掉。
-
-Scenario-based test：`scenario: expired worker keepalive removes worker from active selection`
+Scenario-based test：`scenario: expired worker is evacuated and removed from active registry`
 
 Given：
 
@@ -197,13 +196,14 @@ Given：
 
 Expect：
 
-- Keepalive expiry scan append `worker.expired` event。
+- Central Worker lifecycle reconciler 周期性运行 keepalive expiry scan，并 append `worker.expired` event。
 - Worker record 进入 expired/disconnected terminal state，并记录 last heartbeat。
-- Worker 从 active worker index 摘掉。
+- Worker 从 active registry 移除。
 - Worker selection 不再返回该 Worker。
-- 过期摘除不依赖 Worker source。
+- 如果 Worker 持有 session lease，central append session-scoped `session.lease.lost` event；POC 默认把 session 置为 `failed`。
+- 过期摘除不依赖 Worker source，也不要求 dead Worker ack。
 
-Scenario-based test：`scenario: leased worker close marks lease lost without crash recovery`
+Scenario-based test：`scenario: leased worker close marks session lease lost without crash recovery`
 
 Given：
 
@@ -213,12 +213,12 @@ Given：
 Expect：
 
 - Central append `worker.closed` event。
-- Central append session-scoped `worker.lease.lost` event。
-- Worker 从 active worker index 摘掉。
+- Central append session-scoped `session.lease.lost` event。
+- Worker 从 active registry 移除。
 - Session 不再向该 Worker route input。
 - POC 不自动恢复该 session；session 进入 `failed`，并记录 `worker_lost` reason。
 
-Scenario-based test：`scenario: leased worker expiry marks lease lost without crash recovery`
+Scenario-based test：`scenario: leased worker expiry marks session lease lost without crash recovery`
 
 Given：
 
@@ -228,24 +228,24 @@ Given：
 Expect：
 
 - Central append `worker.expired` event。
-- Central append session-scoped `worker.lease.lost` event。
-- Worker 从 active worker index 摘掉。
+- Central append session-scoped `session.lease.lost` event。
+- Worker 从 active registry 移除。
 - Session 不再向该 Worker route input。
 - POC 不自动恢复该 session；session 进入 `failed`，并记录 `worker_lost` reason。
 
-Scenario-based test：`scenario: stale heartbeat cannot resurrect terminal worker`
+Scenario-based test：`scenario: stale heartbeat cannot resurrect removed worker`
 
 Given：
 
-- Worker 已经进入 terminal state，并已从 active worker index 摘掉。
-- Central 随后收到旧 generation 的 `worker.heartbeat`。
+- Worker 已经进入 terminal state，并已从 active registry 移除。
+- Central 随后收到该 `workerId` 的迟到 `worker.heartbeat`。
 
 Expect：
 
-- Central 不把该 Worker 放回 active worker index。
+- Central 不把该 Worker 放回 active registry。
 - Central 不更新该 Worker 为 `ready`。
 - Central append `worker.heartbeat.rejected` event。
-- Sidecar restart 必须重新 publish `worker.register`，形成新的 active Worker generation。
+- 仍然活着的 sidecar/worker 必须重新调用 `/sidecar/negotiate`，形成新的 `workerId`。
 
 ## 6. Slice 4：Client SDK Create Session And Assignment
 
@@ -258,19 +258,19 @@ Expect：
 - `sdk/` 目录下建立客户侧 SDK，不 import `src/`。
 - `sdk/public-protocol-spec-ch.md` 记录 SDK 依赖的 public REST endpoint、query、runtime channels、event types、payload schemas、Web PubSub group 语义。
 - SDK public API：`connect`、`sessions.start`、`sessions.open`、`SessionHandle.send`、`AgentTurn.events`、`AgentTurn.waitForResult` 的 POC 版本。
-- SDK REST path：`POST /client/negotiate?tenantId=<tenantId>`。
+- SDK REST path：`POST /client/negotiate?tenantId=<tenantId>&clientConnectionId=<client-startup-random-string>`。
 - SDK Web PubSub path：connect 后 publish `session.create.requested` 到 tenant inbox runtime channel。
 - SDK 内部持有自己的 public protocol types，按 `sdk/public-protocol-spec-ch.md` 对齐，不从 `src/shared` import。
 - `TenantRuntime` 只作为 tenant composition root 和 ingress shell，订阅 tenant inbox 后委托给 protocol-facing controllers。
 - `TenantInboxController` dispatch Web PubSub runtime events。
 - `ClientRuntimeEventController` 解析 `session.create.requested`、`input.received`，并把协议 event 转为 session manager command。
-- `WorkerRuntimeEventController` 解析 worker register/heartbeat/drain/close runtime events，并转给 worker manager。
+- `WorkerRuntimeEventController` 解析 worker heartbeat/drain/close runtime events，并转给 worker manager；Worker registration 属于 `/sidecar/negotiate` HTTP boundary。
 - `SessionManager` 在 durable truth 写入后触发 assignment workflow。
 - `SessionLifecycleManager` 生成 central-owned session id 和 session-scoped `turnSeq`。
-- `SessionAssignmentManager` 调用 `WorkerSelector` 和 `WorkerLeaseManager`，生成 `session.assign` worker command。
-- `WorkerManager` 维护 Worker registry state、heartbeat、draining、close、expiry 和 lease lost effects。
+- `SessionAssignmentManager` 调用 `WorkerSelector` 和 `SessionLeaseManager`，生成 `session.assign` worker command。
+- `WorkerManager` 维护 Worker active registry、historical worker records、heartbeat、drain、evacuate、close、expiry 和 session lease lost effects。
 - `currentWorkerId`。
-- `workerLeaseGeneration`。
+- `sessionLeaseId`。
 - `session.assign` command publish 到 worker commands runtime channel。
 - Worker command subscriber 用真实 Web PubSub connection 验证收到 `session.assign`。
 
@@ -279,7 +279,7 @@ Scenario-based test：`scenario: client SDK creates session and assignment reach
 Given：
 
 - `tests/.env` 提供 `WEBPUBSUB_ENDPOINT`。
-- Central HTTP server 已启动，并暴露 `/client/negotiate?tenantId=<tenantId>`。
+- Central HTTP server 已启动，并暴露 `/client/negotiate?tenantId=<tenantId>&clientConnectionId=<client-startup-random-string>`。
 - Central runtime 使用真实 Web PubSub client connection 订阅 tenant inbox runtime channel。
 - Standalone sidecar 已通过 Slice 3 workflow 注册为 active ready Worker。
 - Worker command subscriber 已连接真实 Web PubSub，并订阅该 Worker 的 worker commands runtime channel。
@@ -288,18 +288,17 @@ Given：
 
 Expect：
 
-- Client SDK 调用 central `/client/negotiate?tenantId=<tenantId>`。
+- Client SDK 生成 client 启动级随机 `clientConnectionId`，并调用 central `/client/negotiate?tenantId=<tenantId>&clientConnectionId=<clientConnectionId>`。
 - Client SDK 使用 access URL 建立真实 Web PubSub client connection。
-- Client SDK join negotiated client inbox runtime channel。
+- Client SDK join negotiated tenant client inbox 和 client private inbox runtime channels。
 - Client SDK 生成 `ackId`，publish `session.create.requested` 到 tenant inbox runtime channel；Client 不生成 `sessionId` 或 `turnSeq`。
 - Central append `session.created` event，生成 central-owned `sessionId` 和 initial `turnSeq = 1`，并写入 `sessions/<sessionId>/session.json`。
-- Central publish 带同一 `ackId` 的 `session.created` acknowledgement 到 client inbox；SDK 用该 acknowledgement 返回 `StartSessionResult`。
+- Central publish 带同一 `ackId` 的 `session.created.ack` acknowledgement 到 client private inbox；SDK 用该 acknowledgement 返回 `StartSessionResult`。Central 同时 publish session catalog/status projection 到 tenant client inbox。
 - Central 选择 registered ready Worker。
 - Session status 变为 `starting`。
-- Session record 写入 `currentWorkerId`。
-- `workerLeaseGeneration` 增加。
+- Session record 写入 `currentWorkerId` 和新的 `sessionLeaseId`。
 - Central publish `session.assign` 到 worker commands runtime channel。
-- Worker command subscriber 收到 `session.assign`，payload 包含 session id、worker id、lease generation、workspace ref、resolved AgentSpec。
+- Worker command subscriber 收到 `session.assign`，payload 包含 session id、worker id、session lease id、workspace ref、resolved AgentSpec。
 - 不匹配 labels 的 Worker 不会被选择。
 - Central 不尝试 scale 出新 Worker。
 - Client SDK 不知道 Worker endpoint。
@@ -318,79 +317,92 @@ Expect：
 - Central 和 sidecar 的 public protocol tests 覆盖同一组 contract。
 - 修改 public protocol 时，本 scenario 指向的 SDK spec、SDK code、runtime handlers、e2e tests 同步更新。
 
-## 7. Slice 5：Start Copilot On Registered Sidecar
+## 7. Slice 5：Sidecar Copilot Process Wrapper Event Loop
 
-目标：已注册 Worker 的 sidecar 收到 session assignment 后，能在分配给该 session 的 workspace 和 Copilot session 目录上启动 Copilot process，使 Worker 上出现 running agent。
+目标：已注册 Worker 的 sidecar 收到 `session.assign` 后，在分配给该 session 的 workspace 和 agent session state 目录上启动 agent runtime，并跑通同一个 session 的多轮 input/output event loop。这个 slice 是 POC 交互主线的完成点：启动真实模型-backed agent runtime 和多轮交流必须作为一个可观察行为一起完成。
 
 实现范围：
 
-- Sidecar lease command controller。
-- Sidecar workspace adapter。
-- Copilot process adapter。
-- 本地 workspace 目录。
-- 本地 Copilot session 目录。
-- Sidecar status reporting。
+- Sidecar lease command controller 订阅 worker commands runtime channel，并校验 `sessionId`、`workerId`、`sessionLeaseId`。
+- Sidecar assigned-session manager 在 sidecar 进程内维护 lease-scoped agent run state。
+- Sidecar workspace adapter 根据 assignment 准备本地 workspace 目录，并把该目录作为 agent runtime cwd。
+- Sidecar agent session state adapter 准备 per-session state directory/volume；POC 使用该位置承载 adapter-owned session files 和 adapter-local metadata，供后续 Docker volume snapshot/restore 保留。
+- Resolved runtime config 只来自 `session.assign` payload 和 sidecar 内存中的 per-session adapter state；sidecar 直接把 resolved AgentSpec、provider/profile/model、MCP/skills/tools、permission policy 和 session metadata 传给 `agentProcessAdapter`。
+- Agent process adapter 使用 role-named `agentProcessAdapter` contract；POC concrete adapter 在 sidecar 进程内被调用，接收 workspace path、agent session state path 和 resolved runtime config，并通过 GitHub Copilot SDK 启动 Copilot agent session。Copilot 背后的模型来源通过显式 Copilot SDK provider config 指定；sidecar 只传递 provider config，不直接调用 Azure OpenAI/OpenAI chat completions。
+- `COPILOT_CLI_PATH` 可以显式指定 Copilot CLI runtime path；`COPILOT_GITHUB_TOKEN`/`GITHUB_TOKEN`/`GH_TOKEN` 可以作为 Copilot SDK 认证输入。Provider config 只接受 `COPILOT_MODEL`、`COPILOT_PROVIDER_TYPE`、`COPILOT_PROVIDER_BASE_URL`、`COPILOT_PROVIDER_TOKEN_SCOPE`、`COPILOT_PROVIDER_WIRE_API` 和 `COPILOT_PROVIDER_AZURE_API_VERSION`。sidecar 用 Azure Identity/MSI 获取 provider bearer token 并传给 Copilot SDK；provider type 和 base URL 必须由用户显式提供，sidecar 不根据 endpoint 猜测或改写 provider URL。
+- Runtime-visible session identity、lease、event ordering 和 status truth 都由 central/tenant runtime 持有；Client SDK 只通过 central/session runtime channels 通信，不知道 Worker endpoint。
+- Sidecar 在 agent runtime ready 后 publish `status.changed` 到 tenant inbox runtime channel；central append status event，并把 session status 推进到 `running`。
+- Client SDK input event handling。
+- Central 每轮先 append input event 到 session event log，再 route `session.input` worker command 到当前 `sessionLeaseId` 对应的 Worker。
+- Sidecar 将 `session.input` 转成 agent process adapter 的 submit/send 调用。
+- Sidecar 把 Copilot output、tool event、permission request、user input request、status event、error event 转成 runtime event publish 到 tenant inbox runtime channel，并携带当前 `sessionLeaseId`。
+- Sidecar 在每轮最终结果后 publish `turn.completed`，在失败后 publish `turn.failed`；central append terminal turn events and fan-out to session events runtime channel。SDK 只从 `turn.completed`/`turn.failed` 映射 turn terminal，不从普通 `agent.output` 推断完成。
+- 同一 session 的 turn correlation、event cursor、session lease id 和 stale command rejection。
+- Sidecar graceful close 时先停止接收新 input，再请求 agent process shutdown；process exit 转成 session/worker status event。
 
-Scenario-based test：`scenario: registered sidecar starts Copilot for assigned session`
+Scenario-based test：`scenario: registered sidecar starts Copilot runtime and reports running`
 
 Given：
 
 - Sidecar 收到 `session.assign`。
-- Assignment 包含 session id、lease generation、workspace path、Copilot session path。
+- Assignment 包含 session id、worker id、session lease id、workspace ref/path、agent session state ref/path、resolved AgentSpec 和 runtime config。
 
 Expect：
 
-- Sidecar 记录 current lease generation。
-- Sidecar 准备本地 workspace 目录。
-- Sidecar 准备本地 Copilot session 目录。
-- Copilot process adapter 收到 workspace path 和 Copilot session path。
-- Sidecar publish `status.changed` 到 tenant inbox runtime channel。
+- Sidecar 记录 current session lease id。
+- Sidecar 准备本地 workspace 目录，并把它作为 agent runtime cwd。
+- Sidecar 准备本地 agent session state 目录。
+- Sidecar 把 assignment 中的 resolved AgentSpec/runtime config 保存到 lease-scoped agent run state，并直接传给 agent process adapter。
+- Agent process adapter 收到 session id、workspace path、agent session state path 和 resolved runtime config。
+- POC concrete adapter 建立 GitHub Copilot SDK agent session，并通过 adapter contract 报告 readiness。
+- Agent runtime ready 后，sidecar publish `status.changed` 到 tenant inbox runtime channel。
 - Central append status event，并把 session status 推进到 `running`。
-
-## 8. Slice 6：Multi-Turn Copilot Session Event Loop
-
-目标：Central 可以令 Worker 上的 running agent 处理 Client SDK 发来的用户问题；Client SDK 能收到回复，并且同一个 session 支持多轮交流。这个 slice 同时建立 agent-generated runtime events 的主路径：agent output、tool event、status event、error event 都由 sidecar 先 publish 到 tenant inbox，再由 central append 到 session event log 后 fan-out。
-
-实现范围：
-
-- Client SDK input event handling。
-- Central append input event before routing。
-- Worker commands runtime channel publish。
-- Sidecar forwards input to Copilot process adapter。
-- Sidecar 把 Copilot output、tool event、status event、error event 转成 runtime event publish 到 tenant inbox runtime channel。
-- Central append agent-generated events and fan-out to session events runtime channel。
-- 同一 session 的 turn correlation、event cursor 和 lease generation 校验。
 
 Scenario-based test：`scenario: same session supports multi-turn Copilot exchange`
 
 Given：
 
-- Session 已 assigned 给 registered ready Worker，并且 Copilot process 已 running。
+- Session 已 assigned 给 registered ready Worker，并且 Copilot SDK agent session 已 running。
 - Client SDK publish 第一轮 input event 到 tenant inbox runtime channel。
 - Client SDK 随后对同一个 `sessionId` publish 第二轮 input event。
 
 Expect：
 
-- Central 在每一轮都先 append input event 到 `events.jsonl`，再 route 到 Worker。
-- Sidecar forwards 两轮 input 到同一个 Copilot process/session context。
-- Sidecar 对每一轮都 publish output event 到 tenant inbox runtime channel；如果 Copilot adapter 产生 tool/status/error event，也走同一入口。
-- Central append 两轮 output event，并 append 同一 session 内的 tool/status/error event。
+- Central 在每一轮都先 append input event 到 `events.jsonl`，再 route `session.input` worker command 到当前 Worker。
+- Worker command payload 包含 session id、turn seq、worker id、session lease id 和 input payload。
+- Sidecar 校验 session lease id 后，把两轮 input 转给同一个 agent process/session context。
+- 如果 input 早于 agent ready 到达，sidecar 在同一 session lease 内等待 agent ready，而不是拒绝为 unknown session。
+- Sidecar 对每一轮都 publish output event 到 tenant inbox runtime channel；如果 agent adapter 产生 progress/tool/permission/user-input/status/error event，也走同一入口。
+- Central append 两轮 output event、两轮 `turn.completed` event，并 append 同一 session 内的 tool/permission/user-input/status/error event。
 - Central publish 已持久化的 agent-generated events 到 session events runtime channel。
 - Client SDK 可以按 event cursor 看到同一个 session 的连续多轮回复。
 - Client SDK 不知道 Worker endpoint。
 
-Automated scenario test 可以使用实现同一 process-wrapper contract 的 deterministic Copilot test harness；本地 smoke test 使用真实 Copilot CLI 验证同一路径能产生真实回复。
+Scenario-based test：`scenario: stale worker command cannot reach Copilot runtime`
 
-## 9. Slice 7：Docker WorkerPool Provisioning
+Given：
 
-目标：在 standalone sidecar worker 闭环已经跑通后，增加一个 POC Docker WorkerPool controller/adaptor。它负责 provision sidecar，但 provision 出来的 sidecar 仍然通过同一个 `worker.register` contract 成为普通 Worker。
+- Session 当前 `sessionLeaseId` 是 `lease-current`。
+- Sidecar 收到旧 `sessionLeaseId=lease-old` 的 `session.input` worker command。
+
+Expect：
+
+- Sidecar 不把 input 转给 agent process adapter。
+- Sidecar publish `worker.command.rejected` 到 tenant inbox runtime channel，reason 是 `stale_session_lease`。
+- Central append rejection event。
+- Session event log 不出现由该 stale command 产生的 agent output。
+
+Automated scenario test 使用实现同一 `agentProcessAdapter` contract 的 deterministic agent test harness；真实 smoke test 必须启动 GitHub Copilot SDK agent session 并验证同一路径能产生真实回复。测试必须经过 central-owned event log、worker command channel 和 session events channel，不允许使用任何 sidecar-local HTTP/WebSocket 旁路来满足 session 行为。
+
+## 8. Slice 6：Docker WorkerPool Provisioning
+
+目标：在 standalone sidecar worker 闭环已经跑通后，增加一个 POC Docker WorkerPool controller/adaptor。它负责 provision sidecar，但 provision 出来的 sidecar 仍然通过同一个 `/sidecar/negotiate` registration contract 成为普通 Worker。
 
 实现范围：
 
 - POC Docker WorkerPool record/config。
 - Docker WorkerPool controller/adaptor 启动 sidecar container。
-- Sidecar container 使用 `/sidecar/negotiate` 连接 Web PubSub。
-- Sidecar container publish `worker.register`。
+- Sidecar container 使用 `/sidecar/negotiate` 注册 Worker 并连接 Web PubSub。
 - Docker workspace volume。
 - Docker Copilot session volume。
 - WorkerPool source/provisioning metadata 不进入 Worker selection 条件。
@@ -404,7 +416,7 @@ Given：
 
 Expect：
 
-- Sidecar container publish `worker.register`。
+- Sidecar container 通过 `/sidecar/negotiate` 注册 Worker。
 - Central 分配 `workerId`。
 - Worker record shape 与 standalone sidecar 注册出的 Worker 一致。
 - Worker record 的 `sidecarClass` 是 `copilot-process-wrapper`。
@@ -412,10 +424,10 @@ Expect：
 - Worker capacity/allocatable 是 1。
 - Worker condition 是 `ready`。
 - Worker selection 不使用 Docker container id，也不使用 WorkerPool source。
-- Session assignment 后，sidecar 使用 Docker workspace volume 和 Copilot session volume 启动 Copilot process。
+- Session assignment 后，sidecar 使用 Docker workspace volume 和 Copilot session volume 启动 Copilot-backed agent runtime。
 - 该 Worker 能完成至少一轮 input/output event loop。
 
-## 10. Slice 8：WorkerCapacityScaler Uses WorkerPool
+## 9. Slice 7：WorkerCapacityScaler Uses WorkerPool
 
 目标：只有在 standalone sidecar worker 和 Docker WorkerPool provisioned Worker 都已验证后，WorkerCapacityScaler 才负责在没有 matching ready Worker 时调用 matching WorkerPool controller/adaptor provision 新 Worker。
 
@@ -445,7 +457,7 @@ Expect：
 - Worker selection 仍然只看注册后的 Worker record，不走 WorkerPool 旁路匹配路径。
 - Client SDK 仍然只面向 session 通信，不知道 WorkerPool、Docker container、Worker endpoint。
 
-## 11. Slice 9：Pause Session With Volume Snapshot
+## 10. Slice 8：Pause Session With Volume Snapshot
 
 目标：Running session 能进入 paused，并生成同一 event boundary 下的 workspace volume snapshot 和 Copilot session volume snapshot。
 
@@ -475,15 +487,15 @@ Expect：
 - Central append `pause.requested`。
 - Session status 变为 `pausing`。
 - Sidecar receives pause command。
-- Snapshot controller copies workspace volume to snapshot directory。
-- Snapshot controller copies Copilot session volume to the same snapshot directory。
+- Snapshot controller 在同一 event boundary 上调用 Docker volume adapter 复制 workspace volume 到 snapshot directory。
+- Snapshot controller 在同一 event boundary 上调用 Docker volume adapter 复制 Copilot session volume 到同一个 snapshot directory。
 - Snapshot metadata `baseEventCursor` matches event boundary。
 - Central append `snapshot.created` marker event。
 - `latestSnapshotRef` is updated。
 - Worker lease is released。
 - Session status 变为 `paused`。
 
-## 12. Slice 10：Resume Session From Volume Snapshot
+## 11. Slice 9：Resume Session From Volume Snapshot
 
 目标：Paused session 能恢复 workspace volume 和 Copilot session volume，重启 Copilot，并回到 running。
 
@@ -512,12 +524,12 @@ Expect：
 - Docker volume adapter restores Copilot session volume。
 - Restored workspace volume contains expected file。
 - Restored Copilot session volume contains expected session file。
-- Central writes a new worker lease generation。
+- Central writes a new `sessionLeaseId`。
 - Sidecar starts Copilot after restore completes。
 - Central append `session.resumed`。
 - Session status 变为 `running`。
 
-## 13. Slice 11：Reconnect And Replay
+## 12. Slice 10：Reconnect And Replay
 
 目标：Client SDK 断线后能用 event cursor 追上 session history。
 
@@ -541,7 +553,7 @@ Expect：
 - Replay does not depend on Web PubSub message history。
 - Client SDK still does not know Worker endpoint。
 
-## 14. Slice 12：Thin Auth And Audit Boundary
+## 13. Slice 11：Thin Auth And Audit Boundary
 
 目标：POC 保留 central-owned negotiate 和 audit hook，但不展开完整 production auth matrix。
 
@@ -566,7 +578,7 @@ Expect：
 - Browser and sidecar do not choose their own `userId`。
 - Audit log records token issuance as record-only。
 
-## 15. Recommended Order
+## 14. Recommended Order
 
 按下面顺序实现和 review：
 
@@ -574,18 +586,17 @@ Expect：
 2. Web PubSub client-connection transport。
 3. Standalone sidecar worker lifecycle。
 4. Client SDK create session and assignment。
-5. Start Copilot on registered sidecar。
-6. Multi-turn Copilot session event loop。
-7. Docker WorkerPool provisioning。
-8. WorkerCapacityScaler uses WorkerPool。
-9. Pause with volume snapshot。
-10. Resume from volume snapshot。
-11. Reconnect and replay。
-12. Thin auth and audit boundary。
+5. Sidecar Copilot process-wrapper event loop。
+6. Docker WorkerPool provisioning。
+7. WorkerCapacityScaler uses WorkerPool。
+8. Pause with volume snapshot。
+9. Resume from volume snapshot。
+10. Reconnect and replay。
+11. Thin auth and audit boundary。
 
-前六个 slices 跑通后，POC 已经形成可交互主线：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot agent，并把回复持久化后推回 Client SDK。WorkerPool provisioning 和 WorkerCapacityScaler 在这条主线之后接入，验证它们只是 capacity source，不改变 Worker registration、selection、assignment、event loop 的统一路径。
+前五个 slices 跑通后，POC 已经形成可交互主线：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot-backed agent runtime，并把回复持久化后推回 Client SDK。WorkerPool provisioning 和 WorkerCapacityScaler 在这条主线之后接入，验证它们只是 capacity source，不改变 Worker registration、selection、assignment、event loop 的统一路径。
 
-## 16. Validation Commands
+## 15. Validation Commands
 
 每个 slice 完成后都运行：
 
@@ -597,6 +608,8 @@ pnpm test
 
 新增测试要放在对应 runtime 行为附近，命名以 `scenario:` 开头。测试断言 public outcome：session file、event log、worker record、published group event、snapshot directory、restored volume content。不要测试私有 helper 形状。
 
-Slice 3 必须包含真实 Web PubSub e2e integration test，覆盖 standalone sidecar 从 central URL 和 tenant id 启动、调用 central `/sidecar/negotiate`、连接 Web PubSub、publish `worker.register`、central 写入 active Worker record。缺少 `WEBPUBSUB_ENDPOINT` 时测试 skip；环境可用时该 e2e 是必跑验证项。
+Slice 3 必须包含真实 Web PubSub e2e integration test，覆盖 standalone sidecar 从 central URL、tenant id 和显式 worker registration body 启动、调用 central `/sidecar/negotiate`、central 创建 WorkerRecord 并返回 `workerId`、sidecar 连接 Web PubSub、订阅 worker commands、publish 首个 heartbeat、central 写入 active Worker record。缺少 `WEBPUBSUB_ENDPOINT` 时测试 skip；环境可用时该 e2e 是必跑验证项。
 
-Slice 4 必须包含真实 Web PubSub e2e integration test，覆盖 Client SDK 从 central URL 和 tenant id 启动、调用 central `/client/negotiate`、连接 Web PubSub、publish `session.create.requested`、central 写入 session truth、central 选择 registered Worker、worker commands runtime channel 收到 `session.assign`。Public protocol 变化必须同步 `sdk/public-protocol-spec-ch.md`、SDK code、runtime handlers、e2e tests。
+Slice 4 必须包含真实 Web PubSub e2e integration test，覆盖 Client SDK 从 central URL 和 tenant id 启动、生成 client 启动级随机 `clientConnectionId`、调用 central `/client/negotiate`、连接 Web PubSub、join tenant client inbox 和 client private inbox、publish `session.create.requested`、central 写入 session truth、central 选择 registered Worker、worker commands runtime channel 收到 `session.assign`。Public protocol 变化必须同步 `sdk/public-protocol-spec-ch.md`、SDK code、runtime handlers、e2e tests。
+
+Slice 5 必须包含 deterministic agent process adapter scenario test，覆盖 sidecar 收到 `session.assign` 后准备 workspace/session state 目录、把 resolved runtime config 传给 `agentProcessAdapter`、启动 Copilot SDK agent session、报告 running、处理同一 session 的两轮 input/output、为每轮发布 explicit `turn.completed`，并拒绝 stale session lease command。真实 smoke test 必须走 GitHub Copilot SDK agent session；缺少 Copilot runtime/auth 配置时 skip。

@@ -5,5 +5,6 @@ export const POC_RUNTIME_HTTP_PATHS = {
 } as const;
 
 export const POC_RUNTIME_HTTP_QUERY = {
-  tenantId: 'tenantId'
+  tenantId: 'tenantId',
+  clientConnectionId: 'clientConnectionId'
 } as const;

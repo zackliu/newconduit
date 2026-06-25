@@ -1,9 +1,10 @@
-import type { RuntimeEvent } from '../models';
+import type { RuntimeEvent, WorkerRecord } from '../models';
 import type { PrincipalContext, RequestContext } from '../models/create-session';
 
 export type RuntimeChannel =
   | { kind: 'tenant-inbox' }
-  | { kind: 'client-inbox'; principalId: string }
+  | { kind: 'client-inbox' }
+  | { kind: 'client-private-inbox'; clientConnectionId: string }
   | { kind: 'session-events'; sessionId: string }
   | { kind: 'worker-commands'; workerId: string };
 
@@ -26,9 +27,11 @@ export interface RuntimeEventTransport {
 export interface RuntimeConnectionGrant {
   url: string;
   expiresAt?: string;
-  clientInbox?: {
-    principalId: string;
+  clientInbox?: Record<string, never>;
+  clientPrivateInbox?: {
+    clientConnectionId: string;
   };
+  worker?: WorkerRecord;
 }
 
 export interface TenantConnectionIssuer {

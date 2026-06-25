@@ -1,5 +1,8 @@
 import type { Clock, ResolvedAgentSpec, RuntimeStorage, SessionRecord, SessionStatus } from '../../shared';
 
+/**
+ * Owns the durable session record transitions that describe where a session is in the runtime lifecycle.
+ */
 export class SessionLifecycleManager {
   constructor(private readonly storage: RuntimeStorage, private readonly clock: Clock) {}
 
@@ -11,7 +14,6 @@ export class SessionLifecycleManager {
       owner: input.owner,
       resolvedAgentSpec: input.resolvedAgentSpec,
       status: 'created',
-      workerLeaseGeneration: 0,
       eventCursor: 0,
       nextTurnSeq: input.nextTurnSeq,
       workspaceRef: input.workspaceRef,

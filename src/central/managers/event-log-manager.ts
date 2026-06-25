@@ -1,5 +1,8 @@
 import type { Clock, RuntimeEvent, RuntimeEventType, RuntimeStorage } from '../../shared';
 
+/**
+ * Appends ordered runtime facts to central storage so session history, replay, and client fan-out share the same source of truth.
+ */
 export class EventLogManager {
   constructor(private readonly storage: RuntimeStorage, private readonly clock: Clock) {}
 
@@ -12,7 +15,7 @@ export class EventLogManager {
     workerId?: string;
     ackId?: string;
     turnSeq?: number;
-    workerLeaseGeneration?: number;
+    sessionLeaseId?: string;
   }): Promise<RuntimeEvent<TPayload>> {
     const event: RuntimeEvent<TPayload> = {
       eventId: crypto.randomUUID(),

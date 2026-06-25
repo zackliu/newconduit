@@ -125,13 +125,14 @@ Worker capacity scaler 读取 pending sessions、available worker capacity、sid
 Hosting platform 启动 compute 后，sidecar daemon 才开始运行。Sidecar 使用运行时 credential 向 central service 注册 Worker，声明：
 
 - `capacityScope`，来自 tenant runtime。
-- `sidecarId` 和 `sidecarClass`。
+- `workerId` 由 central 在 registration lifecycle 内分配；hostname、pod name、container id 等运行环境名称只作为 labels 或 diagnostic metadata。
+- `sidecarClass`。
 - labels，使用任意 key/value 表达 placement、diagnostic 和客户自定义属性。
 - `capacity` / `allocatable`。
 - conditions，例如 ready、draining、unhealthy、disconnected。
 - heartbeat/status report。
 
-Worker registry controller 校验 sidecar identity、capacity scope 和最小注册字段，然后创建 Worker resource。Authorization controller 保留为 worker registration 边界的 policy hook；Audit controller 记录后续 auth/audit spec 认定为安全关键的 worker registration、sidecar credential failure 和 capacity scope 变化。
+Worker registry controller 校验 registration credential、capacity scope 和最小注册字段，然后创建 Worker resource。Authorization controller 保留为 worker registration 边界的 policy hook；Audit controller 记录后续 auth/audit spec 认定为安全关键的 worker registration、registration credential failure 和 capacity scope 变化。
 
 这一阶段的 invariant 是：hosting object 不是 Worker。只有 sidecar 注册并通过 central service 认证后，底层 compute 才成为 runtime 里的 Worker resource。Worker 也不是 session identity；它只是可替换 capacity。
 
@@ -139,7 +140,7 @@ Worker registry controller 校验 sidecar identity、capacity scope 和最小注
 
 Worker registry 出现 ready Worker 后，Worker selection controller 重新 reconcile queued session。它根据 resolved AgentSpec、`sidecarClass`、`workerSelector` 对 Worker labels 的匹配结果、capacity、tenant/capacityScope、conditions 和 policy 选择 compatible Worker。
 
-Worker lease controller 在 session record 中写入 `currentWorkerId` 和 `workerLeaseGeneration`，并更新 Worker 的 capacity accounting。Session lifecycle controller 把 session 状态推进到 `starting`。Sidecar 通过 sidecar-facing API 接收 worker lease，lease 中包含 sessionId、tenant、resolved AgentSpec、workspaceRef、latestSnapshotRef、event cursor、lease generation 和必要 runtime config。
+Session lease controller 在 session record 中写入 `currentWorkerId` 和 `sessionLeaseId`，并更新 Worker 的 capacity accounting。Session lifecycle controller 把 session 状态推进到 `starting`。Sidecar 通过 worker command channel 接收 session assignment，assignment 包含 sessionId、tenant、workerId、sessionLeaseId、resolved AgentSpec、workspaceRef、latestSnapshotRef、event cursor 和必要 runtime config。
 
 Sidecar 收到 lease 后做三件事：
 
@@ -149,7 +150,7 @@ Sidecar 收到 lease 后做三件事：
 
 Event projection controller 从 event log 推导 activity，例如 processing、idle、awaiting input、awaiting approval、error。Session lifecycle controller 在 agent ready 后把 session 推进到 `running` 或 `awaitingInput`。
 
-这一阶段的 invariant 是 lease fencing。Sidecar 向 central service 写 event、status 或 snapshot metadata 时，必须携带当前 `workerLeaseGeneration`。Central service 必须拒绝旧 generation 的写入，防止 crash、network partition 或 delayed sidecar 继续写同一个 session。
+这一阶段的 invariant 是 session lease fencing。Sidecar 向 central service 写 event、status 或 snapshot metadata 时，必须携带当前 `sessionLeaseId`。Central service 必须拒绝旧 lease 或未知 lease 的写入，防止 crash、network partition 或 delayed sidecar 继续写同一个 session。
 
 ### 4.5 运行 interactive session
 
@@ -192,7 +193,7 @@ Sidecar 根据 AgentSpec 的 `pausePolicy`、`agentStatePolicy`、`recoveryPolic
 
 V1 更适合把 durable pause 作为默认语义：pause 成功意味着 session 没有 active worker lease，Worker capacity 被释放，resume 走一条受控的 restore/restart path。这样可以更早验证 session identity 与 worker location 的分离。不同 agent 对 pause boundary、session 文件 capture、超时和失败降级的要求不同，因此 pause 策略应该由 AgentSpec 的 `pausePolicy` 声明，而不是写死在 Session lifecycle controller 里。
 
-这一阶段的 invariant 是：pause 后旧 Worker 不能继续写 session。释放 lease 必须递增或清空 `workerLeaseGeneration/currentWorkerId`，并让任何迟到的 sidecar write 被拒绝。Pause 不是删除 session，也不是完成 session；event log、workspace snapshot、access policy 和 audit trail 都继续存在。
+这一阶段的 invariant 是：pause 后旧 Worker 不能继续写 session。释放 lease 必须清空或替换 `sessionLeaseId/currentWorkerId`，并让任何迟到的 sidecar write 被拒绝。Pause 不是删除 session，也不是完成 session；event log、workspace snapshot、access policy 和 audit trail 都继续存在。
 
 ### 4.7 Resume session
 
@@ -204,11 +205,11 @@ Resume 是计划内恢复。Recovery controller 判断恢复模式：
 2. 如果只有 workspace snapshot 和 event history，或 agent 私有 session state 不足以恢复内部状态，则选择 restart with context。
 3. 如果缺少 snapshot、AgentSpec 不兼容、tool state 不可恢复、agent session state 缺失且 policy 不允许降级，或 policy 不允许恢复，则进入 non-recoverable failure 或保持 paused 并暴露原因。
 
-Worker selection controller 选择 compatible Worker。如果没有 available Worker，Worker capacity scaler 再次输出 desired capacity。Worker lease controller 写入新的 `currentWorkerId` 和新的 `workerLeaseGeneration`，Session lifecycle controller 把 session 推进到 `resuming` 或 `starting`。
+Worker selection controller 选择 compatible Worker。如果没有 available Worker，Worker capacity scaler 再次输出 desired capacity。Session lease controller 写入新的 `currentWorkerId` 和新的 `sessionLeaseId`，Session lifecycle controller 把 session 推进到 `resuming` 或 `starting`。
 
 新 sidecar 接收 lease 后，通过 workspace adapter 恢复 latest snapshot；通过 agent adapter 恢复 agent 私有 session 文件或 checkpoint export；通过 Event log controller 的 replay path 读取 snapshot marker 之后必要的 events；再启动 agent process、恢复 checkpoint 或把 workspace/history/context 注入 agent。恢复完成后，Event log controller 写 resume/recovery event，Session lifecycle controller 把 session 推回 `running` 或 `awaitingInput`。
 
-这一阶段的 invariant 是：resume 仍然是同一个 sessionId，不是新建 session。Worker 可以变化，lease generation 必须变化，但 session identity、owner、access policy、event log、workspaceRef 和 resolved AgentSpec 不变。SDK 可以隐藏 reconnect/stream 细节，但不能隐藏 recovery mode 和恢复降级原因。
+这一阶段的 invariant 是：resume 仍然是同一个 sessionId，不是新建 session。Worker 可以变化，session lease 必须变化，但 session identity、owner、access policy、event log、workspaceRef 和 resolved AgentSpec 不变。SDK 可以隐藏 reconnect/stream 细节，但不能隐藏 recovery mode 和恢复降级原因。
 
 ### 4.8 Worker crash 后 restore session
 
@@ -240,9 +241,9 @@ Recovery controller 只允许从 durable facts 恢复：
 | Resource class | 为什么 workflow 需要它 | 最小 truth / status | 主要写入方 | 被哪些步骤验证 |
 | --- | --- | --- | --- | --- |
 | AgentSpec | session creation、worker matching、pause/resume、crash restore 都需要同一份 agent 启动和恢复定义。 | `agentSpecId`、labels、launch、sidecarClass、workspaceClass、toolClass/toolProfile、workerSelector、pausePolicy、recoveryPolicy、agentStatePolicy、version/digest 或 resolved copy。 | AgentSpec admission controller、Session lifecycle controller。 | 4.1、4.2、4.4、4.7、4.8 |
-| Session | durable agent work identity。Worker 只是当前 execution projection。 | `sessionId`、tenant、owner、participants/accessPolicyRef、resolvedAgentSpec、status、activity、currentWorkerId、workerLeaseGeneration、eventCursor、workspaceRef、latestSnapshotRef、createdAt/updatedAt、lifecycleReason。 | Session lifecycle controller、Worker lease controller、Recovery controller、Event projection controller。 | 4.2 到 4.8 全部步骤 |
-| Worker | 被 sidecar 注册进 runtime 的 replaceable compute capacity。 | `workerId`、tenant/capacityScope、sidecarId、sidecarClass、labels、capacity/allocatable、conditions、lifecycleState、heartbeatAt、expiresAt、generation、currentSessionCount。 | Worker registry controller、sidecar daemon、Worker lease controller。 | 4.3、4.4、4.7、4.8 |
-| Event | session 内发生的可 replay 事实。Reconnect、approval、status projection、recovery explanation 都依赖它。 | `eventId`、sessionId、sequence/cursor、type、timestamp、actor、correlationId/causationId、payload、visibility/auditMarker、workerLeaseGeneration。 | Event log controller、client/backend API、sidecar API、Snapshot controller、Recovery controller。 | 4.2、4.5、4.6、4.7、4.8 |
+| Session | durable agent work identity。Worker 只是当前 execution projection。 | `sessionId`、tenant、owner、participants/accessPolicyRef、resolvedAgentSpec、status、activity、currentWorkerId、sessionLeaseId、eventCursor、workspaceRef、latestSnapshotRef、createdAt/updatedAt、lifecycleReason。 | Session lifecycle controller、Session lease controller、Recovery controller、Event projection controller。 | 4.2 到 4.8 全部步骤 |
+| Worker | 被 sidecar 注册进 runtime 的 replaceable compute capacity。 | `workerId`、tenant/capacityScope、sidecarClass、labels、description、capacity/allocatable、conditions、lifecycleState、heartbeatAt、expiresAt、currentSessionCount。 | Worker registry controller、sidecar daemon、Session lease controller。 | 4.3、4.4、4.7、4.8 |
+| Event | session 内发生的可 replay 事实。Reconnect、approval、status projection、recovery explanation 都依赖它。 | `eventId`、sessionId、sequence/cursor、type、timestamp、actor、correlationId/causationId、payload、visibility/auditMarker、sessionLeaseId。 | Event log controller、client/backend API、sidecar API、Snapshot controller、Recovery controller。 | 4.2、4.5、4.6、4.7、4.8 |
 | WorkspaceSnapshot | workspace 和 agent session state 在 event boundary 上的可恢复副本。Pause/resume 和 crash restore 都需要它。 | `snapshotId`、sessionId、baseEventCursor、storageLocation、agentStateRefs、createdAt、size/checksum、restoreHints、workspaceClass。 | Snapshot controller、Workspace storage adapter、sidecar workspace adapter、sidecar agent adapter。 | 4.5、4.6、4.7、4.8 |
 | Policy/Audit | central service 是 public-facing endpoint，需要预留 authorization 和 audit 模块。 | principal、tenantId、resourceType、resourceId、action、decision、reason、correlationId、timestamp；具体 action matrix 后续定义。 | Authorization controller、Audit controller、policy hook/audit sink。 | 4.1 到 4.8 的治理边界 |
 
@@ -287,7 +288,7 @@ Authorization 和 audit 不能只作为异步 listener 事后补救。Resource m
 | Session lifecycle controller | session record、events、worker state、policy/recovery result | session status、lifecycleReason、lifecycle event | 4.2、4.4、4.6、4.7、4.8 | session identity 和合法状态机不可替换；timeout/cancel/pause 策略可配置。 |
 | Worker registry controller | sidecar registration、heartbeat、capacity/status report | Worker record、conditions、capacity state | 4.3、4.8 | Worker 最小注册字段和 condition 语义不可替换；credential backend 可替换。 |
 | Worker selection controller | resolved AgentSpec、session state、Worker registry、policy、capacity | selected Worker 或 queued reason | 4.3、4.4、4.7、4.8 | 必须检查 policy/capacity/compatibility；placement policy 可替换。 |
-| Worker lease controller | session record、selected Worker、heartbeat/condition、lease TTL | currentWorkerId、workerLeaseGeneration、fencing decision | 4.4、4.6、4.7、4.8 | lease generation 和 stale write rejection 不可替换。 |
+| Session lease controller | session record、selected Worker、heartbeat/condition、lease TTL | currentWorkerId、sessionLeaseId、fencing decision | 4.4、4.6、4.7、4.8 | session lease 和 stale write rejection 不可替换。 |
 | Event log controller | append/replay request、event store、idempotency key | event sequence/cursor、replay stream、append result | 4.2、4.5、4.6、4.7、4.8 | event envelope、ordering、cursor、idempotency 不可替换；storage backend 可替换。 |
 | Event projection controller | event log、session metadata、snapshot markers | activity/status summary | 4.4、4.5 | projection 可以替换和重建，不能成为唯一 truth。 |
 | Snapshot controller | session events、workspaceClass、checkpoint signal、storage result | snapshot metadata、latestSnapshotRef、snapshot marker event | 4.5、4.6、4.7、4.8 | snapshot 必须绑定 event boundary；scheduling policy 可替换。 |
@@ -341,7 +342,7 @@ Persistent resource state + event log + audit log
 3. Worker heartbeat/status 是 liveness 输入；Worker resource truth 在 central registry。
 4. Session status/activity 可以由 event projection 得到，但 projection 可以重建，不能替代 event log。
 5. Snapshot marker event 必须把 workspace snapshot 和 event cursor 对齐。
-6. Worker lease generation 是 sidecar 写入 session event/status/snapshot 的 fencing token。
+6. Session lease id 是 sidecar 写入 session event/status/snapshot 的 fencing token。
 7. Authorization 和 audit 模块必须作为同步治理边界保留；具体 enforcement/action matrix 由后续 auth/audit spec 定义。
 8. Hosting platform 可以报告 compute 状态，但不能成为 client routing、session identity 或 recovery truth。
 
@@ -355,12 +356,12 @@ Persistent resource state + event log + audit log
 | Session 要先于 Worker 存在 | Session lifecycle、session catalog、event log | 没有 capacity 时 create session 会失败或丢失用户初始输入。 |
 | 没有 Worker 时仍能排队并扩容 | Worker capacity scaler、hosting adapter、Worker registry | runtime 会把 capacity 问题暴露给 client，或让 app 自己调度 hosting。 |
 | Compute 必须先注册才能服务 session | Worker resource、Worker registry、Authorization/Audit boundary | 未认证 sidecar 或错误 tenant capacity 可能承接 session。 |
-| 消息不能写到旧 Worker | Worker lease controller、workerLeaseGeneration | crash 或网络分区后可能出现两个 sidecar 同时写 session。 |
+| 消息不能写到旧 Worker | Session lease controller、sessionLeaseId | crash 或网络分区后可能出现两个 sidecar 同时写 session。 |
 | Client 断线后能追上历史 | Event log controller、replay path、cursor | reconnect 只能依赖 transient stream，历史不可恢复。 |
 | Approval 必须可追溯 | Event log、optional Authorization/Audit hook、Event transport | approval 会变成 worker-local promise，断线或 crash 后无法解释。 |
 | Workspace 能 pause/resume/restore | WorkspaceSnapshot、Snapshot controller、workspace adapter、snapshot marker | event history 存在但工作现场丢失，coding/data agent 无法继续。 |
 | Pause 后释放 capacity | Session lifecycle、Snapshot controller、Worker lease controller | pause 只是 UI 状态，旧 worker 仍占用或继续写。 |
-| Resume 是同一个 session | Recovery controller、Worker selection、lease generation、resolved AgentSpec | resume 会退化成新建 session，历史、权限和 audit 断裂。 |
+| Resume 是同一个 session | Recovery controller、Worker selection、session lease、resolved AgentSpec | resume 会退化成新建 session，历史、权限和 audit 断裂。 |
 | Worker crash 后恢复语义可解释 | Worker registry、Worker lease、Recovery controller、recovery event | worker failure 只是一条 error log，用户不知道任务能否继续。 |
 | 治理边界进入 runtime path | Authorization controller、Audit controller、Policy/Audit resource | central service 会变成无权限感知的 WebSocket gateway，后续很难补 action matrix。 |
 
