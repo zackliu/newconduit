@@ -41,7 +41,16 @@ class FakeCopilotClient {
     this.started = true;
   }
 
+  async getLastSessionId(): Promise<string | undefined> {
+    return undefined;
+  }
+
   async createSession(options: { streaming: boolean; gitHubToken?: string; model?: string; provider?: unknown; onPermissionRequest: unknown }): Promise<FakeCopilotSession> {
+    this.createSessionOptions = options;
+    return this.session;
+  }
+
+  async resumeSession(_sessionId: string, options: { streaming: boolean; gitHubToken?: string; model?: string; provider?: unknown; onPermissionRequest: unknown }): Promise<FakeCopilotSession> {
     this.createSessionOptions = options;
     return this.session;
   }
@@ -239,7 +248,7 @@ function startInput(): SidecarAgentProcessStartInput {
       pausePolicy: 'turn-boundary-durable-pause',
       recoveryPolicy: 'restart-with-context',
       agentStatePolicy: 'copilot-session-volume-snapshot',
-      idlePauseTimeoutMs: 60_000,
+      idlePauseTimeoutMs: 120_000,
       version: 'test',
       resolvedAt: '2026-06-25T00:00:00.000Z',
       digest: 'test'

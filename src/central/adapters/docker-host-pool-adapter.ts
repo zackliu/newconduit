@@ -13,6 +13,7 @@ export interface DockerHostPoolAdapterOptions {
   contextPath?: string;
   azureConfigDir?: string;
   sidecarWorkRoot?: string;
+  snapshotRoot?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -22,6 +23,7 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
   private readonly contextPath: string;
   private readonly azureConfigDir: string;
   private readonly sidecarWorkRoot: string;
+  private readonly snapshotRoot: string;
   private readonly env: NodeJS.ProcessEnv;
   private buildPromise: Promise<void> | undefined;
 
@@ -31,6 +33,7 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
     this.contextPath = options.contextPath ?? '.';
     this.azureConfigDir = resolve(options.azureConfigDir ?? join(homedir(), '.azure'));
     this.sidecarWorkRoot = resolve(options.sidecarWorkRoot ?? '.runtime-poc/docker-sidecars');
+    this.snapshotRoot = resolve(options.snapshotRoot ?? '.runtime-poc/snapshots');
     this.env = options.env ?? process.env;
   }
 
@@ -38,6 +41,7 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
     await this.buildImage();
     const hostRuntimeRoot = join(this.sidecarWorkRoot, input.instance.instanceId);
     await mkdir(hostRuntimeRoot, { recursive: true });
+    await mkdir(this.snapshotRoot, { recursive: true });
     const containerName = this.toContainerName(input.pool.poolId, input.instance.instanceId);
     const { stdout } = await execFileAsync('docker', [
       'run',
@@ -54,9 +58,11 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
       '-e', `WORKER_POOL_INSTANCE_ID=${input.instance.instanceId}`,
       '-e', 'AZURE_CONFIG_DIR=/home/sidecar/.azure',
       '-e', 'SIDECAR_WORK_ROOT=/runtime/sidecar',
+      '-e', 'SIDECAR_SNAPSHOT_ROOT=/snapshots',
       ...this.forwardEnv('WEBPUBSUB_ENDPOINT', 'WEBPUBSUB_HUB', 'COPILOT_MODEL', 'COPILOT_PROVIDER_TYPE', 'COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_TOKEN_SCOPE', 'COPILOT_PROVIDER_WIRE_API', 'COPILOT_PROVIDER_AZURE_API_VERSION', 'COPILOT_CLI_PATH', 'COPILOT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'),
       '-v', `${this.azureConfigDir}:/home/sidecar/.azure`,
       '-v', `${hostRuntimeRoot}:/runtime`,
+      '-v', `${this.snapshotRoot}:/snapshots`,
       this.imageName
     ]);
     return { containerId: stdout.trim() };

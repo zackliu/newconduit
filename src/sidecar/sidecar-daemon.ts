@@ -1,5 +1,5 @@
 import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentOutputPayload, type RuntimeConnectionGrant, type RuntimeEvent, type SessionAssignPayload, type SessionInputCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
-import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter } from './contracts';
+import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount } from './contracts';
 
 export interface StandaloneSidecarStartInput extends WorkerRegisterPayload {
   centralUrl: string;
@@ -17,6 +17,7 @@ interface ActiveAgentRunState {
   workerId: string;
   sessionLeaseId: string;
   ready: Promise<void>;
+  mount: SidecarWorkspaceMount;
 }
 
 interface HeartbeatState {
@@ -146,18 +147,28 @@ export class SidecarDaemon {
       workspacePath: payload.workspaceRef,
       copilotSessionStatePath: payload.copilotSessionStateRef
     });
-    const ready = this.options.agentProcessAdapter.start({
-      ...mounted,
-      sessionId: payload.sessionId,
-      workerId: payload.workerId,
-      sessionLeaseId,
-      resolvedAgentSpec: payload.resolvedAgentSpec
-    });
+    const ready = (async () => {
+      if (payload.restore) {
+        await this.options.workspaceAdapter.restore({
+          mount: mounted,
+          location: payload.restore.location,
+          parts: payload.restore.parts
+        });
+      }
+      await this.options.agentProcessAdapter.start({
+        ...mounted,
+        sessionId: payload.sessionId,
+        workerId: payload.workerId,
+        sessionLeaseId,
+        resolvedAgentSpec: payload.resolvedAgentSpec
+      });
+    })();
     this.activeRuns.set(payload.sessionId, {
       sessionId: payload.sessionId,
       workerId: payload.workerId,
       sessionLeaseId,
-      ready
+      ready,
+      mount: mounted
     });
     try {
       await ready;
@@ -208,24 +219,51 @@ export class SidecarDaemon {
       await this.publishCommandRejected(event, 'agent_not_running', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
       return;
     }
-    await this.options.agentProcessAdapter.send({
-      sessionId: payload.sessionId,
-      turnSeq: payload.turnSeq,
-      message: payload.input.message
-    }, async (output) => {
-      if (output.type !== 'output') {
-        return;
-      }
+    try {
+      const result = await this.options.agentProcessAdapter.send({
+        sessionId: payload.sessionId,
+        turnSeq: payload.turnSeq,
+        message: payload.input.message
+      }, async (output) => {
+        if (output.type !== 'output') {
+          return;
+        }
+        await this.publishTenantEvent({
+          type: 'agent.output',
+          sessionId: payload.sessionId,
+          workerId: payload.workerId,
+          sessionLeaseId: payload.sessionLeaseId,
+          turnSeq: payload.turnSeq,
+          payload: output.payload
+        });
+      });
+      await this.publishTenantEvent<TurnCompletedPayload>({
+        type: 'turn.completed',
+        sessionId: payload.sessionId,
+        workerId: payload.workerId,
+        sessionLeaseId: payload.sessionLeaseId,
+        turnSeq: payload.turnSeq,
+        payload: { result: { message: result.message, output: result.output } }
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       await this.publishTenantEvent({
         type: 'agent.output',
         sessionId: payload.sessionId,
         workerId: payload.workerId,
         sessionLeaseId: payload.sessionLeaseId,
         turnSeq: payload.turnSeq,
-        payload: output.payload
+        payload: { error: { message } }
       });
-      await this.publishTurnTerminalEvent(payload, output.payload);
-    });
+      await this.publishTenantEvent<TurnFailedPayload>({
+        type: 'turn.failed',
+        sessionId: payload.sessionId,
+        workerId: payload.workerId,
+        sessionLeaseId: payload.sessionLeaseId,
+        turnSeq: payload.turnSeq,
+        payload: { error: { message } }
+      });
+    }
   }
 
   private async handlePause(event: RuntimeEvent<SessionPauseCommandPayload>): Promise<void> {
@@ -242,44 +280,19 @@ export class SidecarDaemon {
     await active.ready;
     await this.options.agentProcessAdapter.pauseAtTurnBoundary?.({ sessionId: payload.sessionId });
     await this.options.agentProcessAdapter.stop?.({ sessionId: payload.sessionId });
+    const parts = await this.options.workspaceAdapter.capture({ mount: active.mount, location: payload.capture.location });
     this.activeRuns.delete(payload.sessionId);
     await this.publishTenantEvent<SessionPausedPayload>({
       type: 'session.paused',
       sessionId: payload.sessionId,
       workerId: payload.workerId,
       sessionLeaseId: payload.sessionLeaseId,
-      payload: { reason: payload.reason }
+      payload: {
+        reason: payload.reason,
+        snapshot: { snapshotId: payload.capture.snapshotId, parts }
+      }
     });
     await this.publishHeartbeat();
-  }
-
-  private async publishTurnTerminalEvent(input: SessionInputCommandPayload, output: AgentOutputPayload): Promise<void> {
-    if (output.error) {
-      await this.publishTenantEvent<TurnFailedPayload>({
-        type: 'turn.failed',
-        sessionId: input.sessionId,
-        workerId: input.workerId,
-        sessionLeaseId: input.sessionLeaseId,
-        turnSeq: input.turnSeq,
-        payload: { error: output.error }
-      });
-      return;
-    }
-    if (typeof output.message === 'string' || 'output' in output) {
-      await this.publishTenantEvent<TurnCompletedPayload>({
-        type: 'turn.completed',
-        sessionId: input.sessionId,
-        workerId: input.workerId,
-        sessionLeaseId: input.sessionLeaseId,
-        turnSeq: input.turnSeq,
-        payload: {
-          result: {
-            message: output.message,
-            output: output.output
-          }
-        }
-      });
-    }
   }
 
   private async publishCommandRejected(
@@ -344,6 +357,12 @@ export class SidecarDaemon {
       || typeof candidate.resolvedAgentSpec?.agentSpecId !== 'string') {
       throw new Error('invalid session.assign payload');
     }
+    if (candidate.restore !== undefined
+      && (typeof candidate.restore.snapshotId !== 'string'
+        || typeof candidate.restore.location !== 'string'
+        || !Array.isArray(candidate.restore.parts))) {
+      throw new Error('invalid session.assign restore ref');
+    }
     return payload as SessionAssignPayload;
   }
 
@@ -371,6 +390,9 @@ export class SidecarDaemon {
       || typeof candidate.workerId !== 'string'
       || typeof candidate.sessionLeaseId !== 'string') {
       throw new Error('invalid session.pause.requested payload');
+    }
+    if (typeof candidate.capture?.snapshotId !== 'string' || typeof candidate.capture.location !== 'string') {
+      throw new Error('invalid session.pause.requested capture ref');
     }
     if (candidate.reason !== undefined && candidate.reason !== 'idle_timeout' && candidate.reason !== 'client_requested') {
       throw new Error('invalid session.pause.requested reason');

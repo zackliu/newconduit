@@ -51,7 +51,7 @@ test('scenario: idle queued session pauses and is not auto-assigned', async () =
     await transport.subscribe({ kind: 'worker-commands', workerId: worker.workerId }, async (envelope) => {
       workerCommands.push(envelope.event);
     });
-    clock.set('2026-06-25T00:01:00.000Z');
+    clock.set('2026-06-25T00:02:01.000Z');
 
     await publishReadyHeartbeat(transport, worker.workerId);
 
@@ -75,7 +75,7 @@ test('scenario: idle running session pauses and releases worker lease', async ()
     await transport.subscribe({ kind: 'worker-commands', workerId: worker.workerId }, async (envelope) => {
       workerCommands.push(envelope.event);
     });
-    clock.set('2026-06-25T00:01:00.000Z');
+    clock.set('2026-06-25T00:02:01.000Z');
 
     await central.reconcileSessionsForTenant('poc');
 

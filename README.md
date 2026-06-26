@@ -1,176 +1,136 @@
-# Agent Runtime Sidecar POC
+# Agent Runtime Sidecar
 
-This repository contains a TypeScript framework for the Agent Runtime Sidecar POC. It is meant for people who are new to the project and need to understand how the central service, sidecar, and shared runtime contracts fit together.
+Agent Runtime Sidecar is a runtime layer for running stateful, interactive agents as **durable online services**. Instead of treating an agent as a one-shot process, it treats each **session** as a durable identity that can be created, paused, recovered, and resumed across replaceable compute.
 
-The current POC is intentionally small: one central process, Docker workers, Azure Web PubSub as a long-lived connection layer, local file storage, and Copilot as the concrete agent process.
+This repository is a working TypeScript POC of that runtime. A single **central** control plane owns session truth and routing, a **sidecar** wraps an existing agent process (GitHub Copilot SDK here) on a worker, **Azure Web PubSub** is the long-lived transport, and a **Docker WorkerPool** scales worker capacity on demand. The headline behavior it proves: you can chat with an agent, pause it (its worker is recycled), and later resume the same session on a brand-new worker that restores the workspace and the agent's own conversation memory.
 
-## What The POC Proves
+## What It Does
 
-- A client can request a durable session through central-owned runtime events.
-- Central owns session truth, event logs, worker registry state, and snapshot metadata.
-- Sidecar registers Docker-backed worker capacity and wraps a Copilot process.
-- Worker selection uses `sidecarClass`, Worker labels, capacity, and conditions.
-- Pause and resume use Docker volume snapshot/restore for both workspace and Copilot session history.
-- Web PubSub is only the transport; it is not the source of truth and does not use upstream callbacks in this POC.
+- A client requests a durable session through central-owned runtime events; central owns the session catalog, event log, worker registry, and snapshot metadata.
+- A **WorkerPool** scales Docker worker capacity when a session needs it; the sidecar inside each container registers as a Worker and runs the Copilot agent.
+- Worker selection uses `sidecarClass`, Worker labels, capacity, and conditions — never a hard-coded machine address.
+- **Pause** captures the workspace and the agent's session files into a session-addressed snapshot, then releases (and recycles) the worker.
+- **Resume** scales out a fresh worker, restores the snapshot, and the Copilot process reattaches to its prior session, so the conversation continues on new compute.
+- Web PubSub is only the transport; it is not the source of truth and does not use upstream callbacks.
 
-## Project Layout
-
-All implementation code lives in `src/`.
+## Project Structure
 
 ```text
 src/
-  shared/
-    models/       # AgentSpec, Session, Worker, WorkerPool, Event, Snapshot, Audit
-    contracts/    # Generic controller/storage/transport contracts
-  central/
-    registries/   # POC predefined class/profile registry
-    storage/      # Central local file storage
-    controllers/  # Protocol-facing replaceable ingress controllers
-    managers/     # Tenant-owned runtime workflows and state mechanisms
-    adapters/     # Web PubSub, Docker host pool, Docker volume adapters
-  sidecar/
-    controllers/  # Worker registration, heartbeat, lease command handling
-    adapters/     # Copilot process wrapper, Docker workspace, Web PubSub client
-tests/
-  central/         # Scenario-based central runtime tests
+  shared/             # Cross-cutting contracts and durable models
+    models/           # AgentSpec, Session, Worker, WorkerPool, RuntimeEvent, WorkspaceSnapshot, ...
+    contracts/        # Storage, transport, clock, and controller contracts
+    protocol/         # Runtime-channel <-> Web PubSub group mapping, HTTP route/query constants
+  central/            # Service-provider runtime (the control plane)
+    main.ts           # Composition root: builds the tenant runtime + Docker WorkerPool, starts the HTTP server
+    central-service.ts, tenant-runtime.ts
+    controllers/      # Protocol-facing ingress (client/worker/agent runtime events, tenant inbox)
+    managers/         # Tenant-owned workflows: session lifecycle, assignment, leases, event log,
+                      #   worker registry, WorkerPool scaling, snapshot record (SnapshotManager)
+    adapters/         # Web PubSub transport, Docker host pool (scale out/in containers)
+    storage/          # Local file storage for sessions, events, workers, snapshots
+    registries/       # Predefined POC AgentSpec / class registry
+    http/             # Generic HTTP server shell + POC route registration
+  sidecar/            # Worker-local process that adapts an agent into the runtime
+    sidecar-daemon.ts # Receives worker commands; runs the per-turn agent loop; capture/restore on pause/resume
+    adapters/         # Copilot SDK process wrapper, Docker workspace (mount + snapshot parts), Web PubSub client
+sdk/                  # Customer-facing TypeScript SDK (talks to central; never imports src/)
+samples/webclient/    # Browser demo that drives durable sessions through the SDK
+containers/sidecar/   # Dockerfile baked into the sidecar worker image
+specs/                # POC workflow, runtime resource model, and implementation plan
+tests/                # Scenario-based tests (central, sidecar, recovery, webpubsub, workerpool)
 ```
 
-## Quick Start
+The central runtime keeps two role-based boundaries: **controllers** translate an external protocol (Web PubSub runtime events, sidecar commands) into tenant-internal commands, while **managers** own cohesive workflows and durable state (session lifecycle, assignment, leases, event log, worker registry, WorkerPool scaling, snapshots). **Adapters** execute a decision against a concrete technology (Web PubSub, Docker, local files, the Copilot process). `samples/webclient` and `sdk/` are customer-facing and never import `src/`.
 
-Install dependencies:
+## Prerequisites
+
+- Node.js >= 20 and pnpm >= 9.
+- Docker Desktop running (the WorkerPool builds and runs sidecar containers).
+- An Azure Web PubSub resource.
+- A Copilot-compatible model provider endpoint (Azure AI Foundry / Azure OpenAI / OpenAI-compatible).
+- `az login` completed locally. Auth uses `DefaultAzureCredential` for both Web PubSub and the model provider; the WorkerPool mounts your host `~/.azure` profile into each sidecar container so the same login works inside Docker. No connection strings or committed tokens are used.
+
+## Install and Build
 
 ```powershell
 pnpm install
-```
-
-Build the project:
-
-```powershell
 pnpm build
+pnpm --dir sdk build
 ```
 
-Run tests:
+## Run the Central Server (with a Docker WorkerPool)
+
+`pnpm start:central` runs the composition root in [src/central/main.ts](src/central/main.ts). It starts the HTTP server on port `3000` and **automatically configures one Docker WorkerPool** (`poc-docker-copilot`, labels `agent=copilot`, capacity 1) bound to the Docker host pool adapter. No separate worker process is needed — central scales workers itself.
 
 ```powershell
-pnpm test
-```
-
-The test command clears stale `dist-tests/` output, compiles `tests/` into `dist-tests/`, and runs Node's built-in test runner. Implementation code remains under `src/`.
-
-The Web PubSub integration test reads `tests/.env`:
-
-```text
-WEBPUBSUB_ENDPOINT=https://chenylremoteagent.webpubsub.azure.com
-WEBPUBSUB_HUB=agentruntimepoc
-```
-
-It uses `DefaultAzureCredential`, so run `az login` before enabling that test locally. The code does not use Web PubSub connection strings.
-
-Start the central framework entrypoint. Docker Desktop must be running for the default WorkerPool path because central now scales sidecar containers itself:
-
-```powershell
-$env:WEBPUBSUB_ENDPOINT="https://<your-web-pubsub-name>.webpubsub.azure.com"
-$env:WEBPUBSUB_HUB="agentruntimepoc"
-$env:TENANT_ID="poc"
-$env:COPILOT_MODEL="<model-name>"
-$env:COPILOT_PROVIDER_TYPE="openai"
-$env:COPILOT_PROVIDER_BASE_URL="https://<provider-endpoint>"
+$env:WEBPUBSUB_ENDPOINT     = "https://<your-web-pubsub>.webpubsub.azure.com"
+$env:WEBPUBSUB_HUB          = "agentruntimepoc"
+$env:COPILOT_MODEL          = "<model-name>"
+$env:COPILOT_PROVIDER_TYPE  = "openai"   # or "azure"
+$env:COPILOT_PROVIDER_BASE_URL = "https://<provider-endpoint>"
 pnpm start:central
 ```
 
-`WEBPUBSUB_ENDPOINT` is required. `WEBPUBSUB_HUB` defaults to `agentruntimepoc`, `TENANT_ID` defaults to `poc`, `CENTRAL_PORT` defaults to `3000`, and `RUNTIME_STORAGE_ROOT` defaults to `.runtime-poc/tenants/<tenantId>`. `CENTRAL_URL_FOR_WORKERS` defaults to `http://host.docker.internal:<CENTRAL_PORT>` so Docker sidecars can call central from inside the container. The current server exposes `/health`, `/runtime/status`, `/client/negotiate`, and `/sidecar/negotiate`; it does not create a session on startup.
+On startup you should see `central service listening on http://localhost:3000`.
 
-By default, no standalone sidecar terminal is needed. When a queued session has no matching ready Worker, the tenant WorkerPool calls the Docker hostPoolAdapter, starts `containers/sidecar/Dockerfile`, mounts the host Azure CLI profile into `/home/sidecar/.azure`, and the containerized sidecar registers through `/sidecar/negotiate`.
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `WEBPUBSUB_ENDPOINT` | yes | — | Azure Web PubSub endpoint (token auth via `DefaultAzureCredential`). |
+| `WEBPUBSUB_HUB` | no | `agentruntimepoc` | Web PubSub hub name. |
+| `COPILOT_MODEL` | yes (for agent turns) | — | Model id passed to the Copilot SDK session, forwarded to sidecars. |
+| `COPILOT_PROVIDER_TYPE` | yes | — | `openai` (AI Foundry / OpenAI-compatible v1) or `azure` (Azure OpenAI resource). |
+| `COPILOT_PROVIDER_BASE_URL` | yes | — | Provider endpoint passed to the Copilot SDK. |
+| `TENANT_ID` | no | `poc` | Tenant runtime id. |
+| `CENTRAL_PORT` | no | `3000` | HTTP port. |
+| `RUNTIME_STORAGE_ROOT` | no | `.runtime-poc/tenants/<tenantId>` | Local storage root for sessions, events, workers, and snapshots. |
+| `CENTRAL_URL_FOR_WORKERS` | no | `http://host.docker.internal:<port>` | URL the containerized sidecar calls back to reach central. |
+| `WORKER_POOL_SCALE_IN_IDLE_MS` | no | `5000` | Idle time before an unused worker is scaled in (recycled). |
 
-The standalone sidecar entrypoint remains a development wedge for earlier lifecycle tests:
+Optional provider knobs: `COPILOT_PROVIDER_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`.
+
+## Run the Web Client and Drive a Durable Session
+
+With central running, start the browser demo (Vite dev server on `http://127.0.0.1:5173`):
 
 ```powershell
-$env:CENTRAL_URL="http://localhost:3000"
-$env:TENANT_ID="poc"
-$env:SIDECAR_WORK_ROOT=".runtime-poc/sidecar"
-pnpm start:sidecar
+pnpm --dir samples/webclient dev
 ```
 
-`CENTRAL_URL` is required for the sidecar. `TENANT_ID` must match the central tenant and defaults to `poc`. `SIDECAR_WORK_ROOT` is optional; it controls where the sidecar prepares local workspace and Copilot session-state directories.
+Then, in the browser:
 
-The sidecar wraps the Copilot SDK process. For GitHub-backed Copilot auth, set one of these in your shell before starting the sidecar: `COPILOT_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`. Do not commit token values to the repo.
+1. Set **Central URL** to `http://localhost:3000` and **Tenant** to `poc`, and click **Connect**. The right rail shows the `poc-docker-copilot` WorkerPool.
+2. Click **Sessions +**, choose the `copilot-poc` AgentSpec, and click **Create Session**.
+3. Central queues the session and the WorkerPool scales out a Docker worker: it builds [containers/sidecar/Dockerfile](containers/sidecar/Dockerfile), runs a container, the sidecar registers through `/sidecar/negotiate`, central assigns the session, and the Copilot agent starts. The session moves `queued → starting → running`.
+4. Chat with the agent in the composer. Streamed output appears in the thread and runtime events appear in the grey rail.
+5. Click **Pause**. The sidecar reaches a turn boundary, flushes the Copilot session files, and the workspace plus agent state are captured to a session-addressed snapshot under `<RUNTIME_STORAGE_ROOT>/snapshots/<sessionId>/<snapshotId>/`. Central records the snapshot, releases the lease, and the idle worker is scaled in (recycled).
+6. Click **Resume**. Central re-queues the session, the WorkerPool scales out a **new** worker, the sidecar restores the snapshot before starting Copilot, and Copilot reattaches to its prior session. The agent can read files it created earlier and recall the conversation — on different compute.
 
-If the Copilot SDK session should use an explicit provider endpoint, set these sidecar env vars as a group:
+> The first scale-out builds the sidecar image (a few minutes). Subsequent scale-outs reuse the cached image and start in seconds. Editing any file under `src/` invalidates the image's build layers, so the next scale-out rebuilds it.
 
-```powershell
-$env:COPILOT_PROVIDER_BASE_URL="https://<provider-endpoint>"
-$env:COPILOT_MODEL="<model-name>"
-$env:COPILOT_PROVIDER_TYPE="azure" # or "openai"
-```
+## How Scaling and Recovery Work
 
-Optional provider knobs are `COPILOT_PROVIDER_TOKEN_SCOPE` (defaults to `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`. Azure provider auth uses `DefaultAzureCredential`, so run `az login` locally unless the sidecar runs with managed identity. `COPILOT_CLI_PATH` can point at a specific Copilot CLI runtime path when needed.
+- **Scale-out**: a queued session whose labels match the WorkerPool triggers the Docker host pool adapter to start a sidecar container. The container registers as a Worker; only after its first heartbeat does it become eligible for assignment.
+- **Assignment**: central writes a `sessionLeaseId` and routes `session.assign` (with any restore reference) to the worker. The lease is how a durable session is bound to replaceable compute; stale-lease writes are rejected.
+- **Scale-in**: after a session pauses or completes and a worker stays idle past `WORKER_POOL_SCALE_IN_IDLE_MS`, the WorkerPool closes the worker and stops the container.
+- **Snapshots are session-addressed**: they are filed under the durable `sessionId`, not under any worker, so recovery only needs the session identity. Central owns the snapshot record and `latestSnapshotRef`; the sidecar moves the bytes (capture on pause, restore on resume).
 
-## Important Concepts
-
-- `AgentSpec`: describes the Copilot POC agent and references predefined POC class/profile values.
-- `SessionRecord`: durable session identity and lifecycle state owned by central.
-- `WorkerRecord`: registered Docker-backed compute capacity created by sidecar registration.
-- `WorkerPoolRecord`: tenant-scoped capacity configuration that can scale out Workers through a hostPoolAdapter.
-- `HostPoolInstanceRecord`: adapter-owned host instance metadata that relates Docker container ids to registered Worker ids without entering Worker selection.
-- `RuntimeEvent`: append-only runtime fact used for routing and replay.
-- `WorkspaceSnapshot`: metadata for a snapshot boundary containing the workspace volume and Copilot session volume.
-- `CentralService`: central-facing runtime orchestration entrypoint.
-- `SidecarDaemon`: worker-local wrapper around Docker volumes and Copilot process startup.
-
-## Controller, Manager, Adapter
-
-Use this rule when adding files: controllers represent replaceable protocol or ingress boundaries, managers own cohesive runtime workflows and state mechanisms, and adapters execute decisions against a concrete technology.
-
-| Category | Use it for | Examples |
-| --- | --- | --- |
-| Controller | Translates an external protocol or ingress shape into tenant-internal commands. It is replaceable when the ingress protocol changes. | `TenantInboxController`, `ClientRuntimeEventController`, `WorkerRuntimeEventController` |
-| Manager | Owns a tenant-internal workflow, state transition, sequence, assignment, lease, event log, capacity scale loop, or registry mechanism. It does not represent a replaceable protocol boundary. | `SessionManager`, `SessionLifecycleManager`, `SessionAssignmentManager`, `SessionLeaseManager`, `WorkerManager`, `WorkerPoolManager`, `EventLogManager` |
-| Policy/selector | Makes a pure selection or policy decision without owning protocol ingress or durable state writes. | `WorkerSelector` |
-| Adapter | Connects a manager/controller decision to a concrete implementation such as Web PubSub, Docker, local files, or the Copilot process. | `WebPubSubTransportAdapter`, `DockerHostPoolAdapter`, `DockerVolumeAdapter`, `CopilotProcessAdapter` |
-| Model | Defines the shape of durable resources and public contracts. | `SessionRecord`, `WorkerRecord`, `AgentSpec`, `RuntimeEvent` |
-| Registry/Profile | Provides predefined POC class/profile configuration without advancing runtime state. | `POC_AGENT_SPEC`, POC class/profile registry |
-
-For example, `ClientRuntimeEventController` is a controller because it accepts Web PubSub runtime events and translates them into session commands. `SessionManager` is a manager because it owns the create/input workflow and coordinates session lifecycle, event log, turn sequence, and assignment managers. `WorkerPoolManager` is a manager because it owns the tenant capacity scale loop and host instance metadata. `WorkerSelector` is a selector because it only chooses a compatible Worker from facts it is given. `DockerHostPoolAdapter` is an adapter because it performs Docker build/run/stop operations for WorkerPool decisions.
-
-The same boundary applies to pause and resume. A protocol controller should translate `session.pause.requested` or `session.resume.requested` into a tenant-internal command. Managers decide the lifecycle, lease, snapshot, recovery, and event-log effects. `DockerVolumeAdapter` performs the actual copy and restore of Docker volumes. `WebPubSubTransportAdapter` is also an adapter: Web PubSub is the POC transport, not the owner of session lifecycle or event truth.
-
-`CentralHttpServer` is a generic HTTP server shell. It exposes route registration, but concrete routes such as `/health`, `/client/negotiate`, and `/sidecar/negotiate` are registered by the composition root in `src/central/main.ts`. Route handlers call central or tenant runtime APIs; they do not reach into transport adapters directly.
-
-All barrel files must use explicit named exports. Do not use `export * from ...`; listing concrete classes and types keeps public contracts reviewable.
-
-## Web PubSub Shape
-
-POC Web PubSub usage is a simple client-connection pattern:
-
-1. central, client, and sidecar connect as Web PubSub clients.
-2. client and sidecar publish runtime events to the tenant inbox runtime channel.
-3. central handles the event and writes local file storage first.
-4. central publishes results to session-events and worker-commands runtime channels.
-
-The shared transport contract uses runtime channels such as `tenant-inbox`, `session-events`, and `worker-commands`. Web PubSub group names such as `tenant:{tenantId}:central:events`, `tenant:{tenantId}:session:{sessionId}`, and `tenant:{tenantId}:worker:{workerId}` are adapter-internal mappings, not shared runtime contract fields.
-
-Web PubSub upstream is not used.
-
-## Validation Commands
-
-The intended validation path is:
+## Tests
 
 ```powershell
-pnpm install
-pnpm build
+pnpm typecheck
 pnpm test
 ```
 
-Docker WorkerPool validation is opt-in because it builds a Linux sidecar image and starts real containers:
+`pnpm test` compiles `tests/` to `dist-tests/` and runs Node's built-in test runner. The Web PubSub integration tests and the real Copilot smoke test read `tests/.env` and use `DefaultAzureCredential`, so run `az login` to exercise them; otherwise they are skipped.
+
+The full Docker WorkerPool end-to-end validation (scale-out, an agent turn, pause + snapshot, recycle, resume + restore) is opt-in because it builds an image and starts real containers:
 
 ```powershell
-$env:RUN_DOCKER_WORKERPOOL_E2E='1'
+$env:RUN_DOCKER_WORKERPOOL_E2E = '1'
 node -e "require('fs').rmSync('dist-tests', { recursive: true, force: true })"
 pnpm exec tsc -p tsconfig.test.json
-node --test dist-tests/tests/workerpool/docker-sidecar-image.integration.test.js
 node --test dist-tests/tests/workerpool/docker-workerpool.integration.test.js
 ```
 
-Those tests require Docker Desktop, `az login`, `tests/.env` Web PubSub settings, and Copilot provider env. They verify mounted Azure CLI auth inside the Ubuntu sidecar image, Docker WorkerPool scale-out, sidecar registration, SDK session routing, one agent turn, pause, and scale-in.
-
-After these commands are verified locally, keep this README and `AGENTS.md` in sync with any command changes.
+This requires Docker Desktop, `az login`, the `tests/.env` Web PubSub settings, and the Copilot provider env. A deterministic, always-on version of the same continuity scenario (worker recycle → restore → recall) runs in-process as part of `pnpm test`.

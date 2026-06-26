@@ -21,6 +21,6 @@ export const POC_AGENT_SPEC: AgentSpec = {
   pausePolicy: 'turn-boundary-durable-pause',
   recoveryPolicy: 'restart-with-context',
   agentStatePolicy: 'copilot-session-volume-snapshot',
-  idlePauseTimeoutMs: 60_000,
+  idlePauseTimeoutMs: 120_000,
   version: 'poc-v1'
 };

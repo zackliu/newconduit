@@ -5,6 +5,7 @@ import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
 import { SessionLifecycleReconciler } from './session-lifecycle-reconciler';
+import { SnapshotManager } from './snapshot-manager';
 
 export interface StartSessionOutcome {
   session: SessionRecord;
@@ -51,6 +52,7 @@ export class SessionManager {
     private readonly sessionLifecycleManager: SessionLifecycleManager,
     private readonly eventLogManager: EventLogManager,
     private readonly sessionAssignmentManager: SessionAssignmentManager,
+    private readonly snapshotManager: SnapshotManager,
     private readonly sessionLifecycleReconciler?: SessionLifecycleReconciler
   ) {}
 
@@ -244,7 +246,8 @@ export class SessionManager {
             sessionId,
             workerId: session.currentWorkerId,
             sessionLeaseId: session.sessionLeaseId,
-            reason: 'client_requested'
+            reason: 'client_requested',
+            capture: this.snapshotManager.planCapture(session)
           }
         }
       }

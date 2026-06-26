@@ -103,6 +103,9 @@ const appRoot = app;
 render();
 
 function render(): void {
+  const composerSnapshot = captureComposerState();
+  const chatScroll = captureScroll('#messageStack');
+  const traceScroll = captureScroll('#traceList');
   const activeSession = getActiveSessionSummary();
   const selectedAgentSpec = getSelectedAgentSpec();
   const canSend = Boolean(state.currentSession && activeSession?.status === 'running' && !state.pending);
@@ -196,8 +199,9 @@ function render(): void {
   `;
 
   wireEvents();
-  scrollChatToEnd();
-  scrollTraceToEnd();
+  restoreComposerState(composerSnapshot);
+  applyScroll('#messageStack', chatScroll);
+  applyScroll('#traceList', traceScroll);
 }
 
 function wireEvents(): void {
@@ -324,11 +328,17 @@ function startRuntimeStatusPolling(): void {
     window.clearInterval(runtimeStatusTimer);
   }
   runtimeStatusTimer = window.setInterval(() => {
-    void refreshRuntimeStatus().then(() => render()).catch((error: unknown) => {
-      state.error = error instanceof Error ? error.message : String(error);
-      render();
+    void refreshRuntimeStatus().then(() => renderRuntimeInspector()).catch((error: unknown) => {
+      console.error('runtime status poll failed', error);
     });
   }, 1500);
+}
+
+function renderRuntimeInspector(): void {
+  const inspector = document.querySelector<HTMLElement>('.runtimeInspector');
+  if (inspector) {
+    inspector.innerHTML = renderWorkerPoolInspector();
+  }
 }
 
 function syncConnectionInputs(): void {
@@ -880,18 +890,61 @@ function renderTraceEvent(event: TraceEvent): string {
   `;
 }
 
-function scrollChatToEnd(): void {
-  const stack = document.querySelector<HTMLDivElement>('#messageStack');
-  if (stack) {
-    stack.scrollTop = stack.scrollHeight;
+interface ComposerSnapshot {
+  value: string;
+  focused: boolean;
+  selectionStart: number;
+  selectionEnd: number;
+}
+
+interface ScrollSnapshot {
+  sticky: boolean;
+  top: number;
+}
+
+function captureComposerState(): ComposerSnapshot | undefined {
+  const textarea = document.querySelector<HTMLTextAreaElement>('#prompt');
+  if (!textarea) {
+    return undefined;
+  }
+  return {
+    value: textarea.value,
+    focused: document.activeElement === textarea,
+    selectionStart: textarea.selectionStart ?? textarea.value.length,
+    selectionEnd: textarea.selectionEnd ?? textarea.value.length
+  };
+}
+
+function restoreComposerState(snapshot: ComposerSnapshot | undefined): void {
+  if (!snapshot) {
+    return;
+  }
+  const textarea = document.querySelector<HTMLTextAreaElement>('#prompt');
+  if (!textarea || textarea.disabled) {
+    return;
+  }
+  textarea.value = snapshot.value;
+  if (snapshot.focused) {
+    textarea.focus();
+    textarea.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
   }
 }
 
-function scrollTraceToEnd(): void {
-  const trace = document.querySelector<HTMLDivElement>('#traceList');
-  if (trace) {
-    trace.scrollTop = trace.scrollHeight;
+function captureScroll(selector: string): ScrollSnapshot {
+  const element = document.querySelector<HTMLDivElement>(selector);
+  if (!element) {
+    return { sticky: true, top: 0 };
   }
+  const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+  return { sticky: distanceFromBottom < 24, top: element.scrollTop };
+}
+
+function applyScroll(selector: string, snapshot: ScrollSnapshot): void {
+  const element = document.querySelector<HTMLDivElement>(selector);
+  if (!element) {
+    return;
+  }
+  element.scrollTop = snapshot.sticky ? element.scrollHeight : snapshot.top;
 }
 
 function shortId(id: string): string {

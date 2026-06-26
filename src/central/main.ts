@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { CentralService } from './central-service';
 import { DockerHostPoolAdapter, WebPubSubTransportAdapter } from './adapters';
 import { CentralHttpServer } from './http/central-http-server';
@@ -42,7 +43,7 @@ async function main(): Promise<void> {
     connectionIssuer: webPubSubTransportAdapter,
     workerPools: [workerPool],
     hostPoolAdapters: {
-      docker: new DockerHostPoolAdapter()
+      docker: new DockerHostPoolAdapter({ snapshotRoot: join(tenant.storageRoot, 'snapshots') })
     }
   });
   await service.start();

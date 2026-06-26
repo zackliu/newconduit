@@ -1,4 +1,5 @@
 import type { Clock, RuntimeEvent, RuntimeStorage, SessionAssignPayload, SessionRecord } from '../../shared';
+import { SnapshotManager } from './snapshot-manager';
 import { SessionLeaseManager } from './worker-lease-manager';
 import { WorkerSelector } from './worker-selector';
 
@@ -20,7 +21,8 @@ export class SessionAssignmentManager {
     private readonly storage: RuntimeStorage,
     private readonly clock: Clock,
     private readonly workerSelector: WorkerSelector,
-    private readonly sessionLeaseManager: SessionLeaseManager
+    private readonly sessionLeaseManager: SessionLeaseManager,
+    private readonly snapshotManager: SnapshotManager
   ) {}
 
   async assignReadyWorker(session: SessionRecord): Promise<SessionAssignmentOutcome> {
@@ -37,13 +39,15 @@ export class SessionAssignmentManager {
       currentSessionCount: worker.currentSessionCount + 1,
       updatedAt: this.clock.now()
     });
+    const restore = await this.snapshotManager.planRestore(assignedSession);
     const payload: SessionAssignPayload = {
       sessionId: assignedSession.sessionId,
       workerId: worker.workerId,
       sessionLeaseId: assignedSession.sessionLeaseId!,
       workspaceRef: assignedSession.workspaceRef,
       copilotSessionStateRef: `copilot-session:${assignedSession.sessionId}`,
-      resolvedAgentSpec: assignedSession.resolvedAgentSpec
+      resolvedAgentSpec: assignedSession.resolvedAgentSpec,
+      ...(restore ? { restore } : {})
     };
     return {
       session: assignedSession,

@@ -1,4 +1,4 @@
-export { DockerHostPoolAdapter, DockerVolumeAdapter, InMemoryRuntimeTransportAdapter, WebPubSubTransportAdapter } from './adapters';
+export { DockerHostPoolAdapter, InMemoryRuntimeTransportAdapter, WebPubSubTransportAdapter } from './adapters';
 export type { DockerHostPoolAdapterOptions, WebPubSubTransportAdapterOptions } from './adapters';
 export { CentralService } from './central-service';
 export { CentralHttpServer } from './http/central-http-server';
@@ -10,12 +10,9 @@ export {
 	AuditController,
 	AuthorizationController,
 	ClientRuntimeEventController,
-	RecoveryController,
-	SnapshotController,
 	TenantInboxController,
 	WorkerRuntimeEventController
 } from './controllers';
-export type { VolumeRestoreAdapter, VolumeSnapshotAdapter } from './controllers';
 export {
 	AgentSpecAdmissionManager,
 	EventLogManager,
@@ -23,6 +20,7 @@ export {
 	SessionLifecycleManager,
 	SessionLeaseManager,
 	SessionManager,
+	SnapshotManager,
 	WorkerManager,
 	WorkerPoolManager,
 	WorkerSelector

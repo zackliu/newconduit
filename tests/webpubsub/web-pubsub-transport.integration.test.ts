@@ -10,7 +10,7 @@ import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { DockerWorkspaceAdapter, WebPubSubClientAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar';
 import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, WebPubSubRuntimeChannelMapper, type RuntimeEvent, type SessionAssignPayload, type SessionRecord, type WorkerRecord } from '../../src/shared';
-import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput } from '../../src/sidecar/contracts';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult } from '../../src/sidecar/contracts';
 import { isCredentialUnavailable, loadTestEnv } from '../support/test-env';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,13 +24,15 @@ class NoopAgentProcessAdapter implements SidecarAgentProcessAdapter {
     return;
   }
 
-  async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<void> {
+  async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult> {
+    const message = `noop:${input.message}`;
     await emit({
       type: 'output',
       payload: {
-        message: `noop:${input.message}`
+        message
       }
     });
+    return { message };
   }
 }
 

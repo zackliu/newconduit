@@ -7,6 +7,7 @@ export { SessionLifecycleReconciler } from './session-lifecycle-reconciler';
 export type { SessionLifecycleReconcileOutcome } from './session-lifecycle-reconciler';
 export { SessionManager } from './session-manager';
 export type { AcceptInputOutcome, StartSessionOutcome } from './session-manager';
+export { SnapshotManager } from './snapshot-manager';
 export { SessionLeaseManager } from './worker-lease-manager';
 export { WorkerManager } from './worker-manager';
 export { WorkerPoolManager } from './worker-pool-manager';

@@ -37,12 +37,13 @@ export class SessionLifecycleManager {
     return next;
   }
 
-  async pauseAfterEvent(session: SessionRecord, sequence: number, timestamp: string, reason?: string): Promise<SessionRecord> {
+  async pauseAfterEvent(session: SessionRecord, sequence: number, timestamp: string, reason?: string, latestSnapshotRef?: string): Promise<SessionRecord> {
     const next = {
       ...session,
       status: 'paused' as const,
       currentWorkerId: undefined,
       sessionLeaseId: undefined,
+      latestSnapshotRef: latestSnapshotRef ?? session.latestSnapshotRef,
       lifecycleReason: reason,
       eventCursor: sequence,
       lastEventUpdatedAt: timestamp,

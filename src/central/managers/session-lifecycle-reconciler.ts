@@ -2,6 +2,7 @@ import type { Clock, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, Sessio
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
+import { SnapshotManager } from './snapshot-manager';
 import { WorkerPoolManager } from './worker-pool-manager';
 
 export interface SessionLifecycleReconcileOutcome {
@@ -18,6 +19,7 @@ export class SessionLifecycleReconciler {
     private readonly sessionLifecycleManager: SessionLifecycleManager,
     private readonly eventLogManager: EventLogManager,
     private readonly sessionAssignmentManager: SessionAssignmentManager,
+    private readonly snapshotManager: SnapshotManager,
     private readonly eventTransport: RuntimeEventTransport,
     private readonly workerPoolManager?: WorkerPoolManager
   ) {}
@@ -102,7 +104,8 @@ export class SessionLifecycleReconciler {
           sessionId: session.sessionId,
           workerId: session.currentWorkerId,
           sessionLeaseId: session.sessionLeaseId,
-          reason: 'idle_timeout'
+          reason: 'idle_timeout',
+          capture: this.snapshotManager.planCapture(session)
         }
       }
     };

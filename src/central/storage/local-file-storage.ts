@@ -1,4 +1,4 @@
-import { appendFile, cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { HostPoolInstanceRecord, RuntimeEvent, RuntimeStorage, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../../shared';
 
@@ -93,16 +93,11 @@ export class LocalFileStorage implements RuntimeStorage {
   }
 
   async writeSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
-    await this.writeJson(join(snapshot.storageLocation, 'snapshot.json'), snapshot);
+    await this.writeJson(join(this.root, 'snapshots', snapshot.location, 'snapshot.json'), snapshot);
   }
 
   async readSnapshot(sessionId: string, snapshotId: string): Promise<WorkspaceSnapshot | undefined> {
-    return this.readJson(join(this.root, 'sessions', sessionId, 'snapshots', snapshotId, 'snapshot.json'));
-  }
-
-  async copyDirectory(source: string, target: string): Promise<void> {
-    await mkdir(dirname(target), { recursive: true });
-    await cp(source, target, { recursive: true, force: true });
+    return this.readJson(join(this.root, 'snapshots', sessionId, snapshotId, 'snapshot.json'));
   }
 
   private async writeJson(path: string, value: unknown): Promise<void> {

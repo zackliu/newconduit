@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { DefaultAzureCredential, type AccessToken, type TokenCredential } from '@azure/identity';
-import type { SidecarAgentProcessAdapter, SidecarAgentProcessEvent, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput } from '../contracts';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEvent, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult } from '../contracts';
 
 interface CopilotSdkClient {
   stop(): Promise<unknown>;
@@ -38,6 +38,8 @@ interface CopilotSdkSessionEvent {
 interface CopilotSdkModule {
   CopilotClient: new (options: Record<string, unknown>) => CopilotSdkClient & {
     createSession(options: CopilotSdkSessionConfig): Promise<CopilotSdkSession>;
+    resumeSession(sessionId: string, options: CopilotSdkSessionConfig): Promise<CopilotSdkSession>;
+    getLastSessionId(): Promise<string | undefined>;
     start(): Promise<unknown>;
   };
   RuntimeConnection: {
@@ -86,14 +88,18 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       logLevel: 'error'
     });
     await client.start();
-    const session = await client.createSession(await this.createCopilotSessionConfig({ gitHubToken, onPermissionRequest: approveAll }));
+    const sessionConfig = await this.createCopilotSessionConfig({ gitHubToken, onPermissionRequest: approveAll });
+    const restoredSessionId = await client.getLastSessionId();
+    const session = restoredSessionId
+      ? await client.resumeSession(restoredSessionId, sessionConfig)
+      : await client.createSession(sessionConfig);
     this.sessions.set(input.sessionId, {
       client: client as unknown as CopilotSdkClient,
       session: session as unknown as CopilotSdkSession
     });
   }
 
-  async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<void> {
+  async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult> {
     if (!input.message) {
       throw new Error('message is required');
     }
@@ -101,36 +107,30 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     if (!active) {
       throw new Error(`agent session ${input.sessionId} is not running`);
     }
-    let emittedFinalMessage = false;
+    let streamedFinalMessage = false;
     const unsubscribe = active.session.on((event) => {
       const mapped = this.mapSessionEvent(event);
-      if (mapped) {
-        if (mapped.payload.message) {
-          emittedFinalMessage = true;
-        }
-        void emit(mapped);
+      if (!mapped) {
+        return;
       }
+      if (mapped.payload.message) {
+        streamedFinalMessage = true;
+      }
+      void emit(mapped);
     });
     try {
       const result = await active.session.sendAndWait({ prompt: input.message }, 120_000);
-      if (result && !emittedFinalMessage) {
+      const message = result?.data.content;
+      if (result && !streamedFinalMessage) {
         await emit({
           type: 'output',
           payload: {
-            message: result.data.content,
+            message,
             output: result.data
           }
         });
       }
-    } catch (error) {
-      await emit({
-        type: 'output',
-        payload: {
-          error: {
-            message: error instanceof Error ? error.message : String(error)
-          }
-        }
-      });
+      return { message, output: result?.data };
     } finally {
       unsubscribe();
     }

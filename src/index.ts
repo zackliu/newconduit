@@ -6,17 +6,15 @@ export {
 	CentralService,
 	ClientRuntimeEventController,
 	DockerHostPoolAdapter,
-	DockerVolumeAdapter,
 	EventLogManager,
 	InMemoryRuntimeTransportAdapter,
 	LocalFileStorage,
 	POC_AGENT_SPEC,
-	RecoveryController,
 	registerPocCentralRoutes,
 	SessionAssignmentManager,
 	SessionLifecycleManager,
 	SessionManager,
-	SnapshotController,
+	SnapshotManager,
 	TenantInboxController,
 	TenantRuntime,
 	WebPubSubTransportAdapter,
@@ -27,7 +25,7 @@ export {
 	WorkerSelector
 } from './central';
 export type { CentralHttpRouteHandler, CentralHttpServerOptions, JsonResponse } from './central';
-export type { AcceptInputOutcome, DockerHostPoolAdapterOptions, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, TenantRuntimeOptions, VolumeRestoreAdapter, VolumeSnapshotAdapter, WorkerCommandOutput, WorkerPoolManagerStatus } from './central';
+export type { AcceptInputOutcome, DockerHostPoolAdapterOptions, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, TenantRuntimeOptions, WorkerCommandOutput, WorkerPoolManagerStatus } from './central';
 export { SystemClock } from './shared';
 export type {
 	AgentSpec,
@@ -51,6 +49,11 @@ export type {
 	RuntimeSubscription,
 	SessionRecord,
 	SessionStatus,
+	SnapshotCaptureRef,
+	SnapshotCreatedPayload,
+	SnapshotPart,
+	SnapshotPartName,
+	SnapshotRestoreRef,
 	TenantConnectionIssuer,
 	TenantContext,
 	WorkerCondition,

@@ -11,8 +11,8 @@ import { POC_AGENT_SPEC } from '../../src/central/registries/poc-class-registry'
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { DockerWorkspaceAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type RuntimeChannel, type RuntimeEvent, type RuntimeEventHandler, type RuntimeEventTransport, type RuntimeSubscription, type WorkerRegisterPayload } from '../../src/shared';
-import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount } from '../../src/sidecar/contracts';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type RuntimeChannel, type RuntimeEvent, type RuntimeEventHandler, type RuntimeEventTransport, type RuntimeSubscription, type SnapshotPart, type WorkerRegisterPayload } from '../../src/shared';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
 
 class SidecarInMemoryTransport implements SidecarRuntimeTransport {
   constructor(private readonly transport: RuntimeEventTransport, readonly publishedEvents: RuntimeEvent[] = []) {}
@@ -41,8 +41,20 @@ class SidecarInMemoryTransport implements SidecarRuntimeTransport {
 }
 
 class PassthroughWorkspaceAdapter implements SidecarWorkspaceAdapter {
+  readonly captures: SidecarWorkspaceCaptureInput[] = [];
+  readonly restores: SidecarWorkspaceRestoreInput[] = [];
+
   mount(input: SidecarWorkspaceMount): SidecarWorkspaceMount {
     return input;
+  }
+
+  async capture(input: SidecarWorkspaceCaptureInput): Promise<SnapshotPart[]> {
+    this.captures.push(input);
+    return [{ name: 'workspace', path: 'parts/workspace' }, { name: 'agent-state', path: 'parts/agent-state' }];
+  }
+
+  async restore(input: SidecarWorkspaceRestoreInput): Promise<void> {
+    this.restores.push(input);
   }
 }
 
@@ -56,17 +68,17 @@ class DeterministicAgentProcessAdapter implements SidecarAgentProcessAdapter {
     this.starts.push(input);
   }
 
-  async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<void> {
+  async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult> {
     this.sends.push(input);
+    const result = { message: `reply:${input.message}`, output: { echoed: input.message } };
     await emit({
       type: 'output',
       payload: {
-        message: `reply:${input.message}`,
-        output: {
-          echoed: input.message
-        }
+        message: result.message,
+        output: result.output
       }
     });
+    return result;
   }
 
   async pauseAtTurnBoundary(input: { sessionId: string }): Promise<void> {
@@ -98,6 +110,23 @@ class DeferredStartAgentProcessAdapter extends DeterministicAgentProcessAdapter 
 
   completeStart(): void {
     this.resolveStart();
+  }
+}
+
+class ToolUsingAgentProcessAdapter implements SidecarAgentProcessAdapter {
+  async start(): Promise<void> {
+    return;
+  }
+
+  async send(_input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult> {
+    await emit({ type: 'output', payload: { message: '', output: {} } });
+    await emit({ type: 'output', payload: { toolStarted: { toolCallId: 'call-1', toolName: 'bash' } } });
+    await emit({ type: 'output', payload: { toolCompleted: { toolCallId: 'call-1', toolName: 'bash' } } });
+    await emit({ type: 'output', payload: { message: '', output: {} } });
+    await emit({ type: 'output', payload: { delta: 'RESUME-' } });
+    await emit({ type: 'output', payload: { delta: 'OK' } });
+    await emit({ type: 'output', payload: { message: 'RESUME-OK', output: { final: true } } });
+    return { message: 'RESUME-OK', output: { final: true } };
   }
 }
 
@@ -297,9 +326,10 @@ test('scenario: pause command stops agent run and publishes paused event', async
   const runtimeTransport = new InMemoryRuntimeTransportAdapter();
   const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
   const agentProcessAdapter = new DeterministicAgentProcessAdapter();
+  const workspaceAdapter = new PassthroughWorkspaceAdapter();
   const sidecar = new SidecarDaemon({
     runtimeTransport: sidecarTransport,
-    workspaceAdapter: new PassthroughWorkspaceAdapter(),
+    workspaceAdapter,
     agentProcessAdapter
   });
 
@@ -308,12 +338,37 @@ test('scenario: pause command stops agent run and publishes paused event', async
 
   assert.deepEqual(agentProcessAdapter.pauses, ['session-1']);
   assert.deepEqual(agentProcessAdapter.stops, ['session-1']);
+  assert.deepEqual(workspaceAdapter.captures.map((capture) => capture.location), ['session-1/snap-1']);
   const paused = sidecarTransport.publishedEvents.find((event) => event.type === 'session.paused');
   assert.equal(paused?.sessionId, 'session-1');
   assert.equal(paused?.sessionLeaseId, 'lease-2');
-  assert.deepEqual(paused?.payload, { reason: 'client_requested' });
+  assert.deepEqual(paused?.payload, {
+    reason: 'client_requested',
+    snapshot: {
+      snapshotId: 'snap-1',
+      parts: [{ name: 'workspace', path: 'parts/workspace' }, { name: 'agent-state', path: 'parts/agent-state' }]
+    }
+  });
 });
 
+test('scenario: a tool-using turn publishes exactly one turn.completed with the final answer', async () => {
+  const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+  const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
+  const sidecar = new SidecarDaemon({
+    runtimeTransport: sidecarTransport,
+    workspaceAdapter: new PassthroughWorkspaceAdapter(),
+    agentProcessAdapter: new ToolUsingAgentProcessAdapter()
+  });
+
+  await sidecar.handleWorkerCommand(sessionAssignEvent({ sessionLeaseId: 'lease-2' }));
+  await sidecar.handleWorkerCommand(sessionInputCommandEvent({ sessionLeaseId: 'lease-2', turnSeq: 4, message: 'recall the file you created' }));
+
+  const completed = sidecarTransport.publishedEvents.filter((event) => event.type === 'turn.completed');
+  assert.equal(completed.length, 1);
+  assert.deepEqual(completed[0].payload, { result: { message: 'RESUME-OK', output: { final: true } } });
+  assert.equal(sidecarTransport.publishedEvents.some((event) => event.type === 'turn.failed'), false);
+  assert.ok(sidecarTransport.publishedEvents.filter((event) => event.type === 'agent.output').length >= 5);
+});
 
 function workerHeartbeatEvent(workerId: string): RuntimeEvent {
   return {
@@ -424,7 +479,8 @@ function sessionPauseCommandEvent(input: { sessionLeaseId: string; reason: 'idle
       sessionId,
       workerId,
       sessionLeaseId: input.sessionLeaseId,
-      reason: input.reason
+      reason: input.reason,
+      capture: { snapshotId: 'snap-1', location: `${sessionId}/snap-1` }
     }
   };
 }

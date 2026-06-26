@@ -402,7 +402,7 @@ Automated scenario test 使用实现同一 `agentProcessAdapter` contract 的 de
 
 实现范围：
 
-- AgentSpec 增加 `idlePauseTimeoutMs`，由 admission manager 解析为 resolved AgentSpec runtime policy。POC 静态 AgentSpec 默认值是 `60000`。
+- AgentSpec 增加 `idlePauseTimeoutMs`，由 admission manager 解析为 resolved AgentSpec runtime policy。POC 静态 AgentSpec 默认值是 `120000`，要覆盖 queued session 等待 Worker scale-out 的时间。
 - `SessionRecord` 增加 `lastEventUpdatedAt`。`session.created` 写入时初始化该字段；`input.accepted`、`agent.output`、`turn.completed`、`turn.failed`、`status.changed`、`session.pause.requested`、`session.paused`、`session.resume.requested`、`session.resumed` 等 session-scoped durable events 写入后刷新该字段。
 - Client connect、`sessions.open(sessionId)`、`sessions.list()`、`session.history()`、session events subscribe/replay 不刷新 `lastEventUpdatedAt`，也不改变 session status。
 - Tenant runtime 增加 session lifecycle reconciler。Central 周期性运行该 reconciler；Worker register 或 heartbeat 让 Worker 进入 ready selection path 后，central 立即运行同一个 reconciler 一次。
@@ -581,77 +581,56 @@ Expect：
 - Worker selection 从头到尾只看注册后的 Worker record，不使用 Docker container id，也不使用 WorkerPool source。
 - Client SDK 仍然只面向 session 通信，不知道 WorkerPool、Docker container、Worker endpoint。
 
-## 10. Slice 8：Pause Session With Volume Snapshot
+## 10. Slice 8：Durable Session Memory Across Worker Recycle
 
-目标：基于 Slice 6 的 pause lifecycle，Running session 进入 paused 时生成同一 event boundary 下的 workspace volume snapshot 和 Copilot session volume snapshot。
+目标：把 pause + snapshot 和 resume + restore 合并成一条可验证的 continuity 主线。Session 在一个 Worker 上聊一轮、写下 workspace 文件，pause 时把 workspace 和 agent session state 捕获到 session-addressed snapshot 区，Worker 被回收后，resume 在一个新 Worker 上先恢复这两份材料再重启 agent，新一轮对话能读回之前写的文件并续接之前的会话记忆。这条主线不通，durable session 的核心承诺就不成立，所以 pause 与 resume 作为同一个 slice 一起验证。
 
-实现范围：
+### 10.1 Snapshot 边界与 ownership
 
-- Slice 6 已建立的 `session.pause.requested` handling、`running -> pausing -> paused` status truth、pause command 和 turn-boundary pause。
-- Copilot session files flushed to Copilot session volume。
-- Snapshot controller。
-- Docker volume adapter。
-- Snapshot marker event。
-- Worker lease release。
+- **Session-addressed snapshot 区**：snapshot 按 `sessionId` 归档，不按 Worker 实例归档。central data root 下的 `snapshots/<sessionId>/<snapshotId>/` 是 durable 存储位置；`snapshot.json` 是 record，`parts/workspace` 和 `parts/agent-state` 是捕获的字节。因为 `sessionId` 不变，任何后续 Worker 只凭 session 身份就能找回最新 snapshot，与写入它的 Worker 是否已销毁无关。
+- **Central 拥有 snapshot record 与 marker**：central 分配 `snapshotId` 与 snapshot location、写 `WorkspaceSnapshot` record、append `snapshot.created` marker、维护 `latestSnapshotRef`，并下发 capture/restore 指令。Central 不读 Worker 的活动卷字节。
+- **Sidecar 拥有字节搬运**：sidecar 的 workspace adapter 在 pause 时把 `workspacePath` 与 `copilotSessionStatePath` 复制进 snapshot location 的 parts，在 resume 时把 parts 复制回新 Worker 的卷。它是离 agent 最近、知道哪些文件一致的组件。
+- **`workspaceClass` 与 `agentStatePolicy` 是 persistentClass**：snapshot 区的具体后端（Docker bind-mount snapshot 目录、对象存储、k8s PVC snapshot）由这两个 class 选择并实现，central 的 snapshot 契约不变。POC 用 Docker bind-mount 的 session-addressed 目录。
 
-Scenario-based test：`scenario: pause creates aligned workspace and Copilot session volume snapshots`
+### 10.2 Pause + Capture
 
-Given：
+- Slice 6 已建立的 `session.pause.requested` handling、`running -> pausing -> paused` status truth、pause command 与 turn-boundary pause。
+- Central 在下发 pause command 时附带 capture ref（`snapshotId` + snapshot location）。client-requested pause 与 idle pause 使用同一个 capture ref 机制。
+- Sidecar 到达 turn boundary 后停止接收新 input，stop agent process adapter 让 Copilot session 文件落盘一致，再调用 workspace adapter capture，把 workspace 与 agent session state 复制进 snapshot location 的 parts。
+- Sidecar publish `session.paused`，携带它捕获的 `snapshotId` 与 parts。
+- Central 收到 `session.paused` 后写 `WorkspaceSnapshot` record（`baseEventCursor` 对齐 pause event boundary），append `snapshot.created` marker，更新 `latestSnapshotRef`，释放 worker lease，把 session status 变为 `paused`。
 
-- Session status 是 `running`。
-- Workspace volume contains a test workspace file。
-- Copilot session volume contains a test session file。
-- Client SDK publish `session.pause.requested` 到 tenant inbox runtime channel。
+### 10.3 Resume + Restore
 
-Expect：
+- `session.resume.requested` handling。Central append `session.resume.requested`，刷新 `lastEventUpdatedAt`，把 paused session 放回 `queued`。
+- Session lifecycle reconciler 用与普通 queued session 相同的 assignment path 选择 ready Worker；没有 ready Worker 时 WorkerPool scale 出新 Worker。
+- Assignment 写新的 `sessionLeaseId`，assign command 附带从 `latestSnapshotRef` 解析出的 restore ref（`snapshotId` + location + parts）。
+- Sidecar 收到带 restore ref 的 assign 后，先调用 workspace adapter restore 把 parts 复制回新 Worker 的 `workspacePath` 与 `copilotSessionStatePath`，再启动 agent process adapter。
+- Copilot process adapter 启动后用 `getLastSessionId()` 发现恢复出来的 Copilot session，并 `resumeSession()` 续接它；没有已存在 session 时才 `createSession()`。
+- Sidecar 报 `status.changed running`，session status 回到 `running`。
 
-- Central append `pause.requested`。
-- Session status 变为 `pausing`。
-- Sidecar receives pause command。
-- Snapshot controller 在同一 event boundary 上调用 Docker volume adapter 复制 workspace volume 到 snapshot directory。
-- Snapshot controller 在同一 event boundary 上调用 Docker volume adapter 复制 Copilot session volume 到同一个 snapshot directory。
-- Snapshot metadata `baseEventCursor` matches event boundary。
-- Central append `snapshot.created` marker event。
-- `latestSnapshotRef` is updated。
-- Worker lease is released。
-- Session status 变为 `paused`。
+恢复模式固定为 restart-with-context：恢复 workspace、event history 与 agent session state 后重启并续接 agent session。snapshot 缺失或 agent session state part 缺失时进入 `failed`。
 
-## 11. Slice 9：Resume Session From Volume Snapshot
-
-目标：Paused session resume 后先回到 queued，再通过统一 assignment path 恢复 workspace volume 和 Copilot session volume，重启 Copilot，并回到 running。
-
-实现范围：
-
-- `session.resume.requested` handling。
-- Recovery controller planned resume path。
-- WorkerPool capacity ensure。
-- Docker volume adapter restore。
-- Worker lease assignment。
-- Sidecar starts Copilot after restore。
-- Session status `paused -> queued -> starting -> running`。
-
-Scenario-based test：`scenario: resume restores volumes before starting Copilot`
+Scenario-based test：`scenario: a recycled session restores its workspace and memory before the next turn`
 
 Given：
 
-- Session status 是 `paused`。
-- Latest snapshot contains workspace and Copilot session volume copies。
-- Client SDK publish `session.resume.requested` 到 tenant inbox runtime channel。
+- Client SDK 创建 session 并完成第一轮：要求 agent 在 workspace 写文件 `continuity.txt`，内容是 `RESUME-OK-7f3a`。
+- Session 在 Worker A 上处于 `running`。
 
 Expect：
 
-- Central append `session.resume.requested`，刷新 `lastEventUpdatedAt`，并把 session status 变为 `queued`。
-- Central reads latest snapshot。
-- Docker volume adapter restores workspace volume。
-- Docker volume adapter restores Copilot session volume。
-- Restored workspace volume contains expected file。
-- Restored Copilot session volume contains expected session file。
-- Central writes a new `sessionLeaseId`。
-- Sidecar starts Copilot after restore completes。
-- Central append `session.resumed`。
-- Session status 变为 `running`。
+- 第一轮完成后，central 收到 `turn.completed`。
+- Client SDK publish `session.pause.requested`；sidecar 在 stop agent 后 capture workspace 与 agent session state 到 `snapshots/<sessionId>/<snapshotId>/parts`。
+- Snapshot 区的 `parts/workspace` 包含 `continuity.txt`，内容是 `RESUME-OK-7f3a`。
+- Central 写 `WorkspaceSnapshot` record、append `snapshot.created`、更新 `latestSnapshotRef`，session status 变为 `paused`，Worker A lease 释放。
+- Worker A 被回收（本地卷随之销毁），其本地 workspace/agent-state 不再可用。
+- Client SDK publish `session.resume.requested`；session 经 `queued -> starting` 分配到新 Worker B。
+- Worker B 在启动 agent 前从 `latestSnapshotRef` restore workspace 与 agent session state；Worker B 的 `workspacePath` 包含 `continuity.txt`。
+- 第二轮要求 agent 读回它先前创建的文件；turn 输出包含 `RESUME-OK-7f3a`，且 agent 能在不被重新告知文件名的情况下指出 `continuity.txt`。
+- Session status 回到 `running`，全程 Client SDK 只面向 session，不知道 Worker A/B、snapshot 区或 Worker endpoint。
 
-## 12. Slice 10：Reconnect And Replay
+## 11. Slice 9：Reconnect And Replay
 
 目标：Client SDK 断线后能用 event cursor 追上 session history。
 
@@ -675,7 +654,7 @@ Expect：
 - Replay does not depend on Web PubSub message history。
 - Client SDK still does not know Worker endpoint。
 
-## 13. Slice 11：Thin Auth And Audit Boundary
+## 12. Slice 10：Thin Auth And Audit Boundary
 
 目标：POC 保留 central-owned negotiate 和 audit hook，但不展开完整 production auth matrix。
 
@@ -700,7 +679,7 @@ Expect：
 - Browser and sidecar do not choose their own `userId`。
 - Audit log records token issuance as record-only。
 
-## 14. Recommended Order
+## 13. Recommended Order
 
 按下面顺序实现和 review：
 
@@ -711,14 +690,13 @@ Expect：
 5. Sidecar Copilot process-wrapper event loop。
 6. Queued session scheduler and idle pause policy。
 7. Docker WorkerPool scale loop。
-8. Pause with volume snapshot。
-9. Resume from volume snapshot。
-10. Reconnect and replay。
-11. Thin auth and audit boundary。
+8. Durable session memory across worker recycle（pause+capture 与 resume+restore 合并）。
+9. Reconnect and replay。
+10. Thin auth and audit boundary。
 
 前六个 slices 跑通后，POC 已经形成可交互主线和基本 lifecycle reconciliation：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot-backed agent runtime，并把回复持久化后推回 Client SDK；queued session 会在 Worker ready 后被主动分配，idle session 会按 AgentSpec policy 进入 paused，client open/history 不会隐式唤醒 session。Docker WorkerPool scale loop 在这条主线之后接入，验证 WorkerPool 只是 capacity source 和 host 操作 owner，不改变 Worker registration、selection、assignment、event loop 的统一路径。
 
-## 15. Validation Commands
+## 14. Validation Commands
 
 每个 slice 完成后都运行：
 
@@ -739,3 +717,5 @@ Slice 5 必须包含 deterministic agent process adapter scenario test，覆盖 
 Slice 6 必须包含 session lifecycle reconciler scenario tests，覆盖 queued session 在 Worker ready 后无需 client 连接即可被 assignment、idle queued session 进入 paused 且不再自动 assignment、idle running session pause 后释放 Worker lease、client pause 释放 Worker 并让另一个 queued session 获得 assignment、client open/history 不刷新 `lastEventUpdatedAt`、resume 刷新 activity 并把 paused session 放回 queued。Sample webclient 验证必须覆盖打开 paused session 只读 history/status，点击 Pause 后进入 pausing/paused，以及点击 Resume 后 session 回到 queued/starting/running 路径。
 
 Slice 7 必须包含真实 Docker validation。先 build `containers/sidecar/Dockerfile`，再在 Windows host 上 mount 本机 Azure CLI profile 到 container `/home/sidecar/.azure`，设置 `AZURE_CONFIG_DIR=/home/sidecar/.azure`，验证 container 内 `az account show`、`az account get-access-token --scope https://cognitiveservices.azure.com/.default` 和 Node `DefaultAzureCredential().getToken('https://cognitiveservices.azure.com/.default')` 都成功。随后用同一个 image 跑 WorkerPool scale out/in e2e：queued session 触发 Docker hostPoolAdapter 启动 sidecar container，sidecar 使用标准 `/sidecar/negotiate` 注册 Worker，assignment 和至少一轮 input/output event loop 成功，Worker idle 达到 `scaleInIdleMs=5000` 后 WorkerPool controller 调用 Docker hostPoolAdapter stop/remove container。Docker 或本机 `az login` 不可用时不能声明 Slice 7 完成。
+
+Slice 8 必须包含 in-process continuity scenario test 和真实 Docker continuity e2e。In-process test 用真实 SidecarDaemon、真实 central runtime、in-memory runtime transport，以及一个把会话记忆写进 agent session state 目录的 deterministic agent process adapter；它用两个共享同一个 session-addressed snapshot 区、但各自独立 work root 的 sidecar 模拟 Worker 回收，断言 pause 后 snapshot 区的 `parts/workspace` 含写入文件、resume 后新 Worker 的 workspace 含恢复文件、第二轮能读回该文件并续接记忆。真实 Docker continuity e2e 在 Slice 7 的 WorkerPool 主线上扩展：第一轮让 Copilot 在 workspace 写文件，pause 触发 capture 与 scale-in 回收 Worker，resume scale 出新 Worker 并 restore，第二轮 Copilot 通过 `resumeSession()` 续接并读回文件。Docker 或本机 `az login` 不可用时该 e2e skip，但 in-process continuity scenario test 必须随每次构建运行并通过。

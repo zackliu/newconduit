@@ -1,7 +1,7 @@
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
 import type { Clock, RequestContext, RuntimeConnectionGrant, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext, WorkerPoolRecord, WorkerRegisterPayload } from '../shared';
 import { AgentRuntimeEventController, ClientRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
-import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type WorkerPoolManagerStatus } from './managers';
+import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, SnapshotManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type WorkerPoolManagerStatus } from './managers';
 
 const WORKER_EXPIRY_SCAN_INTERVAL_MS = 5_000;
 const SESSION_RECONCILE_INTERVAL_MS = 5_000;
@@ -38,12 +38,13 @@ export class TenantRuntime {
     const eventLogManager = new EventLogManager(options.storage, options.clock);
     const workerSelector = new WorkerSelector(() => Date.parse(options.clock.now()));
     const sessionLeaseManager = new SessionLeaseManager(options.storage);
-    const sessionAssignmentManager = new SessionAssignmentManager(options.storage, options.clock, workerSelector, sessionLeaseManager);
+    const snapshotManager = new SnapshotManager(options.storage, options.clock);
+    const sessionAssignmentManager = new SessionAssignmentManager(options.storage, options.clock, workerSelector, sessionLeaseManager, snapshotManager);
     this.workerManager = new WorkerManager(options.storage, options.clock, undefined, options.eventTransport);
     this.workerPoolManager = options.workerPools && options.workerPools.length > 0
       ? new WorkerPoolManager(options.storage, options.clock, this.workerManager, options.workerPools, options.hostPoolAdapters ?? {})
       : undefined;
-    const sessionLifecycleReconciler = new SessionLifecycleReconciler(options.storage, options.clock, sessionLifecycleManager, eventLogManager, sessionAssignmentManager, options.eventTransport, this.workerPoolManager);
+    const sessionLifecycleReconciler = new SessionLifecycleReconciler(options.storage, options.clock, sessionLifecycleManager, eventLogManager, sessionAssignmentManager, snapshotManager, options.eventTransport, this.workerPoolManager);
     const sessionManager = new SessionManager(
       options.tenant,
       options.storage,
@@ -52,12 +53,13 @@ export class TenantRuntime {
       sessionLifecycleManager,
       eventLogManager,
       sessionAssignmentManager,
+      snapshotManager,
       sessionLifecycleReconciler
     );
     this.tenantInboxController = new TenantInboxController(
       options.tenant.tenantId,
       new WorkerRuntimeEventController(this.workerManager, sessionLifecycleReconciler, options.eventTransport),
-      new AgentRuntimeEventController(options.storage, eventLogManager, sessionLifecycleManager, sessionLeaseManager, this.workerManager, sessionLifecycleReconciler, options.eventTransport),
+      new AgentRuntimeEventController(options.storage, eventLogManager, sessionLifecycleManager, sessionLeaseManager, this.workerManager, sessionLifecycleReconciler, snapshotManager, options.eventTransport),
       new ClientRuntimeEventController(sessionManager, options.eventTransport),
       options.eventTransport
     );

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -58,6 +58,7 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
   const adapter = new DockerHostPoolAdapter({
     imageName: IMAGE_NAME,
     sidecarWorkRoot: join(root, 'docker-runtime'),
+    snapshotRoot: join(root, 'snapshots'),
     env: {
       ...process.env,
       WEBPUBSUB_ENDPOINT: endpoint,
@@ -134,6 +135,130 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
   }
 });
 
+test('scenario: docker worker pool restores session memory across worker recycle', async (context) => {
+  if (process.env.RUN_DOCKER_WORKERPOOL_E2E !== '1') {
+    context.skip('set RUN_DOCKER_WORKERPOOL_E2E=1 to run Docker WorkerPool end-to-end validation');
+    return;
+  }
+  if (!await isDockerAvailable()) {
+    context.skip('Docker is unavailable');
+    return;
+  }
+  const env = loadTestEnv();
+  const endpoint = process.env.WEBPUBSUB_ENDPOINT ?? env.WEBPUBSUB_ENDPOINT;
+  const hubName = process.env.WEBPUBSUB_HUB ?? env.WEBPUBSUB_HUB ?? 'agentruntimepoc';
+  const copilotModel = process.env.COPILOT_MODEL ?? env.COPILOT_MODEL;
+  const copilotProviderType = process.env.COPILOT_PROVIDER_TYPE ?? env.COPILOT_PROVIDER_TYPE;
+  const copilotProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL ?? env.COPILOT_PROVIDER_BASE_URL;
+  if (!endpoint || !copilotModel || !copilotProviderType || !copilotProviderBaseUrl) {
+    context.skip('tests/.env missing Web PubSub or Copilot provider configuration');
+    return;
+  }
+
+  const marker = 'RESUME-OK-7f3a';
+  const root = await mkdtemp(join(tmpdir(), 'ars-docker-memory-'));
+  const tenantId = `poc-${crypto.randomUUID()}`;
+  const poolId = `pool-${crypto.randomUUID()}`;
+  const workerPool: WorkerPoolRecord = {
+    poolId,
+    tenantId,
+    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
+    labels: { agent: 'copilot' },
+    capacityPerWorker: 1,
+    hostPoolControllerClass: 'docker',
+    scalePolicy: {
+      scaleOutMaxPendingPerTick: 1,
+      scaleInIdleMs: 5000
+    },
+    centralUrlForWorkers: 'http://host.docker.internal:0'
+  };
+  const transport = new WebPubSubTransportAdapter({ tenantId, endpoint, hubName });
+  const storage = new LocalFileStorage(root);
+  const adapter = new DockerHostPoolAdapter({
+    imageName: IMAGE_NAME,
+    sidecarWorkRoot: join(root, 'docker-runtime'),
+    snapshotRoot: join(root, 'snapshots'),
+    env: {
+      ...process.env,
+      WEBPUBSUB_ENDPOINT: endpoint,
+      WEBPUBSUB_HUB: hubName,
+      COPILOT_MODEL: copilotModel,
+      COPILOT_PROVIDER_TYPE: copilotProviderType,
+      COPILOT_PROVIDER_BASE_URL: copilotProviderBaseUrl,
+      ...(env.COPILOT_PROVIDER_TOKEN_SCOPE ? { COPILOT_PROVIDER_TOKEN_SCOPE: env.COPILOT_PROVIDER_TOKEN_SCOPE } : {})
+    }
+  });
+  const central = new CentralService({
+    storage,
+    eventTransport: transport,
+    connectionIssuer: transport,
+    tenant: { tenantId, storageRoot: root, webPubSubHub: hubName },
+    workerPools: [workerPool],
+    hostPoolAdapters: { docker: adapter }
+  });
+  const server = new CentralHttpServer({ port: 0 });
+  let sdk: AgentRuntimeClient | undefined;
+  registerPocCentralRoutes(server, central);
+
+  try {
+    await central.start();
+    const port = await server.listen();
+    workerPool.centralUrlForWorkers = `http://host.docker.internal:${port}`;
+    const centralUrl = `http://localhost:${port}`;
+    sdk = new AgentRuntimeClient({ centralUrl, tenantId });
+    await sdk.connect();
+
+    const { session } = await sdk.sessions.start({
+      agent: 'copilot-poc',
+      input: { message: 'Start a Docker WorkerPool continuity session.' },
+      workspace: { source: 'empty' },
+      displayName: 'Docker WorkerPool continuity'
+    });
+
+    const runningOnA = await waitForSession(storage, session.id, (candidate) => candidate.status === 'running' && Boolean(candidate.currentWorkerId), 180_000);
+    const workerAId = runningOnA.currentWorkerId!;
+
+    const writeTurn = await session.send({ message: `Use your tools to create a file named continuity.txt in your current working directory whose exact contents are ${marker} with no extra characters. Reply with DONE once the file exists.` });
+    const writeEvents = await collectTurnEvents(writeTurn.events(), 240_000);
+    assert.ok(writeEvents.some((event) => event.type === 'turn.completed'));
+
+    await session.pause();
+    const paused = await waitForSession(storage, session.id, (candidate) => candidate.status === 'paused' && Boolean(candidate.latestSnapshotRef), 60_000);
+
+    const capturedFile = join(root, 'snapshots', session.id, paused.latestSnapshotRef!, 'parts', 'workspace', 'continuity.txt');
+    assert.equal((await readFile(capturedFile, 'utf8')).trim(), marker);
+
+    await wait(5500);
+    await central.reconcileSessionsForTenant(tenantId);
+    await waitForWorkerRecycled(storage, workerAId, 60_000);
+
+    await session.resume();
+    const runningOnB = await waitForSession(storage, session.id, (candidate) => candidate.status === 'running' && Boolean(candidate.currentWorkerId) && candidate.currentWorkerId !== workerAId, 180_000);
+    assert.notEqual(runningOnB.currentWorkerId, workerAId);
+
+    const recallTurn = await session.send({ message: 'Read the file continuity.txt from your current working directory and reply with its exact contents.' });
+    const recallEvents = await collectTurnEvents(recallTurn.events(), 240_000);
+    assert.ok(recallEvents.some((event) => event.type === 'turn.completed'));
+    assert.ok(turnEventsContain(recallEvents, marker), 'resumed worker reads the restored workspace file back');
+  } catch (error) {
+    if (isCredentialUnavailable(error)) {
+      context.skip('DefaultAzureCredential is unavailable; run az login to enable this integration test');
+      return;
+    }
+    const diagnostics = await collectDiagnostics(storage, poolId);
+    if (error instanceof Error) {
+      error.message = `${error.message}\n${diagnostics}`;
+    }
+    throw error;
+  } finally {
+    await sdk?.close();
+    await cleanupDockerPool(poolId);
+    await transport.stop();
+    await server.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function collectTurnEvents(events: AsyncIterable<AgentTurnEvent>, timeoutMs: number): Promise<AgentTurnEvent[]> {
   return await Promise.race([
     (async () => {
@@ -169,6 +294,22 @@ async function waitForActiveWorker(storage: LocalFileStorage, workerId: string, 
     await wait(500);
   }
   throw new Error(`timed out waiting for worker ${workerId}`);
+}
+
+async function waitForWorkerRecycled(storage: LocalFileStorage, workerId: string, timeoutMs: number): Promise<WorkerRecord> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const worker = await storage.readWorker(workerId);
+    if (worker && worker.lifecycleState !== 'active') {
+      return worker;
+    }
+    await wait(500);
+  }
+  throw new Error(`timed out waiting for worker ${workerId} to be recycled`);
+}
+
+function turnEventsContain(events: AgentTurnEvent[], marker: string): boolean {
+  return events.some((event) => JSON.stringify(event).includes(marker));
 }
 
 async function waitForSession(storage: LocalFileStorage, sessionId: string, predicate: (session: SessionRecord) => boolean, timeoutMs: number): Promise<SessionRecord> {

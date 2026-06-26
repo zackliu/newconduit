@@ -1,5 +1,6 @@
 import type { ResolvedAgentSpec } from './agent-spec';
 import type { SessionStatus } from './session';
+import type { SnapshotCaptureRef, SnapshotPart, SnapshotRestoreRef } from './snapshot';
 
 export type RuntimeEventType =
   | 'session.create.requested'
@@ -59,6 +60,7 @@ export interface SessionAssignPayload {
   workspaceRef: string;
   copilotSessionStateRef: string;
   resolvedAgentSpec: ResolvedAgentSpec;
+  restore?: SnapshotRestoreRef;
 }
 
 export interface SessionInputCommandPayload {
@@ -124,6 +126,15 @@ export interface SessionPauseRequestedPayload {
 
 export interface SessionPausedPayload {
   reason?: 'idle_timeout' | 'client_requested';
+  snapshot?: {
+    snapshotId: string;
+    parts: SnapshotPart[];
+  };
+}
+
+export interface SnapshotCreatedPayload {
+  snapshotId: string;
+  baseEventCursor: number;
 }
 
 export interface SessionResumeRequestedPayload {
@@ -135,6 +146,7 @@ export interface SessionPauseCommandPayload {
   workerId: string;
   sessionLeaseId: string;
   reason?: 'idle_timeout' | 'client_requested';
+  capture: SnapshotCaptureRef;
 }
 
 export interface WorkerCommandRejectedPayload {

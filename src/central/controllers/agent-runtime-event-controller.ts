@@ -1,5 +1,5 @@
-import type { AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
-import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
+import type { AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPart, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
+import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, SnapshotManager, WorkerManager } from '../managers';
 
 /**
  * Handles events that originate from a running agent on a leased worker, making sure they become central-owned session history before clients see them.
@@ -12,6 +12,7 @@ export class AgentRuntimeEventController {
     private readonly sessionLeaseManager: SessionLeaseManager,
     private readonly workerManager: WorkerManager,
     private readonly sessionLifecycleReconciler: SessionLifecycleReconciler,
+    private readonly snapshotManager: SnapshotManager,
     private readonly eventTransport: RuntimeEventTransport
   ) {}
 
@@ -61,12 +62,30 @@ export class AgentRuntimeEventController {
       }
       case 'session.paused': {
         const payload = this.parseSessionPausedPayload(event.payload);
-        const appended = await this.appendSessionEvent(event, payload);
+        const appended = await this.appendSessionEvent(event, { reason: payload.reason });
         const session = await this.requireSession(event);
+        let finalSequence = appended.sequence;
+        let finalTimestamp = appended.timestamp;
+        let latestSnapshotRef = session.latestSnapshotRef;
+        if (payload.snapshot) {
+          const snapshot = await this.snapshotManager.recordCapture(session, payload.snapshot);
+          const marker = await this.eventLogManager.append<SnapshotCreatedPayload>({
+            type: 'snapshot.created',
+            actor: 'central',
+            payload: { snapshotId: snapshot.snapshotId, baseEventCursor: snapshot.baseEventCursor },
+            sequence: session.eventCursor + 1,
+            sessionId: session.sessionId
+          });
+          await this.sessionLifecycleManager.advanceEventCursor(session, marker.sequence);
+          await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, marker);
+          finalSequence = marker.sequence;
+          finalTimestamp = marker.timestamp;
+          latestSnapshotRef = snapshot.snapshotId;
+        }
         if (session.currentWorkerId) {
           await this.workerManager.releaseSessionLease(session.currentWorkerId);
         }
-        await this.sessionLifecycleManager.pauseAfterEvent(session, appended.sequence, appended.timestamp, payload.reason);
+        await this.sessionLifecycleManager.pauseAfterEvent(session, finalSequence, finalTimestamp, payload.reason, latestSnapshotRef);
         const reconcileOutcome = await this.sessionLifecycleReconciler.reconcile();
         for (const workerCommand of reconcileOutcome.workerCommands) {
           await this.eventTransport.publish({ kind: 'worker-commands', workerId: workerCommand.workerId }, workerCommand.event);
@@ -224,8 +243,25 @@ export class AgentRuntimeEventController {
       throw new Error('invalid session.paused reason');
     }
     return {
-      reason: payload.reason
+      reason: payload.reason,
+      snapshot: this.parseSnapshotReport(payload.snapshot)
     };
+  }
+
+  private parseSnapshotReport(value: unknown): SessionPausedPayload['snapshot'] {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (!this.isRecord(value) || typeof value.snapshotId !== 'string' || !Array.isArray(value.parts)) {
+      throw new Error('invalid session.paused snapshot');
+    }
+    const parts = value.parts.map((part): SnapshotPart => {
+      if (!this.isRecord(part) || (part.name !== 'workspace' && part.name !== 'agent-state') || typeof part.path !== 'string') {
+        throw new Error('invalid session.paused snapshot part');
+      }
+      return { name: part.name, path: part.path };
+    });
+    return { snapshotId: value.snapshotId, parts };
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {
