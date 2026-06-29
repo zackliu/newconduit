@@ -1,4 +1,4 @@
-import type { Clock, HostPoolInstanceRecord, RuntimeStorage, SessionRecord, WorkerPoolRecord, WorkerRecord } from '../../shared';
+import type { AgentSpec, Clock, HostPoolInstanceRecord, RuntimeStorage, SessionRecord, WorkerPoolRecord, WorkerRecord } from '../../../shared';
 import { WorkerManager } from './worker-manager';
 
 export interface HostPoolScaleOutInput {
@@ -24,6 +24,7 @@ export interface WorkerPoolManagerStatus {
   workerPools: WorkerPoolRecord[];
   hostPoolInstances: HostPoolInstanceRecord[];
   workers: WorkerRecord[];
+  agentSpecs: AgentSpec[];
 }
 
 export class WorkerPoolManager {
@@ -48,7 +49,8 @@ export class WorkerPoolManager {
     return {
       workerPools: this.workerPools,
       hostPoolInstances: await this.storage.readHostPoolInstances(),
-      workers: await this.storage.readWorkers()
+      workers: await this.storage.readWorkers(),
+      agentSpecs: []
     };
   }
 

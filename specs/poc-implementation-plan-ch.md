@@ -16,8 +16,8 @@
 3. Web PubSub 只作为长连接 transport；session truth 不在 Web PubSub。
 4. Tenant 是 high-level runtime boundary。POC 只有一个 `poc` tenant runtime，但 `tenantId` 不由 create session payload 自报。
 5. Principal 来自 negotiate/connection context；runtime message ingress 使用 transport envelope 中的同一 RequestContext。Create session payload 不自报 `principal`、`owner`。
-6. SDK 是客户侧代码，放在 `sdk/`，不 import `src/`。`src/` 是服务提供商 runtime implementation；SDK 只按 `sdk/public-protocol-spec-ch.md` 实现 public protocol。
-7. Public protocol 变化必须同步更新 `sdk/public-protocol-spec-ch.md`、SDK 类型、central/sidecar public protocol 处理、e2e tests。
+6. SDK 是客户侧代码，放在 `sdk/client/`，不 import `src/`。`src/` 是服务提供商 runtime implementation；SDK 只按 `sdk/client/public-protocol-spec-ch.md` 实现 public protocol。
+7. Public protocol 变化必须同步更新 `sdk/client/public-protocol-spec-ch.md`、SDK 类型、central/sidecar public protocol 处理、e2e tests。
 8. Worker 是注册进 tenant runtime 的可用 capacity。实现计划先用 standalone sidecar direct registration 验证 Worker lifecycle contract，再接入 POC 的 Docker WorkerPool scale loop；注册成功后都进入同一套 Worker registry contract。Standalone path 是验证 wedge，不是新的 hosting model。
 9. WorkerPool 是 tenant-scoped capacity configuration，不是 Worker。它声明可 scale 出来的 Worker labels、`hostPoolControllerClass`、scale policy，并由 WorkerPool controller 调用对应 hostPoolAdapter 操作具体 host。
 10. Worker selection 只使用 AgentSpec selector 与 Worker record 上的 `sidecarClass`、labels、capacity、conditions；不按 standalone、Docker、WorkerPool source 分叉。
@@ -258,11 +258,11 @@ Expect：
 实现范围：
 
 - `sdk/` 目录下建立客户侧 SDK，不 import `src/`。
-- `sdk/public-protocol-spec-ch.md` 记录 SDK 依赖的 public REST endpoint、query、runtime channels、event types、payload schemas、Web PubSub group 语义。
+- `sdk/client/public-protocol-spec-ch.md` 记录 SDK 依赖的 public REST endpoint、query、runtime channels、event types、payload schemas、Web PubSub group 语义。
 - SDK public API：`connect`、`sessions.start`、`sessions.open`、`SessionHandle.send`、`AgentTurn.events`、`AgentTurn.waitForResult` 的 POC 版本。
 - SDK REST path：`POST /client/negotiate?tenantId=<tenantId>&clientConnectionId=<client-startup-random-string>`。
 - SDK Web PubSub path：connect 后 publish `session.create.requested` 到 tenant inbox runtime channel。
-- SDK 内部持有自己的 public protocol types，按 `sdk/public-protocol-spec-ch.md` 对齐，不从 `src/shared` import。
+- SDK 内部持有自己的 public protocol types，按 `sdk/client/public-protocol-spec-ch.md` 对齐，不从 `src/shared` import。
 - `TenantRuntime` 只作为 tenant composition root 和 ingress shell，订阅 tenant inbox 后委托给 protocol-facing controllers。
 - `TenantInboxController` dispatch Web PubSub runtime events。
 - `ClientRuntimeEventController` 解析 `session.create.requested`、`input.received`，并把协议 event 转为 session manager command。
@@ -309,13 +309,13 @@ Scenario-based test：`scenario: SDK public protocol spec stays aligned with run
 
 Given：
 
-- `sdk/public-protocol-spec-ch.md` 已定义 SDK 使用的 REST endpoint、query、runtime channels、event types、payload schemas。
+- `sdk/client/public-protocol-spec-ch.md` 已定义 SDK 使用的 REST endpoint、query、runtime channels、event types、payload schemas。
 - SDK 源码、central public handlers、sidecar public handlers 已存在。
 
 Expect：
 
 - SDK 不 import `src/`。
-- SDK public event type、payload shape、REST path、query key 与 `sdk/public-protocol-spec-ch.md` 一致。
+- SDK public event type、payload shape、REST path、query key 与 `sdk/client/public-protocol-spec-ch.md` 一致。
 - Central 和 sidecar 的 public protocol tests 覆盖同一组 contract。
 - 修改 public protocol 时，本 scenario 指向的 SDK spec、SDK code、runtime handlers、e2e tests 同步更新。
 
@@ -630,7 +630,74 @@ Expect：
 - 第二轮要求 agent 读回它先前创建的文件；turn 输出包含 `RESUME-OK-7f3a`，且 agent 能在不被重新告知文件名的情况下指出 `continuity.txt`。
 - Session status 回到 `running`，全程 Client SDK 只面向 session，不知道 Worker A/B、snapshot 区或 Worker endpoint。
 
-## 11. Slice 9：Reconnect And Replay
+## 11. Slice 9：Local Worker Type
+
+目标：用一个 `agent=local` 的 AgentSpec 验证 worker-type 驱动的 adapter binding，并提供不依赖 Docker WorkerPool 的本机 worker。Worker 启动只引用一个 worker type，type 自身注册好 `sidecarClass`、labels、capacity、以及 runtime transport/workspace/agent-process 三个 sidecar adapter class；worker 启动时不再自报 labels、capacity、sidecarClass。`copilot-local` worker 直接复用 worker 所在机器的 Copilot：workspace 与 Copilot session 文件由 Copilot 在本机自管，central 不为它写 snapshot；单 worker capacity 99，等于在本机承载多路 Copilot session。Pause 一个 local session 等于停掉它对应的 Copilot session 并释放一个 capacity 槽，resume 让 Copilot 在同一本机 worker 上 `resumeSession()` 续接。Central 对 session 的 create/queue/assign/lease/event-log/pause/resume 管理与现有 slice 保持一致，只新增 local 这一组 class 选择。
+
+实现范围：
+
+- Worker type registry。新增 sidecar 侧 `WorkerType` 概念：`workerTypeId` 绑定 `sidecarClass`、默认 labels、capacity/allocatable、`runtimeTransportClass`、`workspaceAdapterClass`、`agentProcessAdapterClass`。POC 注册两种 type：`copilot-process-wrapper`（`sidecarClass=copilot-process-wrapper`、labels `agent=copilot`、capacity 1、Docker workspace adapter、Copilot process adapter）和 `copilot-local`（`sidecarClass=copilot-local-process`、labels `agent=local`、capacity 99、local workspace adapter、Copilot process adapter）。
+- Sidecar 启动只 ref worker type。`start:sidecar` 读取 `CENTRAL_URL`、`TENANT_ID`、`WORKER_TYPE`，从 worker type registry 解析出 sidecarClass、labels、capacity 和三个 adapter class；不再从 `SIDECAR_LABELS_JSON`/`SIDECAR_CAPACITY` 自报这些值。worker registration body 的 sidecarClass、labels、capacity、allocatable 全部来自 resolved worker type。
+- 新 sidecarClass。`SidecarClass` union 增加 `copilot-local-process`，作为 local worker type 的匹配键；`WorkerRecord`、`WorkerPoolRecord`、selector 不按 type 分叉。所有 class 字段（`sidecarClass`、`workspaceClass`、`agentStatePolicy`、`pausePolicy`、`recoveryPolicy`、`hostPoolControllerClass`）都是 registry key：行为来自被解析的 class 实例，central/sidecar 不出现 `if class === 'copilot-local-...'` 这种针对具体值的硬编码分支。
+- 新 AgentSpec。新增 `POC_LOCAL_AGENT_SPEC`：`agentSpecId=copilot-local`、`labels.agent=local`、`sidecarClass=copilot-local-process`、`workerSelector.matchLabels.agent=local`、`workspaceClass=local-managed`、`agentStatePolicy=copilot-managed-local`、`pausePolicy=stop-on-pause`、`recoveryPolicy=restart-with-context`、`idlePauseTimeoutMs=120000`。`StaticAgentSpecRegistry` 同时注册 `copilot-poc` 和 `copilot-local`。
+- Persistence 是 class，不是 central 的 if-branch。central 新增 `persistentClass` 注册表，key 由 AgentSpec 的 `workspaceClass`+`agentStatePolicy` 解析：`docker-workspace-volume-snapshot`/`copilot-session-volume-snapshot` 解析为 volume-snapshot persistence class，`local-managed`/`copilot-managed-local` 解析为 copilot-self-managed persistence class。central 永远调用 resolved persistentClass 的 `planCapture`/`planRestore`/`recordCapture`，不读 policy 字面量分流。volume-snapshot class 产出 capture/restore ref 并写 `WorkspaceSnapshot`；copilot-self-managed class 的 `planCapture`/`planRestore` 返回空、`recordCapture` 是 no-op，于是“pause 不带 capture、assign 不带 restore、不写 snapshot”作为 class 行为涌现，而不是 central 对 local 特判。`SnapshotCaptureRef`、`SessionAssignPayload.restore` 在契约里变成 optional。
+- pausePolicy/recoveryPolicy 也是 class。`turn-boundary-durable-pause` 与 `stop-on-pause` 实现同一 pausePolicy 接口，sidecar 按 resolved pausePolicy class 走到 pause boundary；`stop-on-pause` class 直接停掉 Copilot session 即视为 paused。`restart-with-context` recovery class 启动后 `getLastSessionId()`/`resumeSession()` 续接，缺材料即 fail；central/sidecar 都不按 policy 字面量分支。
+- workspaceClass 是 class，local adapter 只是其一种实现。`docker-workspace-volume-snapshot` 解析为 Docker workspace adapter，`local-managed` 解析为 local workspace adapter：mount 本机固定 per-session workspace 与 Copilot session 目录、`capture` 返回空 parts、`restore` no-op；persistence 由 Copilot 自管，central 不读写其字节。
+- Worker selection 不变。`WorkerSelector` 仍只按 `sidecarClass`、active、未过期、allocatable>0、labels 匹配；local worker 凭 capacity 99 可承载多 session。
+- README。新增一节说明用 `WORKER_TYPE=copilot-local pnpm start:sidecar` 在本机起一个 local worker，并用 `copilot-local` AgentSpec 创建 session，无需 Docker WorkerPool。
+
+Scenario-based test：`scenario: worker type binds adapters so startup only references the type`
+
+Given：
+
+- Worker type registry 注册了 `copilot-local`。
+- Sidecar 启动只提供 `CENTRAL_URL`、`TENANT_ID`、`WORKER_TYPE=copilot-local`。
+
+Expect：
+
+- Sidecar 用 type 上的 sidecarClass、labels、capacity 调用 `/sidecar/negotiate`，body 不来自 per-start 环境变量。
+- Worker record `sidecarClass=copilot-local-process`、labels 含 `agent=local`、capacity/allocatable 是 99。
+- Sidecar 实例化 type 注册的 local workspace adapter 和 Copilot process adapter。
+
+Scenario-based test：`scenario: local agent spec assigns to local worker without docker scale-out`
+
+Given：
+
+- 一个 `copilot-local` worker 已注册并 ready。
+- Client SDK 用 `copilot-local` AgentSpec 创建 session。
+
+Expect：
+
+- Central 选中该 local worker，写 lease，session 进入 `starting`→`running`。
+- WorkerPool/Docker host pool adapter 不被调用。
+- 同一 local worker 上可并发承载多个 session，allocatable 随 assign 递减。
+
+Scenario-based test：`scenario: pausing a local session stops copilot and frees one capacity slot`
+
+Given：
+
+- `copilot-local` session 在 local worker 上 `running`。
+- Client SDK publish `session.pause.requested`。
+
+Expect：
+
+- Central 下发的 pause command 不含 capture ref，因为 resolved persistentClass 是 copilot-self-managed，其 `planCapture` 返回空（不是 central 对 local 特判）。
+- Sidecar 停掉该 Copilot session，publish `session.paused` 不带 snapshot；central 调 persistentClass `recordCapture`（no-op），不写 `WorkspaceSnapshot`、不更新 `latestSnapshotRef`。
+- worker allocatable +1，worker 不被 scale-in。
+
+Scenario-based test：`scenario: resuming a local session reattaches copilot without snapshot restore`
+
+Given：
+
+- `copilot-local` session 处于 `paused`，local worker 仍在线。
+- Client SDK publish `session.resume.requested`。
+
+Expect：
+
+- Session 经 `queued`→`starting` 重新分配到同一 local worker，assign 不带 restore ref。
+- Copilot process adapter 用 `getLastSessionId()` 续接本机 session，第二轮能续接之前记忆，回到 `running`。
+
+## 12. Slice 10：Reconnect And Replay
 
 目标：Client SDK 断线后能用 event cursor 追上 session history。
 
@@ -654,7 +721,7 @@ Expect：
 - Replay does not depend on Web PubSub message history。
 - Client SDK still does not know Worker endpoint。
 
-## 12. Slice 10：Thin Auth And Audit Boundary
+## 13. Slice 11：Thin Auth And Audit Boundary
 
 目标：POC 保留 central-owned negotiate 和 audit hook，但不展开完整 production auth matrix。
 
@@ -679,7 +746,7 @@ Expect：
 - Browser and sidecar do not choose their own `userId`。
 - Audit log records token issuance as record-only。
 
-## 13. Recommended Order
+## 14. Recommended Order
 
 按下面顺序实现和 review：
 
@@ -691,12 +758,13 @@ Expect：
 6. Queued session scheduler and idle pause policy。
 7. Docker WorkerPool scale loop。
 8. Durable session memory across worker recycle（pause+capture 与 resume+restore 合并）。
-9. Reconnect and replay。
-10. Thin auth and audit boundary。
+9. Local worker type（worker-type-driven adapter binding 与 copilot-managed-local persistence）。
+10. Reconnect and replay。
+11. Thin auth and audit boundary。
 
 前六个 slices 跑通后，POC 已经形成可交互主线和基本 lifecycle reconciliation：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot-backed agent runtime，并把回复持久化后推回 Client SDK；queued session 会在 Worker ready 后被主动分配，idle session 会按 AgentSpec policy 进入 paused，client open/history 不会隐式唤醒 session。Docker WorkerPool scale loop 在这条主线之后接入，验证 WorkerPool 只是 capacity source 和 host 操作 owner，不改变 Worker registration、selection、assignment、event loop 的统一路径。
 
-## 14. Validation Commands
+## 15. Validation Commands
 
 每个 slice 完成后都运行：
 
@@ -710,7 +778,7 @@ pnpm test
 
 Slice 3 必须包含真实 Web PubSub e2e integration test，覆盖 standalone sidecar 从 central URL、tenant id 和显式 worker registration body 启动、调用 central `/sidecar/negotiate`、central 创建 WorkerRecord 并返回 `workerId`、sidecar 连接 Web PubSub、订阅 worker commands、publish 首个 heartbeat、central 写入 active Worker record。缺少 `WEBPUBSUB_ENDPOINT` 时测试 skip；环境可用时该 e2e 是必跑验证项。
 
-Slice 4 必须包含真实 Web PubSub e2e integration test，覆盖 Client SDK 从 central URL 和 tenant id 启动、生成 client 启动级随机 `clientConnectionId`、调用 central `/client/negotiate`、连接 Web PubSub、join tenant client inbox 和 client private inbox、publish `session.create.requested`、central 写入 session truth、central 选择 registered Worker、worker commands runtime channel 收到 `session.assign`。Public protocol 变化必须同步 `sdk/public-protocol-spec-ch.md`、SDK code、runtime handlers、e2e tests。
+Slice 4 必须包含真实 Web PubSub e2e integration test，覆盖 Client SDK 从 central URL 和 tenant id 启动、生成 client 启动级随机 `clientConnectionId`、调用 central `/client/negotiate`、连接 Web PubSub、join tenant client inbox 和 client private inbox、publish `session.create.requested`、central 写入 session truth、central 选择 registered Worker、worker commands runtime channel 收到 `session.assign`。Public protocol 变化必须同步 `sdk/client/public-protocol-spec-ch.md`、SDK code、runtime handlers、e2e tests。
 
 Slice 5 必须包含 deterministic agent process adapter scenario test，覆盖 sidecar 收到 `session.assign` 后准备 workspace/session state 目录、把 resolved runtime config 传给 `agentProcessAdapter`、启动 Copilot SDK agent session、报告 running、处理同一 session 的两轮 input/output、为每轮发布 explicit `turn.completed`，并拒绝 stale session lease command。真实 smoke test 必须走 GitHub Copilot SDK agent session；缺少 Copilot runtime/auth 配置时 skip。
 
@@ -719,3 +787,5 @@ Slice 6 必须包含 session lifecycle reconciler scenario tests，覆盖 queued
 Slice 7 必须包含真实 Docker validation。先 build `containers/sidecar/Dockerfile`，再在 Windows host 上 mount 本机 Azure CLI profile 到 container `/home/sidecar/.azure`，设置 `AZURE_CONFIG_DIR=/home/sidecar/.azure`，验证 container 内 `az account show`、`az account get-access-token --scope https://cognitiveservices.azure.com/.default` 和 Node `DefaultAzureCredential().getToken('https://cognitiveservices.azure.com/.default')` 都成功。随后用同一个 image 跑 WorkerPool scale out/in e2e：queued session 触发 Docker hostPoolAdapter 启动 sidecar container，sidecar 使用标准 `/sidecar/negotiate` 注册 Worker，assignment 和至少一轮 input/output event loop 成功，Worker idle 达到 `scaleInIdleMs=5000` 后 WorkerPool controller 调用 Docker hostPoolAdapter stop/remove container。Docker 或本机 `az login` 不可用时不能声明 Slice 7 完成。
 
 Slice 8 必须包含 in-process continuity scenario test 和真实 Docker continuity e2e。In-process test 用真实 SidecarDaemon、真实 central runtime、in-memory runtime transport，以及一个把会话记忆写进 agent session state 目录的 deterministic agent process adapter；它用两个共享同一个 session-addressed snapshot 区、但各自独立 work root 的 sidecar 模拟 Worker 回收，断言 pause 后 snapshot 区的 `parts/workspace` 含写入文件、resume 后新 Worker 的 workspace 含恢复文件、第二轮能读回该文件并续接记忆。真实 Docker continuity e2e 在 Slice 7 的 WorkerPool 主线上扩展：第一轮让 Copilot 在 workspace 写文件，pause 触发 capture 与 scale-in 回收 Worker，resume scale 出新 Worker 并 restore，第二轮 Copilot 通过 `resumeSession()` 续接并读回文件。Docker 或本机 `az login` 不可用时该 e2e skip，但 in-process continuity scenario test 必须随每次构建运行并通过。
+
+Slice 9 必须包含 worker-type binding scenario test 和 local agent assignment scenario test。前者断言 sidecar 只 ref `WORKER_TYPE`，registration body 的 sidecarClass/labels/capacity 全部来自 worker type registry，且实例化的是 type 注册的 local workspace adapter 与 Copilot process adapter；后者用真实 central runtime + in-memory runtime transport，断言 `copilot-local` session 选中 local worker、不调用 host pool adapter、单 worker 承载多 session、pause 释放一个 capacity 槽且不写 snapshot、resume 走 queued→assign 回到同一 worker 且 assign 不带 restore ref。真实 local Copilot smoke test 用 `WORKER_TYPE=copilot-local` 起本机 worker 并完成一轮 input/output；缺少 Copilot runtime/auth 配置时 skip。

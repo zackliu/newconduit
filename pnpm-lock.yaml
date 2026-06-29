@@ -35,7 +35,7 @@ importers:
     dependencies:
       '@agent-runtime-sidecar/sdk':
         specifier: workspace:*
-        version: link:../../sdk
+        version: link:../../sdk/client
     devDependencies:
       typescript:
         specifier: ^5.7.2
@@ -44,7 +44,7 @@ importers:
         specifier: ^6.0.7
         version: 6.4.3(@types/node@22.20.0)
 
-  sdk:
+  sdk/client:
     dependencies:
       '@azure/web-pubsub-client':
         specifier: ^1.0.4

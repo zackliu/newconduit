@@ -2,6 +2,7 @@ import type { AgentSpec, AgentSpecRef } from '../../shared';
 
 export interface AgentSpecRegistry {
   resolve(ref: AgentSpecRef): Promise<AgentSpec>;
+  list(): AgentSpec[];
 }
 
 export class StaticAgentSpecRegistry implements AgentSpecRegistry {
@@ -17,5 +18,9 @@ export class StaticAgentSpecRegistry implements AgentSpecRegistry {
       throw new Error(`unknown agentSpecId: ${ref.agentSpecId}`);
     }
     return agentSpec;
+  }
+
+  list(): AgentSpec[] {
+    return [...this.agentSpecsById.values()];
   }
 }

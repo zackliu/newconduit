@@ -95,7 +95,7 @@ For any proposal or implementation, answer:
 - Calling a tenant-internal workflow or state mechanism a controller when it is not a replaceable protocol boundary; use manager/policy/selector names for those roles.
 - Letting `TenantRuntime` accumulate protocol parsing, command workflow, event persistence, acknowledgements, and worker routing logic instead of delegating to tenant-owned controllers and managers.
 - Naming runtime fields after a current implementation such as WebPubSub, Docker, or Copilot when the field represents a replaceable transport, workspace, hosting, or agent-process role.
-- Changing public REST endpoints, query keys, runtime channel mapping, event names, or payload schemas without updating `sdk/public-protocol-spec-ch.md`, SDK code, runtime handlers, and e2e tests together.
+- Changing public REST endpoints, query keys, runtime channel mapping, event names, or payload schemas without updating `sdk/client/public-protocol-spec-ch.md`, SDK code, runtime handlers, and e2e tests together.
 - Designing customer-facing SDK methods by directly exposing current runtime event names, channel names, cursors, request correlation, worker assignment, or Web PubSub mechanics as the default app API.
 - Adding both HTTP and Web PubSub command handlers for the same client-facing session lifecycle operation instead of choosing one public command path.
 - Adding conditional logic that hides inconsistent state instead of naming and fixing the invalid state transition.

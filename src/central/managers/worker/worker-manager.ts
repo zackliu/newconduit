@@ -1,4 +1,4 @@
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type Clock, type RuntimeEvent, type RuntimeEventTransport, type RuntimeStorage, type SessionRecord, type TurnFailedPayload, type WorkerCondition, type WorkerHeartbeatPayload, type WorkerIdentityPayload, type WorkerRecord, type WorkerRegisterPayload } from '../../shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type Clock, type RuntimeEvent, type RuntimeEventTransport, type RuntimeStorage, type SessionRecord, type TurnFailedPayload, type WorkerCondition, type WorkerHeartbeatPayload, type WorkerIdentityPayload, type WorkerRecord, type WorkerRegisterPayload } from '../../../shared';
 
 const DEFAULT_KEEPALIVE_TTL_MS = 30_000;
 
@@ -98,7 +98,7 @@ export class WorkerManager {
   async expireWorkers(): Promise<WorkerRecord[]> {
     const now = Date.parse(this.clock.now());
     const workers = await this.storage.readWorkers();
-    const expiredWorkers = workers.filter((worker) => worker.lifecycleState === 'active' && Date.parse(worker.expiresAt) <= now);
+    const expiredWorkers = workers.filter((worker) => (worker.lifecycleState === 'active' || worker.lifecycleState === 'registered') && Date.parse(worker.expiresAt) <= now);
     const terminatedWorkers: WorkerRecord[] = [];
     for (const worker of expiredWorkers) {
       terminatedWorkers.push(await this.terminate(worker, 'expired', 'worker_keepalive_expired', 'worker.expired'));

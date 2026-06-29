@@ -1,5 +1,6 @@
 import type { AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPart, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
-import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, SnapshotManager, WorkerManager } from '../managers';
+import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
+import { SnapshotManager } from '../persistence';
 
 /**
  * Handles events that originate from a running agent on a leased worker, making sure they become central-owned session history before clients see them.
@@ -69,18 +70,20 @@ export class AgentRuntimeEventController {
         let latestSnapshotRef = session.latestSnapshotRef;
         if (payload.snapshot) {
           const snapshot = await this.snapshotManager.recordCapture(session, payload.snapshot);
-          const marker = await this.eventLogManager.append<SnapshotCreatedPayload>({
-            type: 'snapshot.created',
-            actor: 'central',
-            payload: { snapshotId: snapshot.snapshotId, baseEventCursor: snapshot.baseEventCursor },
-            sequence: session.eventCursor + 1,
-            sessionId: session.sessionId
-          });
-          await this.sessionLifecycleManager.advanceEventCursor(session, marker.sequence);
-          await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, marker);
-          finalSequence = marker.sequence;
-          finalTimestamp = marker.timestamp;
-          latestSnapshotRef = snapshot.snapshotId;
+          if (snapshot) {
+            const marker = await this.eventLogManager.append<SnapshotCreatedPayload>({
+              type: 'snapshot.created',
+              actor: 'central',
+              payload: { snapshotId: snapshot.snapshotId, baseEventCursor: snapshot.baseEventCursor },
+              sequence: session.eventCursor + 1,
+              sessionId: session.sessionId
+            });
+            await this.sessionLifecycleManager.advanceEventCursor(session, marker.sequence);
+            await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, marker);
+            finalSequence = marker.sequence;
+            finalTimestamp = marker.timestamp;
+            latestSnapshotRef = snapshot.snapshotId;
+          }
         }
         if (session.currentWorkerId) {
           await this.workerManager.releaseSessionLease(session.currentWorkerId);

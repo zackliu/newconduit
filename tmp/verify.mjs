@@ -1,0 +1,20 @@
+import { chromium } from '@playwright/test';
+
+const browser = await chromium.launch();
+const page = await browser.newPage();
+const errors = [];
+page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+await page.goto('http://127.0.0.1:5174/');
+await page.fill('#centralUrl', 'http://localhost:3000');
+await page.fill('#tenantId', 'poc');
+await page.click('#connectButton');
+await page.waitForTimeout(5000);
+await page.click('#newSessionButton');
+await page.waitForTimeout(800);
+const options = await page.$$eval('#agentSpecSelect option', (els) => els.map((e) => e.value));
+const rail = (await page.textContent('.runtimeInspector')) ?? '';
+console.log('AGENTSPEC_OPTIONS=' + JSON.stringify(options));
+console.log('RAIL_HAS_STANDALONE=' + rail.includes('Standalone'));
+console.log('RAIL_HAS_LOCAL=' + rail.includes('local'));
+await page.screenshot({ path: 'tmp/verify.png', fullPage: true });
+await browser.close();

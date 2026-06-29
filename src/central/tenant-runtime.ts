@@ -1,7 +1,8 @@
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
 import type { Clock, RequestContext, RuntimeConnectionGrant, RuntimeEventTransport, RuntimeStorage, TenantConnectionIssuer, TenantContext, WorkerPoolRecord, WorkerRegisterPayload } from '../shared';
 import { AgentRuntimeEventController, ClientRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
-import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, SnapshotManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type WorkerPoolManagerStatus } from './managers';
+import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type WorkerPoolManagerStatus } from './managers';
+import { SnapshotManager } from './persistence';
 
 const WORKER_EXPIRY_SCAN_INTERVAL_MS = 5_000;
 const SESSION_RECONCILE_INTERVAL_MS = 5_000;
@@ -25,6 +26,7 @@ export class TenantRuntime {
   private readonly tenantInboxController: TenantInboxController;
   private readonly workerManager: WorkerManager;
   private readonly workerPoolManager: WorkerPoolManager | undefined;
+  private readonly agentSpecRegistry: AgentSpecRegistry;
   private workerExpiryTimer: NodeJS.Timeout | undefined;
   private sessionReconcileTimer: NodeJS.Timeout | undefined;
 
@@ -33,6 +35,7 @@ export class TenantRuntime {
     this.storage = options.storage;
     this.eventTransport = options.eventTransport;
     this.connectionIssuer = options.connectionIssuer;
+    this.agentSpecRegistry = options.agentSpecRegistry;
     const agentSpecAdmissionManager = new AgentSpecAdmissionManager(options.clock);
     const sessionLifecycleManager = new SessionLifecycleManager(options.storage, options.clock);
     const eventLogManager = new EventLogManager(options.storage, options.clock);
@@ -118,11 +121,13 @@ export class TenantRuntime {
   }
 
   async describeWorkerPools(): Promise<WorkerPoolManagerStatus> {
-    return this.workerPoolManager?.describe() ?? {
+    const base = await (this.workerPoolManager?.describe() ?? Promise.resolve({
       workerPools: [],
       hostPoolInstances: await this.storage.readHostPoolInstances(),
-      workers: await this.storage.readWorkers()
-    };
+      workers: await this.storage.readWorkers(),
+      agentSpecs: []
+    }));
+    return { ...base, agentSpecs: this.agentSpecRegistry.list() };
   }
 
 }

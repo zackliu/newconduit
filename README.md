@@ -25,8 +25,11 @@ src/
     main.ts           # Composition root: builds the tenant runtime + Docker WorkerPool, starts the HTTP server
     central-service.ts, tenant-runtime.ts
     controllers/      # Protocol-facing ingress (client/worker/agent runtime events, tenant inbox)
-    managers/         # Tenant-owned workflows: session lifecycle, assignment, leases, event log,
-                      #   worker registry, WorkerPool scaling, snapshot record (SnapshotManager)
+    managers/         # Tenant-owned workflows, grouped by concern:
+      session/        #   lifecycle, assignment, leases-on-session, event log, reconciler
+      worker/         #   worker registry, selection, leases, WorkerPool scaling
+      admission/      #   AgentSpec resolution into the frozen runtime contract
+    persistence/      # Persistence classes selected by AgentSpec (volume snapshot vs copilot-managed-local)
     adapters/         # Web PubSub transport, Docker host pool (scale out/in containers)
     storage/          # Local file storage for sessions, events, workers, snapshots
     registries/       # Predefined POC AgentSpec / class registry
@@ -34,14 +37,14 @@ src/
   sidecar/            # Worker-local process that adapts an agent into the runtime
     sidecar-daemon.ts # Receives worker commands; runs the per-turn agent loop; capture/restore on pause/resume
     adapters/         # Copilot SDK process wrapper, Docker workspace (mount + snapshot parts), Web PubSub client
-sdk/                  # Customer-facing TypeScript SDK (talks to central; never imports src/)
+sdk/client/           # Customer-facing TypeScript SDK (talks to central; never imports src/)
 samples/webclient/    # Browser demo that drives durable sessions through the SDK
 containers/sidecar/   # Dockerfile baked into the sidecar worker image
 specs/                # POC workflow, runtime resource model, and implementation plan
 tests/                # Scenario-based tests (central, sidecar, recovery, webpubsub, workerpool)
 ```
 
-The central runtime keeps two role-based boundaries: **controllers** translate an external protocol (Web PubSub runtime events, sidecar commands) into tenant-internal commands, while **managers** own cohesive workflows and durable state (session lifecycle, assignment, leases, event log, worker registry, WorkerPool scaling, snapshots). **Adapters** execute a decision against a concrete technology (Web PubSub, Docker, local files, the Copilot process). `samples/webclient` and `sdk/` are customer-facing and never import `src/`.
+The central runtime keeps two role-based boundaries: **controllers** translate an external protocol (Web PubSub runtime events, sidecar commands) into tenant-internal commands, while **managers** own cohesive workflows and durable state (session lifecycle, assignment, leases, event log, worker registry, WorkerPool scaling). **Persistence classes** are selected by each AgentSpec to decide capture/restore (volume snapshot vs `copilot-managed-local`). **Adapters** execute a decision against a concrete technology (Web PubSub, Docker, local files, the Copilot process). `samples/webclient` and `sdk/client/` are customer-facing and never import `src/`.
 
 ## Prerequisites
 
@@ -56,7 +59,7 @@ The central runtime keeps two role-based boundaries: **controllers** translate a
 ```powershell
 pnpm install
 pnpm build
-pnpm --dir sdk build
+pnpm --dir sdk/client build
 ```
 
 ## Run the Central Server (with a Docker WorkerPool)
@@ -88,6 +91,19 @@ On startup you should see `central service listening on http://localhost:3000`.
 | `WORKER_POOL_SCALE_IN_IDLE_MS` | no | `5000` | Idle time before an unused worker is scaled in (recycled). |
 
 Optional provider knobs: `COPILOT_PROVIDER_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`.
+
+## Run a Local Worker (no Docker)
+
+A **worker type** names which `sidecarClass`, labels, capacity, and adapter classes a worker runs with; a worker startup only references a type. The `copilot-local` type runs Copilot directly on the worker host, lets Copilot manage its own workspace and session files, and exposes capacity 99 (many local sessions). With central running, start one in another shell:
+
+```powershell
+$env:CENTRAL_URL = "http://localhost:3000"
+$env:TENANT_ID   = "poc"
+$env:WORKER_TYPE = "copilot-local"
+pnpm start:sidecar
+```
+
+This registers a worker with `sidecarClass=copilot-local-process`, `labels.agent=local`. Create a session against the `copilot-local` AgentSpec and central assigns it to this local worker without scaling a Docker pool. Pause stops that Copilot session and frees a capacity slot; resume reattaches Copilot to its prior session — there is no central snapshot, because the `copilot-managed-local` persistence class leaves continuity to Copilot.
 
 ## Run the Web Client and Drive a Durable Session
 

@@ -29,7 +29,7 @@ export interface AgentSpecRef {
 
 export interface StartSessionInput {
   agent: string | AgentSpecRef;
-  input: SessionInput;
+  input?: SessionInput;
   displayName?: string;
   description?: string;
   externalId?: string;
@@ -81,7 +81,7 @@ export interface AgentTurnError {
 
 export interface CreateSessionInput {
   agent: AgentSpecRef;
-  input: SessionInput;
+  input?: SessionInput;
   displayName?: string;
   description?: string;
   externalId?: string;

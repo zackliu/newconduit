@@ -1,11 +1,11 @@
-import type { AgentSpecRegistry } from '../registries/agent-spec-registry';
-import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionPauseCommandPayload, SessionPauseRequestedPayload, SessionRecord, SessionResumeRequestedPayload, TenantContext, TurnFailedPayload } from '../../shared';
-import { AgentSpecAdmissionManager } from './agent-spec-admission-manager';
+import type { AgentSpecRegistry } from '../../registries/agent-spec-registry';
+import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionPauseCommandPayload, SessionPauseRequestedPayload, SessionRecord, SessionResumeRequestedPayload, TenantContext, TurnFailedPayload } from '../../../shared';
+import { AgentSpecAdmissionManager } from '../admission/agent-spec-admission-manager';
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
 import { SessionLifecycleReconciler } from './session-lifecycle-reconciler';
-import { SnapshotManager } from './snapshot-manager';
+import { SnapshotManager } from '../../persistence/snapshot-manager';
 
 export interface StartSessionOutcome {
   session: SessionRecord;

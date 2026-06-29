@@ -52,7 +52,7 @@ This repository is the design and future implementation workspace for **Agent Ru
 ## Current Validation State
 
 - TypeScript POC scaffold is present under `src/`.
-- Customer-facing TypeScript SDK package is present under `sdk/`; SDK source is under `sdk/src/`, SDK tests are under `sdk/tests/`, and SDK public protocol source of truth is `sdk/public-protocol-spec-ch.md`.
+- Customer-facing TypeScript SDK package is present under `sdk/client/`; SDK source is under `sdk/client/src/`, SDK tests are under `sdk/client/tests/`, and SDK public protocol source of truth is `sdk/client/public-protocol-spec-ch.md`.
 - Scenario-based tests are under `tests/`; `pnpm test` compiles them to ignored `dist-tests/` output before running Node's test runner.
 - Web PubSub integration tests read `tests/.env` for `WEBPUBSUB_ENDPOINT` and use `DefaultAzureCredential`; run `az login` before expecting those tests to exercise the real Azure service.
 - Real Copilot SDK agent smoke tests read `tests/.env` for `RUN_REAL_COPILOT_AGENT_E2E`, `COPILOT_MODEL`, `COPILOT_PROVIDER_TYPE`, and `COPILOT_PROVIDER_BASE_URL`; provider auth uses Azure Identity/MSI, so run `az login` locally.
@@ -63,7 +63,7 @@ This repository is the design and future implementation workspace for **Agent Ru
 - Verified test command: `pnpm test`.
 - Verified Docker WorkerPool auth probe command: `$env:RUN_DOCKER_WORKERPOOL_E2E='1'; node -e "require('fs').rmSync('dist-tests', { recursive: true, force: true })"; pnpm exec tsc -p tsconfig.test.json; node --test dist-tests/tests/workerpool/docker-sidecar-image.integration.test.js`.
 - Verified Docker WorkerPool e2e command: `$env:RUN_DOCKER_WORKERPOOL_E2E='1'; node -e "require('fs').rmSync('dist-tests', { recursive: true, force: true })"; pnpm exec tsc -p tsconfig.test.json; node --test dist-tests/tests/workerpool/docker-workerpool.integration.test.js`.
-- Verified SDK build command: `pnpm --dir sdk build`.
-- Verified SDK typecheck command: `pnpm --dir sdk typecheck`.
-- Verified SDK test command: `pnpm --dir sdk test`.
+- Verified SDK build command: `pnpm --dir sdk/client build`.
+- Verified SDK typecheck command: `pnpm --dir sdk/client typecheck`.
+- Verified SDK test command: `pnpm --dir sdk/client test`.
 - Entrypoint commands are available: `pnpm start:central` starts the central HTTP server, and `pnpm start:sidecar` starts a standalone sidecar worker when `CENTRAL_URL` and `TENANT_ID` are set.

@@ -133,7 +133,7 @@ class AgentTurn {
 
 `sessions.list()` 生成 `ackId`，publish `session.list.requested` 到 tenant inbox，并等待 `client-private-inbox` 上带同一 `ackId` 的 `session.listed` response。
 
-`sessions.start()` 可以 lazy connect；它由 SDK 生成 `ackId`，publish `session.create.requested` 到 tenant inbox，然后等待 `client-private-inbox` 上带同一 `ackId` 的 `session.created.ack` acknowledgement。Central 生成 durable `sessionId`，并为 initial input 分配 session-scoped `turnSeq = 1`。SDK 收到 acknowledgement 后返回 `StartSessionResult`。Full `session.created` event, initial input, and session content remain available through the session events channel and persisted history replay.
+`sessions.start()` 可以 lazy connect；它由 SDK 生成 `ackId`，publish `session.create.requested` 到 tenant inbox，然后等待 `client-private-inbox` 上带同一 `ackId` 的 `session.created.ack` acknowledgement。Central 生成 durable `sessionId`，并分配 session-scoped `turnSeq = 1`。`input` 是可选的；不带 initial message 时 session 直接进入调度且 history 不含首个 user turn，第一条 `session.send()` 即为首轮。SDK 收到 acknowledgement 后返回 `StartSessionResult`。Full `session.created` event, optional initial input, and session content remain available through the session events channel and persisted history replay.
 
 `sessions.open(sessionId)` 只返回现有 durable session 的本地 handle，不改变 session lifecycle。`session.resume()` 才是 runtime lifecycle command，会 publish `session.resume.requested`。
 
@@ -286,7 +286,7 @@ interface StartSessionInput {
     agentSpecId: string;
     version?: string;
   };
-  input: SessionInput;
+  input?: SessionInput;
   displayName?: string;
   description?: string;
   externalId?: string;

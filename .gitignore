@@ -4,3 +4,4 @@ dist-es/
 dist-tests/
 .runtime-poc/
 *.log
+*.pptx

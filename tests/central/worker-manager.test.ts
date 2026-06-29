@@ -135,6 +135,24 @@ test('scenario: expired worker keepalive removes worker from active selection', 
   });
 });
 
+test('scenario: registered worker that never heartbeats is reaped after keepalive expiry', async () => {
+  await withStorage(async ({ storage, root, clock }) => {
+    const manager = new WorkerManager(storage, clock, 1_000);
+    const worker = await registerWorker(manager);
+    clock.set('2026-06-24T00:00:01.001Z');
+
+    const expiredWorkers = await manager.expireWorkers();
+
+    assert.equal(expiredWorkers.length, 1);
+    assert.equal(expiredWorkers[0].workerId, worker.workerId);
+    assert.equal(expiredWorkers[0].lifecycleState, 'expired');
+    assert.equal(expiredWorkers[0].terminalReason, 'worker_keepalive_expired');
+
+    const events = await readWorkerEvents(root, worker.workerId);
+    assert.deepEqual(events.map((event) => event.type), ['worker.registered', 'worker.expired']);
+  });
+});
+
 test('scenario: leased worker close marks lease lost without crash recovery', async () => {
   await withStorage(async ({ storage, clock }) => {
     const manager = new WorkerManager(storage, clock, 30_000);

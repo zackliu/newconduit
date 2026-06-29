@@ -6,6 +6,6 @@
     "declaration": false,
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "sdk/src/**/*.ts", "sdk/tests/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/**/*.ts", "sdk/client/src/**/*.ts", "sdk/client/tests/**/*.ts", "tests/**/*.ts"],
   "exclude": ["dist", "dist-tests", "node_modules"]
 }

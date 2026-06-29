@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 test('scenario: SDK public protocol spec stays aligned with runtime public protocol', async () => {
-  const sdkRoot = process.cwd().endsWith('sdk') ? process.cwd() : join(process.cwd(), 'sdk');
+  const sdkRoot = process.cwd().endsWith(join('sdk', 'client')) ? process.cwd() : join(process.cwd(), 'sdk', 'client');
   const spec = await readFile(join(sdkRoot, 'public-protocol-spec-ch.md'), 'utf8');
   const sdkFiles = await readSourceFiles(join(sdkRoot, 'src'));
   const sdkSource = sdkFiles.join('\n');

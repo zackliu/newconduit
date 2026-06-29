@@ -1,6 +1,5 @@
-import { CopilotProcessAdapter, DockerWorkspaceAdapter, WebPubSubClientAdapter } from './adapters';
 import { SidecarDaemon } from './sidecar-daemon';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../shared';
+import { resolveWorkerType } from './worker-types';
 
 async function main(): Promise<void> {
   const centralUrl = process.env.CENTRAL_URL;
@@ -8,32 +7,22 @@ async function main(): Promise<void> {
   if (!centralUrl) {
     throw new Error('CENTRAL_URL is required to start sidecar');
   }
+  const workerType = resolveWorkerType(process.env.WORKER_TYPE ?? 'copilot-process-wrapper');
   const daemon = new SidecarDaemon({
-    runtimeTransport: new WebPubSubClientAdapter({ tenantId }),
-    workspaceAdapter: new DockerWorkspaceAdapter(),
-    agentProcessAdapter: new CopilotProcessAdapter()
+    runtimeTransport: workerType.createRuntimeTransport({ tenantId }),
+    workspaceAdapter: workerType.createWorkspaceAdapter(),
+    agentProcessAdapter: workerType.createAgentProcessAdapter()
   });
   await daemon.startStandaloneWorker({
     centralUrl,
     tenantId,
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: parseLabels(process.env.SIDECAR_LABELS_JSON) ?? { agent: 'copilot' },
+    sidecarClass: workerType.sidecarClass,
+    labels: workerType.labels,
     description: sidecarDescription(),
-    capacity: Number(process.env.SIDECAR_CAPACITY ?? '1'),
-    allocatable: Number(process.env.SIDECAR_CAPACITY ?? '1')
+    capacity: workerType.capacity,
+    allocatable: workerType.capacity
   });
-  console.log('sidecar daemon started');
-}
-
-function parseLabels(value: string | undefined): Record<string, string> | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const parsed = JSON.parse(value) as unknown;
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed) || !Object.values(parsed).every((entry) => typeof entry === 'string')) {
-    throw new Error('SIDECAR_LABELS_JSON must be a JSON object with string values');
-  }
-  return parsed as Record<string, string>;
+  console.log(`sidecar daemon started as worker type ${workerType.workerTypeId}`);
 }
 
 function sidecarDescription(): Record<string, string> | undefined {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
-import { AgentRuntimeClient, type AgentTurnEvent } from '../../sdk/src';
+import { AgentRuntimeClient, type AgentTurnEvent } from '../../sdk/client/src';
 import { DockerHostPoolAdapter, WebPubSubTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { CentralHttpServer } from '../../src/central/http/central-http-server';

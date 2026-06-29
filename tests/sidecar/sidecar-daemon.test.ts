@@ -322,6 +322,25 @@ function workerRegistration(): WorkerRegisterPayload {
   };
 }
 
+test('scenario: multi-capacity worker stays ready while it still has free slots', async () => {
+  const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+  const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
+  const sidecar = new SidecarDaemon({
+    runtimeTransport: sidecarTransport,
+    workspaceAdapter: new PassthroughWorkspaceAdapter(),
+    agentProcessAdapter: new DeterministicAgentProcessAdapter()
+  });
+
+  await (sidecar as unknown as { startHeartbeat(worker: { workerId: string; capacity: number }): Promise<void> }).startHeartbeat({ workerId: 'worker-1', capacity: 2 });
+  await sidecar.handleWorkerCommand(sessionAssignEvent({ sessionLeaseId: 'lease-2' }));
+  await (sidecar as unknown as { publishHeartbeat(): Promise<void> }).publishHeartbeat();
+
+  const heartbeat = sidecarTransport.publishedEvents.filter((event) => event.type === 'worker.heartbeat').at(-1);
+  assert.equal((heartbeat?.payload as { allocatable: number }).allocatable, 1);
+  assert.deepEqual((heartbeat?.payload as { conditions: string[] }).conditions, ['ready']);
+  await sidecar.stop();
+});
+
 test('scenario: pause command stops agent run and publishes paused event', async () => {
   const runtimeTransport = new InMemoryRuntimeTransportAdapter();
   const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);

@@ -1,6 +1,7 @@
 export const COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS = 'copilot-process-wrapper';
+export const COPILOT_LOCAL_PROCESS_SIDECAR_CLASS = 'copilot-local-process';
 
-export type SidecarClass = typeof COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS;
+export type SidecarClass = typeof COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS | typeof COPILOT_LOCAL_PROCESS_SIDECAR_CLASS;
 export type WorkerCondition = 'ready' | 'busy' | 'draining' | 'disconnected';
 export type WorkerLifecycleState = 'registered' | 'active' | 'closed' | 'expired';
 

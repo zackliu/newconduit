@@ -1,4 +1,4 @@
-import type { Clock, ResolvedAgentSpec, RuntimeStorage, SessionRecord, SessionStatus } from '../../shared';
+import type { Clock, ResolvedAgentSpec, RuntimeStorage, SessionRecord, SessionStatus } from '../../../shared';
 
 /**
  * Owns the durable session record transitions that describe where a session is in the runtime lifecycle.

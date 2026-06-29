@@ -74,8 +74,34 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
   }
 
   private async buildImage(): Promise<void> {
-    this.buildPromise ??= execFileAsync('docker', ['build', '-f', this.dockerfilePath, '-t', this.imageName, this.contextPath], { maxBuffer: 20 * 1024 * 1024 }).then(() => undefined);
+    if (!this.buildPromise) {
+      this.buildPromise = this.buildImageOnce();
+      this.buildPromise.catch(() => {
+        this.buildPromise = undefined;
+      });
+    }
     await this.buildPromise;
+  }
+
+  private async buildImageOnce(): Promise<void> {
+    try {
+      await execFileAsync('docker', ['build', '-f', this.dockerfilePath, '-t', this.imageName, this.contextPath], { maxBuffer: 20 * 1024 * 1024 });
+    } catch (error) {
+      if (await this.imageExists()) {
+        console.warn(`docker build failed; reusing existing image ${this.imageName}: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private async imageExists(): Promise<boolean> {
+    try {
+      await execFileAsync('docker', ['image', 'inspect', this.imageName]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private forwardEnv(...names: string[]): string[] {

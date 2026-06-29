@@ -132,7 +132,7 @@ export class ClientRuntimeEventController {
     }
     const candidate = payload as Partial<CreateSessionRequest>;
     return typeof candidate.agent?.agentSpecId === 'string'
-      && typeof candidate.input?.message === 'string'
+      && (candidate.input === undefined || typeof candidate.input.message === 'string')
       && candidate.workspace?.source === 'empty';
   }
 

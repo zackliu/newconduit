@@ -107,30 +107,30 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     if (!active) {
       throw new Error(`agent session ${input.sessionId} is not running`);
     }
-    let streamedFinalMessage = false;
+    let lastStreamedMessage: string | undefined;
+    let lastStreamedOutput: unknown;
+    let publishChain: Promise<void> = Promise.resolve();
     const unsubscribe = active.session.on((event) => {
       const mapped = this.mapSessionEvent(event);
       if (!mapped) {
         return;
       }
-      if (mapped.payload.message) {
-        streamedFinalMessage = true;
+      if (typeof mapped.payload.message === 'string' && mapped.payload.message.length > 0) {
+        lastStreamedMessage = mapped.payload.message;
+        lastStreamedOutput = mapped.payload.output;
       }
-      void emit(mapped);
+      publishChain = publishChain.then(() => emit(mapped));
     });
     try {
       const result = await active.session.sendAndWait({ prompt: input.message }, 120_000);
-      const message = result?.data.content;
-      if (result && !streamedFinalMessage) {
-        await emit({
-          type: 'output',
-          payload: {
-            message,
-            output: result.data
-          }
-        });
+      const completionContent = typeof result?.data.content === 'string' && result.data.content.length > 0 ? result.data.content : undefined;
+      const message = completionContent ?? lastStreamedMessage;
+      const output = result?.data ?? lastStreamedOutput;
+      if (completionContent !== undefined && lastStreamedMessage === undefined) {
+        publishChain = publishChain.then(() => emit({ type: 'output', payload: { message: completionContent, output: result?.data } }));
       }
-      return { message, output: result?.data };
+      await publishChain;
+      return { message, output };
     } finally {
       unsubscribe();
     }

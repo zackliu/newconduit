@@ -1,4 +1,4 @@
-import type { Clock, RuntimeEvent, RuntimeEventType, RuntimeStorage } from '../../shared';
+import type { Clock, RuntimeEvent, RuntimeEventType, RuntimeStorage } from '../../../shared';
 
 /**
  * Appends ordered runtime facts to central storage so session history, replay, and client fan-out share the same source of truth.

@@ -1,4 +1,4 @@
-import type { LabelSelector, SessionRecord, WorkerRecord } from '../../shared';
+import type { LabelSelector, SessionRecord, WorkerRecord } from '../../../shared';
 
 /**
  * Chooses a compatible ready worker for a queued session without letting worker source or hosting details leak into assignment.

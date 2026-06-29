@@ -16,14 +16,19 @@ export class TenantInboxController {
   ) {}
 
   async handleRuntimeEvent(context: RequestContext, event: RuntimeEvent): Promise<void> {
-    const workerOutcome = await this.workerRuntimeEventController.handleRuntimeEvent(this.tenantId, event);
-    if (workerOutcome.handled) {
-      return;
+    try {
+      const workerOutcome = await this.workerRuntimeEventController.handleRuntimeEvent(this.tenantId, event);
+      if (workerOutcome.handled) {
+        return;
+      }
+      if (await this.agentRuntimeEventController.handleRuntimeEvent(event)) {
+        return;
+      }
+      await this.clientRuntimeEventController.handleRuntimeEvent(context, event);
+    } catch (error) {
+      // A single malformed or rejected ingress event must not tear down the tenant inbox subscription.
+      console.error(`tenant ${this.tenantId} dropped runtime event ${event.type} (${event.eventId})`, error);
     }
-    if (await this.agentRuntimeEventController.handleRuntimeEvent(event)) {
-      return;
-    }
-    await this.clientRuntimeEventController.handleRuntimeEvent(context, event);
   }
 
   async reconcileSessions(): Promise<void> {

@@ -1,4 +1,4 @@
-import type { RuntimeStorage, SessionRecord, WorkerRecord } from '../../shared';
+import type { RuntimeStorage, SessionRecord, WorkerRecord } from '../../../shared';
 
 /**
  * Protects the session-to-worker binding so commands and agent events can be checked against the current session lease.

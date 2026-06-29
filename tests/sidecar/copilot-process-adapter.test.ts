@@ -180,6 +180,88 @@ test('scenario: OpenAI-compatible Copilot provider env is passed without URL con
   }
 });
 
+test('scenario: final assistant message from the stream becomes the turn result when sendAndWait returns no content', async () => {
+  const originalModel = process.env.COPILOT_MODEL;
+  const originalType = process.env.COPILOT_PROVIDER_TYPE;
+  const originalBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  delete process.env.COPILOT_MODEL;
+  delete process.env.COPILOT_PROVIDER_TYPE;
+  delete process.env.COPILOT_PROVIDER_BASE_URL;
+
+  class StreamingSession {
+    private handler: ((event: { type: string; data: Record<string, unknown> }) => void) | undefined;
+
+    on(handler: (event: { type: string; data: Record<string, unknown> }) => void): () => void {
+      this.handler = handler;
+      return () => {
+        this.handler = undefined;
+      };
+    }
+
+    async sendAndWait(): Promise<{ data: { content: string } } | undefined> {
+      this.handler?.({ type: 'assistant.message_delta', data: { deltaContent: 'Created ' } });
+      this.handler?.({ type: 'assistant.message_delta', data: { deltaContent: 'a.txt' } });
+      this.handler?.({ type: 'assistant.message', data: { content: 'Created a.txt in the working folder.' } });
+      return undefined;
+    }
+
+    async disconnect(): Promise<void> {
+      return;
+    }
+  }
+
+  class StreamingClient {
+    readonly session = new StreamingSession();
+
+    constructor(readonly options: Record<string, unknown>) {}
+
+    async start(): Promise<void> {
+      return;
+    }
+
+    async getLastSessionId(): Promise<string | undefined> {
+      return undefined;
+    }
+
+    async createSession(): Promise<StreamingSession> {
+      return this.session;
+    }
+
+    async resumeSession(): Promise<StreamingSession> {
+      return this.session;
+    }
+
+    async stop(): Promise<void> {
+      return;
+    }
+  }
+
+  const adapter = new CopilotProcessAdapter(async () => ({
+    CopilotClient: StreamingClient,
+    RuntimeConnection: {
+      forStdio: (input: { path: string }) => ({ kind: 'stdio', ...input }),
+      forTcp: (input?: { path?: string }) => ({ kind: 'tcp', ...input })
+    },
+    approveAll: async () => true
+  }), async () => ({ token: 'test-msi-token', expiresOnTimestamp: Date.now() + 3600_000 }));
+
+  const outputs: Array<{ message?: string; delta?: string }> = [];
+  try {
+    await adapter.start(startInput());
+    const result = await adapter.send({ sessionId: 'session-1', turnSeq: 1, message: 'create a.txt' }, async (event) => {
+      outputs.push(event.payload as { message?: string; delta?: string });
+    });
+
+    assert.equal(result.message, 'Created a.txt in the working folder.');
+    assert.deepEqual(outputs.map((output) => output.delta ?? output.message), ['Created ', 'a.txt', 'Created a.txt in the working folder.']);
+  } finally {
+    await adapter.stop({ sessionId: 'session-1' });
+    restoreEnv('COPILOT_MODEL', originalModel);
+    restoreEnv('COPILOT_PROVIDER_TYPE', originalType);
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalBaseUrl);
+  }
+});
+
 test('scenario: real Copilot SDK agent uses provider env from tests env file', async (context) => {
   const env = loadTestEnv();
   const runRealCopilotAgent = process.env.RUN_REAL_COPILOT_AGENT_E2E ?? env.RUN_REAL_COPILOT_AGENT_E2E;

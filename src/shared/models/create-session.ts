@@ -5,7 +5,7 @@ export interface AgentSpecRef {
 
 export interface CreateSessionRequest {
   agent: AgentSpecRef;
-  input: {
+  input?: {
     message: string;
   };
   displayName?: string;

@@ -12,12 +12,12 @@ export interface AgentSpec {
     args: string[];
   };
   sidecarClass: SidecarClass;
-  workspaceClass: 'docker-workspace-volume-snapshot';
+  workspaceClass: 'docker-workspace-volume-snapshot' | 'local-managed';
   toolProfile: 'copilot-poc-tools';
   workerSelector: LabelSelector;
-  pausePolicy: 'turn-boundary-durable-pause';
+  pausePolicy: 'turn-boundary-durable-pause' | 'stop-on-pause';
   recoveryPolicy: 'restart-with-context';
-  agentStatePolicy: 'copilot-session-volume-snapshot';
+  agentStatePolicy: 'copilot-session-volume-snapshot' | 'copilot-managed-local';
   idlePauseTimeoutMs: number;
   version: string;
 }

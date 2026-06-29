@@ -3,12 +3,19 @@ import type { Clock, RuntimeStorage, SessionRecord, SnapshotCaptureRef, Snapshot
 const SNAPSHOT_RESTORE_HINTS: Record<string, string> = { mode: 'restart-with-context' };
 
 /**
- * Owns the session-addressed snapshot record so a paused session can be restored onto any later worker.
- *
- * The manager never reads worker volume bytes; the sidecar captures and restores the parts. The manager
- * allocates the snapshot identity, hands capture/restore refs to commands, and records what the sidecar captured.
+ * Selects how a paused session's continuity material is captured and restored. A session resolves exactly one
+ * persistence class from its AgentSpec; central asks the resolved class instead of branching on policy values.
  */
-export class SnapshotManager {
+export interface PersistenceClass {
+  planCapture(session: SessionRecord): SnapshotCaptureRef | undefined;
+  planRestore(session: SessionRecord): Promise<SnapshotRestoreRef | undefined>;
+  recordCapture(session: SessionRecord, input: { snapshotId: string; parts: SnapshotPart[] }): Promise<WorkspaceSnapshot | undefined>;
+}
+
+/**
+ * Volume-snapshot persistence: central allocates a session-addressed snapshot and records what the sidecar captured.
+ */
+export class VolumeSnapshotPersistenceClass implements PersistenceClass {
   constructor(private readonly storage: RuntimeStorage, private readonly clock: Clock) {}
 
   planCapture(session: SessionRecord): SnapshotCaptureRef {
@@ -43,5 +50,23 @@ export class SnapshotManager {
 
   private buildLocation(sessionId: string, snapshotId: string): string {
     return `${sessionId}/${snapshotId}`;
+  }
+}
+
+/**
+ * Copilot self-managed persistence: the agent keeps its own workspace and session files on a long-lived worker,
+ * so central plans no capture and no restore. "No snapshot" is this class's behavior, not a central special case.
+ */
+export class CopilotManagedLocalPersistenceClass implements PersistenceClass {
+  planCapture(): undefined {
+    return undefined;
+  }
+
+  async planRestore(): Promise<undefined> {
+    return undefined;
+  }
+
+  async recordCapture(): Promise<undefined> {
+    return undefined;
   }
 }

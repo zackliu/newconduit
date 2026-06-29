@@ -63,6 +63,20 @@ test('scenario: central starts server with health and negotiate endpoints', asyn
     assert.match(sidecarToken.url, /principal=demo-sidecar/);
     assert.match(sidecarToken.url, /tenant-inbox/);
     assert.equal(typeof sidecarToken.worker.workerId, 'string');
+
+    const localSidecarNegotiateResponse = await fetch(`http://localhost:${port}${POC_RUNTIME_HTTP_PATHS.sidecarNegotiate}?${POC_RUNTIME_HTTP_QUERY.tenantId}=poc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sidecarClass: 'copilot-local-process',
+        labels: { agent: 'local' },
+        capacity: 99,
+        allocatable: 99
+      })
+    });
+    assert.equal(localSidecarNegotiateResponse.status, 200);
+    const localWorker = await localSidecarNegotiateResponse.json() as { worker: { sidecarClass: string } };
+    assert.equal(localWorker.worker.sidecarClass, 'copilot-local-process');
   } finally {
     await server.close();
     await rm(root, { recursive: true, force: true });

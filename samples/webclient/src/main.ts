@@ -18,6 +18,16 @@ interface RuntimeStatus {
   workerPools: WorkerPoolSummary[];
   hostPoolInstances: HostPoolInstanceSummary[];
   workers: WorkerSummary[];
+  agentSpecs: CentralAgentSpec[];
+}
+
+interface CentralAgentSpec {
+  agentSpecId: string;
+  sidecarClass: string;
+  workspaceClass: string;
+  agentStatePolicy: string;
+  labels: Record<string, string>;
+  workerSelector: { matchLabels: Record<string, string> };
 }
 
 interface WorkerPoolSummary {
@@ -64,16 +74,25 @@ interface AgentSpecOption {
   workspaceClass: string;
 }
 
-const AGENT_SPECS: AgentSpecOption[] = [
-  {
-    agentSpecId: 'copilot-poc',
-    title: 'Copilot process-wrapper agent',
-    sidecarClass: 'copilot-process-wrapper',
-    workerSelector: { agent: 'copilot' },
-    provider: 'GitHub Copilot SDK agent',
-    workspaceClass: 'docker-workspace-volume-snapshot'
-  }
-];
+const PLACEHOLDER_AGENT_SPEC: AgentSpecOption = {
+  agentSpecId: 'connect to load AgentSpecs',
+  title: 'Connect to central',
+  sidecarClass: '—',
+  workerSelector: {},
+  provider: '—',
+  workspaceClass: '—'
+};
+
+function agentSpecOptions(): AgentSpecOption[] {
+  return state.runtimeStatus.agentSpecs.map((spec) => ({
+    agentSpecId: spec.agentSpecId,
+    title: `${spec.labels.agent ?? spec.agentSpecId} agent`,
+    sidecarClass: spec.sidecarClass,
+    workerSelector: spec.workerSelector.matchLabels,
+    provider: spec.sidecarClass,
+    workspaceClass: spec.workspaceClass
+  }));
+}
 
 const state = {
   centralUrl: localStorage.getItem('ars.sample.centralUrl') ?? 'http://localhost:3000',
@@ -84,7 +103,7 @@ const state = {
   selectedAgentSpecId: localStorage.getItem('ars.sample.agentSpecId') ?? 'copilot-poc',
   agentSpecDialogOpen: false,
   sessions: [] as SessionSummary[],
-  runtimeStatus: { workerPools: [], hostPoolInstances: [], workers: [] } as RuntimeStatus,
+  runtimeStatus: { workerPools: [], hostPoolInstances: [], workers: [], agentSpecs: [] } as RuntimeStatus,
   messages: [] as ChatMessage[],
   traceEvents: [] as TraceEvent[],
   pending: false,
@@ -172,7 +191,7 @@ function render(): void {
 
         <div class="sessionBody" id="chatBody">
           <div class="messageStack" id="messageStack">
-            ${state.messages.map(renderMessage).join('') || (state.currentSession ? renderSessionWorkPanel(activeSession) : renderStartPanel(selectedAgentSpec))}
+            ${state.messages.map(renderMessage).join('') || (state.currentSession ? renderSessionWorkPanel(activeSession) : renderStartPanel())}
           </div>
           <aside class="tracePanel">
             <div class="panelHeader"><span>Runtime Events</span><small>${state.traceEvents.length ? `${state.traceEvents.length} events` : 'waiting'}</small></div>
@@ -365,7 +384,6 @@ async function startSession(): Promise<void> {
   try {
     const result = await state.client!.sessions.start({
       agent: state.selectedAgentSpecId,
-      input: { message: `Start a new ${state.selectedAgentSpecId} session.` },
       workspace: { source: 'empty' },
       displayName: `${state.selectedAgentSpecId} session`
     });
@@ -597,24 +615,16 @@ async function ensureConnected(): Promise<void> {
 }
 
 function getSelectedAgentSpec(): AgentSpecOption {
-  return AGENT_SPECS.find((agentSpec) => agentSpec.agentSpecId === state.selectedAgentSpecId) ?? AGENT_SPECS[0];
+  const options = agentSpecOptions();
+  return options.find((agentSpec) => agentSpec.agentSpecId === state.selectedAgentSpecId) ?? options[0] ?? PLACEHOLDER_AGENT_SPEC;
 }
 
-function renderStartPanel(agentSpec: AgentSpecOption): string {
-  const canStart = state.connectionState === 'connected' && !state.pending;
+function renderStartPanel(): string {
   return `
     <div class="startPanel">
-      <div class="startCopy">
-        <span class="eyebrow">Create Session</span>
-        <h3>Start from an AgentSpec, not from a machine.</h3>
-        <p>Click Sessions + to choose an AgentSpec. Central creates a durable session, matches WorkerPool labels, scales Docker capacity, and assigns the session after a sidecar registers as a Worker.</p>
-      </div>
-      <div class="selectedSpecPreview">
-        <span>Selected AgentSpec</span>
-        <strong>${escapeHtml(agentSpec.agentSpecId)}</strong>
-        <em>${escapeHtml(labelString(agentSpec.workerSelector))}</em>
-      </div>
-      <button id="startSessionButton" class="startSessionButton" ${canStart ? '' : 'disabled'}>Choose AgentSpec</button>
+      <span class="eyebrow">Session Management</span>
+      <h3>Durable sessions, not machines.</h3>
+      <p>A session is a durable identity central creates from an AgentSpec, schedules onto a worker, and lets you pause and resume across replaceable compute. Use Sessions&nbsp;+ to create one.</p>
     </div>
   `;
 }
@@ -704,7 +714,33 @@ function renderWorkerPoolInspector(): string {
   const note = !connected ? 'connect to inspect' : poolCount ? `${poolCount} pool${poolCount === 1 ? '' : 's'}` : 'none configured';
   return `
     <div class="inspectorHead"><span>WorkerPools</span><small>${escapeHtml(note)}</small></div>
-    <div class="inspectorScroll">${renderWorkerPools()}</div>
+    <div class="inspectorScroll">${renderWorkerPools()}${renderStandaloneWorkers()}</div>
+  `;
+}
+
+function renderStandaloneWorkers(): string {
+  if (state.connectionState !== 'connected') {
+    return '';
+  }
+  const standalone = state.runtimeStatus.workers.filter((worker) =>
+    (worker.lifecycleState === 'registered' || worker.lifecycleState === 'active')
+    && !state.runtimeStatus.workerPools.some((pool) => worker.description?.workerPoolId === pool.poolId || matchesLabels(worker.labels, pool.labels))
+  );
+  if (standalone.length === 0) {
+    return '';
+  }
+  return `
+    <article class="poolCard">
+      <header class="poolCardHead">
+        <strong>Standalone workers</strong>
+        <span class="poolBadge">manual</span>
+      </header>
+      <p class="poolMeta">Registered directly, not from a WorkerPool</p>
+      <div class="poolGroup">
+        <div class="poolGroupHead"><span>Workers</span><small>${standalone.length}</small></div>
+        ${standalone.map(renderWorkerMini).join('')}
+      </div>
+    </article>
   `;
 }
 
@@ -724,7 +760,7 @@ function renderAgentSpecDialog(agentSpec: AgentSpecOption): string {
         <div class="agentSpecDialogBody">
           <label for="agentSpecSelect">AgentSpec</label>
           <select id="agentSpecSelect">
-            ${AGENT_SPECS.map((candidate) => `<option value="${escapeHtml(candidate.agentSpecId)}" ${candidate.agentSpecId === agentSpec.agentSpecId ? 'selected' : ''}>${escapeHtml(candidate.agentSpecId)}</option>`).join('')}
+            ${agentSpecOptions().map((candidate) => `<option value="${escapeHtml(candidate.agentSpecId)}" ${candidate.agentSpecId === agentSpec.agentSpecId ? 'selected' : ''}>${escapeHtml(candidate.agentSpecId)}</option>`).join('')}
           </select>
           <dl>
             <dt>agent</dt><dd>${escapeHtml(agentSpec.title)}</dd>

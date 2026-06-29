@@ -21,7 +21,7 @@ From the repository root:
 ```powershell
 pnpm install
 pnpm build
-pnpm --dir sdk build
+pnpm --dir sdk/client build
 ```
 
 Authenticate to Azure for Web PubSub:

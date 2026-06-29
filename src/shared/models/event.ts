@@ -146,7 +146,7 @@ export interface SessionPauseCommandPayload {
   workerId: string;
   sessionLeaseId: string;
   reason?: 'idle_timeout' | 'client_requested';
-  capture: SnapshotCaptureRef;
+  capture?: SnapshotCaptureRef;
 }
 
 export interface WorkerCommandRejectedPayload {

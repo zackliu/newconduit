@@ -1,7 +1,7 @@
-import type { Clock, RuntimeEvent, RuntimeStorage, SessionAssignPayload, SessionRecord } from '../../shared';
-import { SnapshotManager } from './snapshot-manager';
-import { SessionLeaseManager } from './worker-lease-manager';
-import { WorkerSelector } from './worker-selector';
+import type { Clock, RuntimeEvent, RuntimeStorage, SessionAssignPayload, SessionRecord } from '../../../shared';
+import { SnapshotManager } from '../../persistence/snapshot-manager';
+import { SessionLeaseManager } from '../worker/worker-lease-manager';
+import { WorkerSelector } from '../worker/worker-selector';
 
 export interface WorkerCommandOutput<TPayload = unknown> {
   workerId: string;

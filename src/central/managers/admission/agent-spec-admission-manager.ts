@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { AgentSpec, Clock, ResolvedAgentSpec } from '../../shared';
+import type { AgentSpec, Clock, ResolvedAgentSpec } from '../../../shared';
 
 /**
  * Freezes an AgentSpec into the resolved runtime contract a session will carry through assignment and recovery.

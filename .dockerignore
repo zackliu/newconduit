@@ -10,3 +10,4 @@ samples/*/dist
 .git
 copilot-state-path
 workspace-path
+.pptx

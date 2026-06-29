@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { WebPubSubClient } from '@azure/web-pubsub-client';
-import { AgentRuntimeClient } from '../../sdk/src';
+import { AgentRuntimeClient } from '../../sdk/client/src';
 import { WebPubSubTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { CentralHttpServer } from '../../src/central/http/central-http-server';

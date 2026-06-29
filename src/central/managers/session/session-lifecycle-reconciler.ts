@@ -1,9 +1,9 @@
-import type { Clock, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPauseCommandPayload, SessionPausedPayload, SessionPauseRequestedPayload, SessionRecord } from '../../shared';
+import type { Clock, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPauseCommandPayload, SessionPausedPayload, SessionPauseRequestedPayload, SessionRecord } from '../../../shared';
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
-import { SnapshotManager } from './snapshot-manager';
-import { WorkerPoolManager } from './worker-pool-manager';
+import { SnapshotManager } from '../../persistence/snapshot-manager';
+import { WorkerPoolManager } from '../worker/worker-pool-manager';
 
 export interface SessionLifecycleReconcileOutcome {
   workerCommands: Array<WorkerCommandOutput<SessionPauseCommandPayload> | WorkerCommandOutput>;

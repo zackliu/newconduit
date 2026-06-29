@@ -1,6 +1,6 @@
 export { SystemClock } from './contracts';
 export { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, WebPubSubRuntimeChannelMapper } from './protocol';
-export { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from './models';
+export { COPILOT_LOCAL_PROCESS_SIDECAR_CLASS, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from './models';
 export type {
 	Clock,
 	Controller,

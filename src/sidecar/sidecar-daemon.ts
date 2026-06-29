@@ -103,11 +103,12 @@ export class SidecarDaemon {
       return;
     }
     const activeRunCount = this.activeRuns.size;
+    const allocatable = Math.max(0, this.heartbeatState.capacity - activeRunCount);
     const payload: WorkerHeartbeatPayload = {
       workerId: this.heartbeatState.workerId,
       capacity: this.heartbeatState.capacity,
-      allocatable: Math.max(0, this.heartbeatState.capacity - activeRunCount),
-      conditions: activeRunCount > 0 ? ['busy'] : ['ready']
+      allocatable,
+      conditions: allocatable > 0 ? ['ready'] : ['busy']
     };
     await this.options.runtimeTransport.publish({ kind: 'tenant-inbox' }, {
       eventId: crypto.randomUUID(),
@@ -280,7 +281,9 @@ export class SidecarDaemon {
     await active.ready;
     await this.options.agentProcessAdapter.pauseAtTurnBoundary?.({ sessionId: payload.sessionId });
     await this.options.agentProcessAdapter.stop?.({ sessionId: payload.sessionId });
-    const parts = await this.options.workspaceAdapter.capture({ mount: active.mount, location: payload.capture.location });
+    const snapshot = payload.capture
+      ? { snapshotId: payload.capture.snapshotId, parts: await this.options.workspaceAdapter.capture({ mount: active.mount, location: payload.capture.location }) }
+      : undefined;
     this.activeRuns.delete(payload.sessionId);
     await this.publishTenantEvent<SessionPausedPayload>({
       type: 'session.paused',
@@ -289,7 +292,7 @@ export class SidecarDaemon {
       sessionLeaseId: payload.sessionLeaseId,
       payload: {
         reason: payload.reason,
-        snapshot: { snapshotId: payload.capture.snapshotId, parts }
+        ...(snapshot ? { snapshot } : {})
       }
     });
     await this.publishHeartbeat();
@@ -391,7 +394,7 @@ export class SidecarDaemon {
       || typeof candidate.sessionLeaseId !== 'string') {
       throw new Error('invalid session.pause.requested payload');
     }
-    if (typeof candidate.capture?.snapshotId !== 'string' || typeof candidate.capture.location !== 'string') {
+    if (candidate.capture !== undefined && (typeof candidate.capture.snapshotId !== 'string' || typeof candidate.capture.location !== 'string')) {
       throw new Error('invalid session.pause.requested capture ref');
     }
     if (candidate.reason !== undefined && candidate.reason !== 'idle_timeout' && candidate.reason !== 'client_requested') {

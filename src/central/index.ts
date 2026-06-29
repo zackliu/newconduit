@@ -20,13 +20,14 @@ export {
 	SessionLifecycleManager,
 	SessionLeaseManager,
 	SessionManager,
-	SnapshotManager,
 	WorkerManager,
 	WorkerPoolManager,
 	WorkerSelector
 } from './managers';
 export type { AcceptInputOutcome, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput, WorkerPoolManagerStatus } from './managers';
-export { POC_AGENT_SPEC } from './registries/poc-class-registry';
+export { CopilotManagedLocalPersistenceClass, SnapshotManager, VolumeSnapshotPersistenceClass } from './persistence';
+export type { PersistenceClass } from './persistence';
+export { POC_AGENT_SPEC, POC_LOCAL_AGENT_SPEC } from './registries/poc-class-registry';
 export { StaticAgentSpecRegistry } from './registries/agent-spec-registry';
 export type { AgentSpecRegistry } from './registries/agent-spec-registry';
 export { LocalFileStorage } from './storage/local-file-storage';

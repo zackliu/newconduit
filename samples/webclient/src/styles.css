@@ -634,21 +634,22 @@ textarea:focus {
 .startPanel {
   align-self: center;
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
-  gap: 24px;
-  max-width: 880px;
-  margin: 7vh auto 0;
+  gap: 10px;
+  max-width: 520px;
+  margin: 12vh auto 0;
   padding: 0 4px;
+  text-align: center;
+  justify-items: center;
 }
 
-.startCopy h3 {
-  margin-bottom: 8px;
-  font-size: 1.55rem;
+.startPanel h3 {
+  margin-bottom: 4px;
+  font-size: 1.5rem;
   line-height: 1.15;
 }
 
-.startCopy p {
-  max-width: 560px;
+.startPanel p {
+  max-width: 460px;
   color: #5f6962;
 }
 
