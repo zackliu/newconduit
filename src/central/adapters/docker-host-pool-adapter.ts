@@ -14,6 +14,7 @@ export interface DockerHostPoolAdapterOptions {
   azureConfigDir?: string;
   sidecarWorkRoot?: string;
   snapshotRoot?: string;
+  workerType?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -24,6 +25,7 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
   private readonly azureConfigDir: string;
   private readonly sidecarWorkRoot: string;
   private readonly snapshotRoot: string;
+  private readonly workerType: string | undefined;
   private readonly env: NodeJS.ProcessEnv;
   private buildPromise: Promise<void> | undefined;
 
@@ -34,6 +36,7 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
     this.azureConfigDir = resolve(options.azureConfigDir ?? join(homedir(), '.azure'));
     this.sidecarWorkRoot = resolve(options.sidecarWorkRoot ?? '.runtime-poc/docker-sidecars');
     this.snapshotRoot = resolve(options.snapshotRoot ?? '.runtime-poc/snapshots');
+    this.workerType = options.workerType;
     this.env = options.env ?? process.env;
   }
 
@@ -59,6 +62,7 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
       '-e', 'AZURE_CONFIG_DIR=/home/sidecar/.azure',
       '-e', 'SIDECAR_WORK_ROOT=/runtime/sidecar',
       '-e', 'SIDECAR_SNAPSHOT_ROOT=/snapshots',
+      ...(this.workerType ? ['-e', `WORKER_TYPE=${this.workerType}`] : []),
       ...this.forwardEnv('WEBPUBSUB_ENDPOINT', 'WEBPUBSUB_HUB', 'COPILOT_MODEL', 'COPILOT_PROVIDER_TYPE', 'COPILOT_PROVIDER_BASE_URL', 'COPILOT_PROVIDER_TOKEN_SCOPE', 'COPILOT_PROVIDER_WIRE_API', 'COPILOT_PROVIDER_AZURE_API_VERSION', 'COPILOT_CLI_PATH', 'COPILOT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'),
       '-v', `${this.azureConfigDir}:/home/sidecar/.azure`,
       '-v', `${hostRuntimeRoot}:/runtime`,

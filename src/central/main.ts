@@ -37,13 +37,32 @@ async function main(): Promise<void> {
     },
     centralUrlForWorkers
   };
+  const dotnetWorkerPool: WorkerPoolRecord = {
+    poolId: process.env.DOTNET_WORKER_POOL_ID ?? 'poc-docker-dotnet',
+    tenantId: tenant.tenantId,
+    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
+    labels: { agent: 'dotnet' },
+    capacityPerWorker: 1,
+    hostPoolControllerClass: 'docker-dotnet',
+    scalePolicy: {
+      scaleOutMaxPendingPerTick: 1,
+      scaleInIdleMs: Number(process.env.WORKER_POOL_SCALE_IN_IDLE_MS ?? '5000')
+    },
+    centralUrlForWorkers
+  };
   const service = new CentralService({
     tenant,
     eventTransport: webPubSubTransportAdapter,
     connectionIssuer: webPubSubTransportAdapter,
-    workerPools: [workerPool],
+    workerPools: [workerPool, dotnetWorkerPool],
     hostPoolAdapters: {
-      docker: new DockerHostPoolAdapter({ snapshotRoot: join(tenant.storageRoot, 'snapshots') })
+      docker: new DockerHostPoolAdapter({ snapshotRoot: join(tenant.storageRoot, 'snapshots') }),
+      'docker-dotnet': new DockerHostPoolAdapter({
+        imageName: 'agent-runtime-sidecar-dotnet-poc:latest',
+        dockerfilePath: 'containers/sidecar-dotnet/Dockerfile',
+        workerType: 'dotnet-process-wrapper',
+        snapshotRoot: join(tenant.storageRoot, 'snapshots')
+      })
     }
   });
   await service.start();
@@ -53,6 +72,7 @@ async function main(): Promise<void> {
   const actualPort = await server.listen();
   console.log(`central service listening on http://localhost:${actualPort}`);
   console.log(`worker pool ${workerPool.poolId} will connect sidecars to ${workerPool.centralUrlForWorkers}`);
+  console.log(`worker pool ${dotnetWorkerPool.poolId} will connect sidecars to ${dotnetWorkerPool.centralUrlForWorkers}`);
 }
 
 void main().catch((error) => {

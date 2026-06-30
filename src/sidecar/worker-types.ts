@@ -40,6 +40,18 @@ const WORKER_TYPES: ReadonlyMap<string, WorkerType> = new Map<string, WorkerType
       createWorkspaceAdapter: () => new LocalWorkspaceAdapter(),
       createAgentProcessAdapter: () => new CopilotProcessAdapter()
     }
+  ],
+  [
+    'dotnet-process-wrapper',
+    {
+      workerTypeId: 'dotnet-process-wrapper',
+      sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
+      labels: { agent: 'dotnet' },
+      capacity: 1,
+      createRuntimeTransport: ({ tenantId }) => new WebPubSubClientAdapter({ tenantId }),
+      createWorkspaceAdapter: () => new DockerWorkspaceAdapter(),
+      createAgentProcessAdapter: () => new CopilotProcessAdapter()
+    }
   ]
 ]);
 

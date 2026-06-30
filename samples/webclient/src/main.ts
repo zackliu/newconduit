@@ -1,10 +1,22 @@
-import { AgentRuntimeClient, type AgentTurnEvent, type SdkRuntimeEvent, type SdkSubscription, type SessionHandle, type SessionSummary } from '@agent-runtime-sidecar/sdk';
+import { AgentRuntimeClient, type SdkRuntimeEvent, type SdkSubscription, type SessionEvent, type SessionHandle, type SessionSummary } from '@agent-runtime-sidecar/sdk';
 
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  text: string;
-  turnSeq?: number;
+/**
+ * A turn is the unit of conversation: one optional user message and the assistant's ordered response.
+ * The response is a list of segments so streamed text, tool runs, and progress keep their real order
+ * instead of being flattened into a single bubble. Turns render sorted by turnSeq, so the conversation
+ * order is derived from the runtime's causal turn numbering rather than from event arrival timing.
+ */
+type AssistantSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; toolCallId: string; toolName: string; done: boolean }
+  | { kind: 'progress'; text: string };
+
+interface ConversationTurn {
+  turnSeq: number;
+  userText?: string;
+  segments: AssistantSegment[];
+  failed: boolean;
+  errorText?: string;
 }
 
 interface TraceEvent {
@@ -99,12 +111,13 @@ const state = {
   tenantId: localStorage.getItem('ars.sample.tenantId') ?? 'poc',
   client: undefined as AgentRuntimeClient | undefined,
   clientEventSubscription: undefined as SdkSubscription | undefined,
+  observeAbort: undefined as AbortController | undefined,
   currentSession: undefined as SessionHandle | undefined,
   selectedAgentSpecId: localStorage.getItem('ars.sample.agentSpecId') ?? 'copilot-poc',
   agentSpecDialogOpen: false,
   sessions: [] as SessionSummary[],
   runtimeStatus: { workerPools: [], hostPoolInstances: [], workers: [], agentSpecs: [] } as RuntimeStatus,
-  messages: [] as ChatMessage[],
+  turns: new Map<number, ConversationTurn>(),
   traceEvents: [] as TraceEvent[],
   pending: false,
   connectionState: 'disconnected' as 'disconnected' | 'connecting' | 'connected' | 'error',
@@ -118,6 +131,13 @@ if (!app) {
   throw new Error('missing app root');
 }
 const appRoot = app;
+
+let renderScheduled = false;
+function scheduleRender(): void {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => { renderScheduled = false; render(); });
+}
 
 render();
 
@@ -191,7 +211,7 @@ function render(): void {
 
         <div class="sessionBody" id="chatBody">
           <div class="messageStack" id="messageStack">
-            ${state.messages.map(renderMessage).join('') || (state.currentSession ? renderSessionWorkPanel(activeSession) : renderStartPanel())}
+            ${renderConversation(activeSession)}
           </div>
           <aside class="tracePanel">
             <div class="panelHeader"><span>Runtime Events</span><small>${state.traceEvents.length ? `${state.traceEvents.length} events` : 'waiting'}</small></div>
@@ -221,6 +241,12 @@ function render(): void {
   restoreComposerState(composerSnapshot);
   applyScroll('#messageStack', chatScroll);
   applyScroll('#traceList', traceScroll);
+  const stack = document.querySelector<HTMLDivElement>('#messageStack');
+  if (stack) stack.scrollTop = stack.scrollHeight;
+  const chatBody = document.querySelector<HTMLDivElement>('#chatBody');
+  if (chatBody) chatBody.scrollTop = chatBody.scrollHeight;
+  const trace = document.querySelector<HTMLDivElement>('#traceList');
+  if (trace) trace.scrollTop = trace.scrollHeight;
 }
 
 function wireEvents(): void {
@@ -317,6 +343,8 @@ async function connect(): Promise<void> {
   render();
   try {
     await state.clientEventSubscription?.close();
+    state.observeAbort?.abort();
+    state.observeAbort = undefined;
     await state.client?.close();
     state.client = new AgentRuntimeClient({ centralUrl: state.centralUrl, tenantId: state.tenantId });
     await state.client.connect();
@@ -378,7 +406,7 @@ async function startSession(): Promise<void> {
   state.error = '';
   state.agentSpecDialogOpen = false;
   state.traceEvents = [];
-  state.messages = [];
+  state.turns = new Map<number, ConversationTurn>();
   state.pending = true;
   render();
   try {
@@ -388,6 +416,7 @@ async function startSession(): Promise<void> {
       displayName: `${state.selectedAgentSpecId} session`
     });
     state.currentSession = result.session;
+    attachSessionStream(result.session);
     await refreshSessions();
     await refreshRuntimeStatus();
     state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: result.turn.sequence, label: 'session.created', detail: `turn ${result.turn.sequence}` });
@@ -403,11 +432,117 @@ async function startSession(): Promise<void> {
 async function openSession(sessionId: string): Promise<void> {
   await ensureConnected();
   state.currentSession = await state.client!.sessions.open(sessionId);
-  const history = await state.currentSession.history(0);
-  restoreViewFromHistory(history);
-  appendLifecycleTrace('history.opened', sessionId);
+  attachSessionStream(state.currentSession);
   await refreshSessions();
   render();
+}
+
+function attachSessionStream(session: SessionHandle): void {
+  state.observeAbort?.abort();
+  const controller = new AbortController();
+  state.observeAbort = controller;
+  state.turns = new Map<number, ConversationTurn>();
+  state.traceEvents = [];
+  void (async () => {
+    try {
+      for await (const event of session.observe({ signal: controller.signal })) {
+        const structural = applyTyped(event);
+        if (structural) scheduleRender(); else patchStream();
+      }
+    } catch {
+      // stream ended (aborted on switch); ignore
+    }
+  })();
+}
+
+function applyTyped(event: SessionEvent): boolean {
+  const turnSeq = event.turnSeq;
+  switch (event.type) {
+    case 'user.message':
+      turnFor(turnSeq).userText = event.text;
+      return false;
+    case 'assistant.delta':
+      appendAssistantText(turnFor(turnSeq), event.text);
+      return false;
+    case 'turn.completed': {
+      const turn = turnFor(turnSeq);
+      if (event.result.message && !turn.segments.some((segment) => segment.kind === 'text')) {
+        turn.segments.push({ kind: 'text', text: event.result.message });
+      }
+      state.traceEvents.push({ id: `${turnSeq}:done`, turnSeq, label: 'turn.completed' });
+      return true;
+    }
+    case 'turn.failed': {
+      const turn = turnFor(turnSeq);
+      turn.failed = true;
+      turn.errorText = event.error.message;
+      state.traceEvents.push({ id: `${turnSeq}:failed`, turnSeq, label: 'turn.failed', detail: event.error.message });
+      return true;
+    }
+    case 'agent.progress':
+      turnFor(turnSeq).segments.push({ kind: 'progress', text: event.message });
+      state.traceEvents.push({ id: `p:${turnSeq}:${state.traceEvents.length}`, turnSeq, label: 'progress', detail: event.message });
+      return false;
+    case 'tool.started':
+      turnFor(turnSeq).segments.push({ kind: 'tool', toolCallId: event.toolCallId, toolName: event.toolName, done: false });
+      state.traceEvents.push({ id: `ts:${turnSeq}:${state.traceEvents.length}`, turnSeq, label: `tool.started ${event.toolName}` });
+      return false;
+    case 'tool.completed':
+      markToolDone(turnFor(turnSeq), event.toolCallId);
+      state.traceEvents.push({ id: `tc:${turnSeq}:${state.traceEvents.length}`, turnSeq, label: `tool.completed ${event.toolName}` });
+      return false;
+    case 'agent.internal':
+      state.traceEvents.push({ id: `i:${turnSeq}:${state.traceEvents.length}`, turnSeq, label: event.label, detail: stringifyBrief(event.detail) });
+      return false;
+    case 'status':
+      state.traceEvents.push({ id: `s:${turnSeq}:${state.traceEvents.length}`, turnSeq, label: event.status });
+      return true;
+  }
+  return false;
+}
+
+function turnFor(turnSeq: number): ConversationTurn {
+  let turn = state.turns.get(turnSeq);
+  if (!turn) {
+    turn = { turnSeq, segments: [], failed: false };
+    state.turns.set(turnSeq, turn);
+  }
+  return turn;
+}
+
+function appendAssistantText(turn: ConversationTurn, text: string): void {
+  const last = turn.segments[turn.segments.length - 1];
+  if (last?.kind === 'text') {
+    last.text += text;
+    return;
+  }
+  turn.segments.push({ kind: 'text', text });
+}
+
+function markToolDone(turn: ConversationTurn, toolCallId: string): void {
+  for (const segment of turn.segments) {
+    if (segment.kind === 'tool' && segment.toolCallId === toolCallId) {
+      segment.done = true;
+      return;
+    }
+  }
+}
+
+function patchStream(): void {
+  const stack = document.querySelector<HTMLDivElement>('#messageStack');
+  if (stack) {
+    stack.innerHTML = renderConversation(getActiveSessionSummary());
+    stack.scrollTop = stack.scrollHeight;
+    const chatBody = document.querySelector<HTMLDivElement>('#chatBody');
+    if (chatBody) chatBody.scrollTop = chatBody.scrollHeight;
+  }
+  const trace = document.querySelector<HTMLDivElement>('#traceList');
+  if (trace) {
+    trace.innerHTML = state.traceEvents.map(renderTraceEvent).join('');
+    trace.scrollTop = trace.scrollHeight;
+    const small = document.querySelector('.tracePanel .panelHeader small');
+    if (small) small.textContent = state.traceEvents.length ? `${state.traceEvents.length} events` : 'waiting';
+  }
 }
 
 async function sendMessage(text: string): Promise<void> {
@@ -416,20 +551,9 @@ async function sendMessage(text: string): Promise<void> {
   }
   state.pending = true;
   state.error = '';
-  const userMessage: ChatMessage = { id: crypto.randomUUID(), role: 'user', text };
-  state.messages.push(userMessage);
   render();
   try {
-    const turn = await state.currentSession.send({ message: text });
-    let assistantText = '';
-    for await (const event of turn.events()) {
-      applyTurnEvent(event, (nextText) => {
-        assistantText = nextText;
-      });
-    }
-    if (assistantText) {
-      state.messages.push({ id: crypto.randomUUID(), role: 'assistant', text: assistantText, turnSeq: turn.sequence });
-    }
+    await state.currentSession.send({ message: text });
     await refreshSessions();
     await refreshRuntimeStatus();
   } catch (error) {
@@ -490,8 +614,7 @@ async function refreshActiveSession(): Promise<void> {
   render();
   try {
     const sessionId = state.currentSession.id;
-    const history = await state.currentSession.history(0);
-    restoreViewFromHistory(history);
+    attachSessionStream(state.currentSession);
     await refreshSessions();
     await refreshRuntimeStatus();
     appendLifecycleTrace('history.refreshed', sessionId);
@@ -551,7 +674,7 @@ function clearMissingCurrentSession(): void {
     return;
   }
   state.currentSession = undefined;
-  state.messages = [];
+  state.turns = new Map<number, ConversationTurn>();
   state.traceEvents = [];
 }
 
@@ -568,40 +691,6 @@ function recordClientProjection(event: SdkRuntimeEvent): void {
 
 function appendLifecycleTrace(label: string, sessionId: string, detail?: string): void {
   state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: 0, label, detail: detail || shortId(sessionId) });
-}
-
-function applyTurnEvent(event: AgentTurnEvent, setAssistantText: (text: string) => void): void {
-  switch (event.type) {
-    case 'turn.started':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: 'turn.started' });
-      break;
-    case 'agent.progress':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: 'progress', detail: event.message });
-      break;
-    case 'assistant.delta':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: 'assistant.delta', detail: event.text });
-      break;
-    case 'agent.internal':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: event.label, detail: stringifyBrief(event.detail) });
-      break;
-    case 'tool.started':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: `tool.started ${event.toolName}`, detail: stringifyBrief(event.inputSummary) });
-      break;
-    case 'tool.completed':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: `tool.completed ${event.toolName}`, detail: stringifyBrief(event.outputSummary) });
-      break;
-    case 'approval.requested':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: 'approval.requested', detail: stringifyBrief(event.approval) });
-      break;
-    case 'turn.completed':
-      setAssistantText(event.result.message ?? stringifyBrief(event.result.output));
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: 'turn.completed', detail: event.result.message });
-      break;
-    case 'turn.failed':
-      state.traceEvents.push({ id: crypto.randomUUID(), turnSeq: event.turnSeq, label: 'turn.failed', detail: event.error.message });
-      break;
-  }
-  render();
 }
 
 async function ensureConnected(): Promise<void> {
@@ -847,72 +936,58 @@ function matchesLabels(labels: Record<string, string>, selector: Record<string, 
   return Object.entries(selector).every(([key, value]) => labels[key] === value);
 }
 
-function restoreViewFromHistory(events: SdkRuntimeEvent[]): void {
-  state.messages = [];
-  state.traceEvents = [];
-  const assistantMessagesByTurn = new Map<number, ChatMessage>();
-  for (const event of events) {
-    const payload = toRecord(event.payload);
-    if (event.type === 'session.created') {
-      const input = toRecord(payload.input);
-      if (typeof input.message === 'string') {
-        state.messages.push({ id: event.eventId, role: 'user', text: input.message, turnSeq: event.turnSeq });
-      }
-      state.traceEvents.push({ id: `${event.eventId}:created`, turnSeq: event.turnSeq ?? 0, label: 'session.created' });
-      continue;
-    }
-    if (event.type === 'input.accepted') {
-      const input = toRecord(payload.input);
-      if (typeof input.message === 'string') {
-        state.messages.push({ id: event.eventId, role: 'user', text: input.message, turnSeq: event.turnSeq });
-      }
-      state.traceEvents.push({ id: `${event.eventId}:accepted`, turnSeq: event.turnSeq ?? 0, label: 'input.accepted' });
-      continue;
-    }
-    if (event.type === 'agent.output') {
-      const turnSeq = event.turnSeq ?? 0;
-      if (typeof payload.progress === 'string') {
-        state.traceEvents.push({ id: `${event.eventId}:progress`, turnSeq, label: 'progress', detail: payload.progress });
-      }
-      const internalEvent = toRecord(payload.internalEvent);
-      if (typeof internalEvent.type === 'string') {
-        state.traceEvents.push({ id: `${event.eventId}:internal`, turnSeq, label: internalEvent.type, detail: stringifyBrief(internalEvent.data) });
-      }
-      if (typeof payload.message === 'string') {
-        upsertAssistantMessage(assistantMessagesByTurn, turnSeq, payload.message);
-      }
-    }
-    if (event.type === 'session.pause.requested' || event.type === 'session.paused' || event.type === 'session.resume.requested' || event.type === 'session.resumed' || event.type === 'status.changed') {
-      const status = typeof payload.status === 'string' ? payload.status : undefined;
-      const reason = typeof payload.reason === 'string' ? payload.reason : undefined;
-      state.traceEvents.push({ id: `${event.eventId}:lifecycle`, turnSeq: event.turnSeq ?? 0, label: event.type, detail: [status, reason].filter(Boolean).join(' · ') });
-    }
-  }
-}
-
-function upsertAssistantMessage(assistantMessagesByTurn: Map<number, ChatMessage>, turnSeq: number, text: string): void {
-  const existingMessage = assistantMessagesByTurn.get(turnSeq);
-  if (existingMessage) {
-    existingMessage.text = text;
-    return;
-  }
-  const message: ChatMessage = { id: `assistant:${turnSeq}`, role: 'assistant', text, turnSeq };
-  assistantMessagesByTurn.set(turnSeq, message);
-  state.messages.push(message);
-}
-
 function toRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
 }
 
-function renderMessage(message: ChatMessage): string {
-  return `
-    <article class="message ${message.role}">
-      <div class="avatar">${message.role === 'user' ? 'You' : 'AR'}</div>
+function renderConversation(activeSession: SessionSummary | undefined): string {
+  const body = orderedTurns().map(renderTurn).join('');
+  if (body) {
+    return body;
+  }
+  return state.currentSession ? renderSessionWorkPanel(activeSession) : renderStartPanel();
+}
+
+function orderedTurns(): ConversationTurn[] {
+  return [...state.turns.values()].sort((a, b) => a.turnSeq - b.turnSeq);
+}
+
+function renderTurn(turn: ConversationTurn): string {
+  const userBubble = turn.userText === undefined ? '' : `
+    <article class="message user">
+      <div class="avatar">You</div>
+      <div class="bubble"><p>${escapeHtml(turn.userText)}</p></div>
+    </article>
+  `;
+  const assistantBubble = turn.segments.length === 0 && !turn.failed ? '' : `
+    <article class="message assistant">
+      <div class="avatar">AR</div>
       <div class="bubble">
-        <p>${escapeHtml(message.text)}</p>
+        ${turn.segments.map(renderSegment).join('')}
+        ${turn.failed ? `<p class="turnError">${escapeHtml(turn.errorText ?? 'turn failed')}</p>` : ''}
       </div>
     </article>
+  `;
+  return userBubble + assistantBubble;
+}
+
+function renderSegment(segment: AssistantSegment): string {
+  if (segment.kind === 'text') {
+    return `<p>${escapeHtml(segment.text)}</p>`;
+  }
+  if (segment.kind === 'tool') {
+    return `
+      <div class="activity tool ${segment.done ? 'done' : 'running'}">
+        <span class="activityIcon">${segment.done ? '✓' : '▶'}</span>
+        <span class="activityLabel">${escapeHtml(segment.toolName)}</span>
+      </div>
+    `;
+  }
+  return `
+    <div class="activity progress">
+      <span class="activityIcon">·</span>
+      <span class="activityLabel">${escapeHtml(segment.text)}</span>
+    </div>
   `;
 }
 

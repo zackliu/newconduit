@@ -3,6 +3,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
 
 # Palette
 INK = RGBColor(0x10, 0x14, 0x20)
@@ -56,6 +57,23 @@ def bullet(slide, x, y, w, h, title, body, tcolor=INK):
     r2.font.size = Pt(12.5); r2.font.color.rgb = SLATE; r2.font.name = "Segoe UI"; p2.line_spacing = 1.05
     return tb
 
+
+def box(slide, x, y, w, h, fill, border=None):
+    r = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, h)
+    r.fill.solid(); r.fill.fore_color.rgb = fill
+    if border:
+        r.line.color.rgb = border; r.line.width = Pt(1.25)
+    else:
+        r.line.fill.background()
+    r.shadow.inherit = False
+    return r
+
+
+def arrow(slide, x, y, w, color=ACCENT, h=Inches(0.34)):
+    a = slide.shapes.add_shape(MSO_SHAPE.RIGHT_ARROW, x, y, w, h)
+    a.fill.solid(); a.fill.fore_color.rgb = color; a.line.fill.background(); a.shadow.inherit = False
+    return a
+
 # ---------------- Slide 1: Positioning ----------------
 s = prs.slides.add_slide(BLANK)
 add_bg(s, INK)
@@ -71,88 +89,91 @@ txt(s, Inches(0.9), Inches(4.1), Inches(11.0), Inches(1.0),
 txt(s, Inches(0.9), Inches(6.2), Inches(11.5), Inches(0.8), [
     ("Infrastructure for teams putting agents in production: durable sessions · recovery · real-time control · multi-tenant auth & audit", 13, MUTED, False)])
 
-# ---------------- Slide 2: Who is the customer ----------------
+# ---------------- Slide 2: We are a framework, not an app ----------------
 s = prs.slides.add_slide(BLANK)
 add_bg(s, WHITE)
 band(s, 0, 0, SW, Inches(1.25), LIGHT)
-txt(s, Inches(0.9), Inches(0.3), Inches(11.5), Inches(0.7),
-    [("Our customer builds agentic apps — that's why it's B2B", 28, INK, True)])
-txt(s, Inches(0.9), Inches(1.45), Inches(11.5), Inches(0.7),
-    [("Our user is the developer embedding agents into a product — not the consumer remote-controlling one personal agent. The two pull the runtime in opposite directions.", 14.5, SLATE, False)])
-# LEFT: our market
-band(s, Inches(0.9), Inches(2.35), Inches(5.6), Inches(4.4), RGBColor(0xE8,0xEE,0xFA))
-band(s, Inches(0.9), Inches(2.35), Inches(5.6), Inches(0.12), ACCENT)
-txt(s, Inches(1.2), Inches(2.6), Inches(5.0), Inches(0.5), [("B2B · APPS BUILT ON AGENTS  ← us", 13, ACCENT, True)])
-bullet(s, Inches(1.2), Inches(3.2), Inches(5.0), Inches(0.9), "Called by code", "App servers and workflows invoke the agent — no human babysitting it.")
-bullet(s, Inches(1.2), Inches(4.2), Inches(5.0), Inches(0.9), "Definable environment", "One agent class, homogeneous workers the platform can schedule & recover.")
-bullet(s, Inches(1.2), Inches(5.2), Inches(5.0), Inches(1.2), "Needs a service", "Session continuity, controllability, and recovery in every state — pause, disconnect, worker crash.")
-# RIGHT: not us
-band(s, Inches(6.85), Inches(2.35), Inches(5.6), Inches(4.4), INK)
-txt(s, Inches(7.15), Inches(2.6), Inches(5.0), Inches(0.5), [("2C · REMOTE-CONTROL PERSONAL AGENTS  — not us", 13, ACCENT2, True)])
-for i,(t,b) in enumerate([
-    ("Driven by a person","A user steers one agent live on their own machine."),
-    ("Undefinable environment","Personal, variable, can't be standardized or scheduled."),
-    ("Needs a wire","Just connect and watch — no shared runtime to operate."),
-]):
-    txt(s, Inches(7.15), Inches(3.2)+Inches(1.0)*i, Inches(5.0), Inches(0.95), [(t,16,WHITE,True),(b,12.5,RGBColor(0xB6,0xC0,0xD0),False)])
-
-# ---------------- Slide 3: What they need (design taste) ----------------
-s = prs.slides.add_slide(BLANK)
-add_bg(s, WHITE)
-band(s, 0, 0, SW, Inches(1.25), LIGHT)
-txt(s, Inches(0.9), Inches(0.3), Inches(11.5), Inches(0.7), [("So B2B asks for three things — and we have an opinion on each", 26, INK, True)])
-txt(s, Inches(0.9), Inches(1.45), Inches(11.5), Inches(0.6), [("The same three pillars from the B2B column, made concrete. This is the design taste — what a code-driven, durable agent service must guarantee.", 14.5, SLATE, False)])
-pillars = [
-    ("01", "Continuity", "The session is the identity", [
-        "Lives independently of any worker — id, owner, status, history",
-        "Bring your existing agent via a sidecar, no rewrite",
-    ], ACCENT),
-    ("02", "Controllability", "Code stays in command", [
-        "Create, stream, approve, cancel, steer — all through an API",
-        "Multi-tenant auth & audit on every path",
-    ], ACCENT2),
-    ("03", "Recoverability", "Survive any state", [
-        "Snapshot workspace + event log, not just transcript",
-        "Resume on fresh compute after pause / disconnect / crash",
-    ], ACCENT),
+txt(s, Inches(0.9), Inches(0.3), Inches(11.5), Inches(0.7), [("Infrastructure, not an end-user application", 27, INK, True)])
+txt(s, Inches(0.9), Inches(1.45), Inches(11.5), Inches(0.7), [("No end user opens our product. We are the runtime teams build their agentic applications on — solving the common problems once, instead of in every project.", 14.5, SLATE, False)])
+# small aside: not the consumer remote-control product
+band(s, Inches(0.9), Inches(2.35), Inches(11.55), Inches(0.7), INK)
+txt(s, Inches(1.15), Inches(2.35), Inches(11.0), Inches(0.7), [("Not a consumer tool for operating a single agent — a framework for the team that builds the application.", 13.5, WHITE, False)], anchor=MSO_ANCHOR.MIDDLE)
+# the problems you hit
+txt(s, Inches(0.9), Inches(3.35), Inches(11.5), Inches(0.4), [("PROBLEMS EVERY AGENTIC-APPLICATION TEAM FACES", 13, ACCENT, True)])
+probs = [
+    ("Session continuity", "A long-running agent is one continuous job, not a stateless request."),
+    ("Reconnect", "Clients disconnect and return to the same session, on any machine."),
+    ("Failure recovery", "When compute fails, the session is recovered rather than lost."),
+    ("Multi-tenant & audit", "Tenant isolation and a full record of access on every path."),
 ]
-cw, gx = Inches(3.7), Inches(0.25); x0, y0 = Inches(0.9), Inches(2.35); ch = Inches(4.4)
-for i,(num,t,sub,items,col) in enumerate(pillars):
-    cx = x0 + (cw+gx)*i
-    band(s, cx, y0, cw, ch, LIGHT)
-    band(s, cx, y0, cw, Inches(0.12), col)
-    txt(s, cx+Inches(0.3), y0+Inches(0.3), cw-Inches(0.6), Inches(0.6), [(num, 28, col, True)])
-    txt(s, cx+Inches(0.3), y0+Inches(0.95), cw-Inches(0.6), Inches(0.6), [(t, 20, INK, True)])
-    txt(s, cx+Inches(0.3), y0+Inches(1.5), cw-Inches(0.6), Inches(0.5), [(sub, 13, MUTED, True)])
-    for j,it in enumerate(items):
-        txt(s, cx+Inches(0.3), y0+Inches(2.1)+Inches(1.0)*j, cw-Inches(0.6), Inches(1.0), [("— "+it, 13, SLATE, False)], sp=1.05)
+cw, gx = Inches(2.78), Inches(0.2); x0, y0 = Inches(0.9), Inches(3.85); ch = Inches(2.9)
+for i,(t,b) in enumerate(probs):
+    cx = x0+(cw+gx)*i
+    box(s, cx, y0, cw, ch, LIGHT); band(s, cx, y0, cw, Inches(0.1), ACCENT if i%2==0 else ACCENT2)
+    bullet(s, cx+Inches(0.28), y0+Inches(0.35), cw-Inches(0.5), ch-Inches(0.5), t, b)
 
-# ---------------- Slide 4: What the framework actually is ----------------
+# ---------------- Slide 3: Scenario — building an ops agent system ----------------
 s = prs.slides.add_slide(BLANK)
 add_bg(s, WHITE)
 band(s, 0, 0, SW, Inches(1.25), LIGHT)
-txt(s, Inches(0.9), Inches(0.32), Inches(11.5), Inches(0.7), [("What the framework actually is", 30, INK, True)])
-txt(s, Inches(0.9), Inches(1.45), Inches(11.5), Inches(0.6), [("A central session control plane + a sidecar per worker. Four components map 1:1 to what customers need.", 15, SLATE, False)])
-rows = [
-    ("Central Session Service", "Session catalog · routing · connections · auth · audit"),
-    ("Agent Runtime Sidecar", "Wraps the existing agent process; forwards events; snapshots"),
-    ("Persistent Storage", "Sessions, event log, workspace snapshots, artifacts, audit"),
-    ("SDKs & APIs", "Stable surface for apps, clients, and workers"),
+txt(s, Inches(0.9), Inches(0.3), Inches(11.5), Inches(0.7), [("Scenario: building an operations / incident agent system", 25, INK, True)])
+txt(s, Inches(0.9), Inches(1.45), Inches(11.5), Inches(0.6), [("Each step demands a capability. Different tasks require different isolated environments \u2014 each defined as an AgentSpec.", 14.5, SLATE, False)])
+# flow stages
+sy, bh, bw = Inches(2.25), Inches(2.35), Inches(2.78)
+xs = [Inches(0.9), Inches(4.0), Inches(7.1), Inches(10.2)]
+stages = [
+    ("Incident raised", "An alert opens a case; the application starts a session for the incident.", ACCENT, "trigger"),
+    ("Troubleshooting agent", "Runs diagnostic skills and tools / MCP in an isolated environment.", ACCENT2, "AgentSpec A"),
+    ("Code-fix agent", "Clones the repository to build and test \u2014 a separate environment, a separate AgentSpec.", ACCENT, "AgentSpec B"),
+    ("Verify & resolve", "Resumes later, continues the prior work, and returns a result.", ACCENT2, "continue"),
 ]
-y = Inches(2.4)
-for i,(t,b) in enumerate(rows):
-    band(s, Inches(0.9), y, Inches(7.2), Inches(0.95), LIGHT if i%2 else RGBColor(0xE8,0xEE,0xFA))
-    txt(s, Inches(1.15), y+Inches(0.12), Inches(3.0), Inches(0.7), [(t,15,INK,True)], anchor=MSO_ANCHOR.MIDDLE)
-    txt(s, Inches(4.0), y+Inches(0.12), Inches(4.0), Inches(0.7), [(b,11.5,SLATE,False)], anchor=MSO_ANCHOR.MIDDLE)
-    y += Inches(1.07)
-band(s, Inches(8.5), Inches(2.4), Inches(3.95), Inches(4.3), INK)
-txt(s, Inches(8.8), Inches(2.65), Inches(3.4), Inches(0.5), [("PROVEN IN THE POC", 12, ACCENT2, True)])
-txt(s, Inches(8.8), Inches(3.2), Inches(3.4), Inches(3.2), [
-    ("Chat with an agent", 15, WHITE, True),
-    ("Pause — its worker is recycled", 13, RGBColor(0xC6,0xD0,0xE0), False),
-    ("Resume — a brand-new worker", 15, WHITE, True),
-    ("restores workspace + memory; the conversation continues.", 13, RGBColor(0xC6,0xD0,0xE0), False),
-], sp=1.05, space_after=10)
+for i,(t,b,col,tag) in enumerate(stages):
+    box(s, xs[i], sy, bw, bh, LIGHT); band(s, xs[i], sy, bw, Inches(0.1), col)
+    txt(s, xs[i]+Inches(0.25), sy+Inches(0.3), bw-Inches(0.45), Inches(0.4), [(tag.upper(), 11, col, True)])
+    txt(s, xs[i]+Inches(0.25), sy+Inches(0.7), bw-Inches(0.45), Inches(0.6), [(t, 16, INK, True)])
+    txt(s, xs[i]+Inches(0.25), sy+Inches(1.3), bw-Inches(0.45), Inches(1.0), [(b, 12, SLATE, False)], sp=1.05)
+    if i < 3:
+        arrow(s, xs[i]+bw+Inches(0.02), sy+bh/2-Inches(0.17), Inches(0.28), MUTED)
+# runtime band underneath
+ry = Inches(5.1)
+band(s, Inches(0.9), ry, Inches(12.08), Inches(1.55), INK)
+txt(s, Inches(1.2), ry+Inches(0.22), Inches(11.6), Inches(0.45), [("ONE SESSION RUNTIME CARRIES THE WORK END TO END", 12, ACCENT2, True)])
+txt(s, Inches(1.2), ry+Inches(0.65), Inches(11.6), Inches(0.8), [
+    ("Durable session per incident  \u00b7  isolation by AgentSpec  \u00b7  pause while waiting  \u00b7  reconnect  \u00b7  recover and continue on a new worker", 14, WHITE, False)])
+
+# ---------------- Slide 4: Architecture (layered) ----------------
+s = prs.slides.add_slide(BLANK)
+add_bg(s, WHITE)
+band(s, 0, 0, SW, Inches(1.25), LIGHT)
+txt(s, Inches(0.9), Inches(0.3), Inches(11.5), Inches(0.7), [("Architecture: one source of truth, pluggable layers", 25, INK, True)])
+txt(s, Inches(0.9), Inches(1.4), Inches(11.5), Inches(0.5), [("Central owns the session. Controllers translate protocols; managers own workflows; adapters bind technology. Each adapter is replaceable.", 13.5, SLATE, False)])
+def vline(x, y1, y2):
+    c = s.shapes.add_connector(2, x, y1, x, y2); c.line.color.rgb = MUTED; c.line.width = Pt(1.5)
+# Consumers
+for i,(t,sub) in enumerate([("Clients","browser · desktop · CLI"),("Application backends","create & manage sessions"),("Workers","sidecar + agent process")]):
+    cx = Inches(0.9)+Inches(4.18)*i
+    box(s, cx, Inches(1.95), Inches(3.95), Inches(0.78), RGBColor(0xE8,0xEE,0xFA))
+    txt(s, cx, Inches(2.0), Inches(3.95), Inches(0.7), [(t,13.5,INK,True),(sub,10.5,SLATE,False)], align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE, space_after=1)
+# SDK boundary
+band(s, Inches(0.9), Inches(2.95), Inches(11.55), Inches(0.45), ACCENT)
+txt(s, Inches(0.9), Inches(2.95), Inches(11.55), Inches(0.45), [("SDK / API  ·  HTTPS / WebSocket",12,WHITE,True)], align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+vline(Inches(6.67), Inches(2.73), Inches(2.95))
+# Central control plane
+box(s, Inches(0.9), Inches(3.6), Inches(8.05), Inches(2.05), INK)
+txt(s, Inches(1.15), Inches(3.7), Inches(7.6), Inches(0.4), [("CENTRAL SESSION SERVICE — control plane",12.5,ACCENT2,True)])
+for j,c in enumerate(["Client ingress","Worker ingress","Agent events"]):
+    bx=Inches(1.15)+Inches(2.5)*j; box(s,bx,Inches(4.15),Inches(2.35),Inches(0.5),RGBColor(0x22,0x2B,0x3D)); txt(s,bx,Inches(4.15),Inches(2.35),Inches(0.5),[(c,11,WHITE,True)],align=PP_ALIGN.CENTER,anchor=MSO_ANCHOR.MIDDLE)
+for j,c in enumerate(["Session","Registry","Routing","Leases","Snapshot","Audit"]):
+    bx=Inches(1.15)+Inches(1.25)*j; box(s,bx,Inches(4.8),Inches(1.15),Inches(0.7),RGBColor(0x22,0x2B,0x3D)); txt(s,bx,Inches(4.8),Inches(1.15),Inches(0.7),[(c,10.5,RGBColor(0xC6,0xD0,0xE0),True)],align=PP_ALIGN.CENTER,anchor=MSO_ANCHOR.MIDDLE)
+# Storage
+box(s, Inches(9.15), Inches(3.6), Inches(3.3), Inches(2.05), RGBColor(0xE8,0xEE,0xFA), border=ACCENT)
+txt(s, Inches(9.35), Inches(3.8), Inches(2.95), Inches(1.7), [("Persistent storage",13,INK,True),("session catalog",11,SLATE,False),("event log · snapshots",11,SLATE,False),("artifacts · audit",11,SLATE,False)], anchor=MSO_ANCHOR.MIDDLE, space_after=4)
+# Pluggable adapters
+txt(s, Inches(0.9), Inches(5.85), Inches(11.5), Inches(0.35), [("PLUGGABLE ADAPTERS",12,ACCENT,True)])
+for i,(t,v) in enumerate([("Transport","Web PubSub"),("Hosting","Docker"),("Storage","local files"),("Agent","Copilot SDK")]):
+    cx=Inches(0.9)+Inches(2.95)*i; box(s,cx,Inches(6.25),Inches(2.8),Inches(0.85),LIGHT,border=ACCENT2)
+    txt(s,cx,Inches(6.25),Inches(2.8),Inches(0.85),[(t,12.5,INK,True),(v,11,MUTED,False)],align=PP_ALIGN.CENTER,anchor=MSO_ANCHOR.MIDDLE,space_after=1)
+
 
 # ---------------- Slide 5: Why it matters ----------------
 s = prs.slides.add_slide(BLANK)
@@ -160,10 +181,10 @@ add_bg(s, INK)
 band(s, 0, Inches(1.4), SW, Inches(0.1), ACCENT)
 txt(s, Inches(0.9), Inches(0.55), Inches(11.5), Inches(0.8), [("Why this is worth building", 34, WHITE, True)])
 points = [
-    ("Every team rebuilds this", "Session router, worker registry, event log, snapshots, auth — built once, badly, in every project."),
-    ("We sell the missing runtime", "Not models, not a framework — the durable session layer between them."),
-    ("Differentiated & defensible", "Operational runtime, not agent intelligence; sidecar adopts existing agents."),
-    ("Land via self-host, expand to managed", "Same model from local POC to cluster to cloud service."),
+    ("Every team rebuilds this layer", "Session routing, worker registry, event log, snapshots, and auth are reimplemented in every project."),
+    ("We provide the missing runtime", "Not the model and not the framework \u2014 the durable session layer between them."),
+    ("Differentiated and defensible", "The value is in the operational runtime, not the model; existing agents are adopted through a sidecar."),
+    ("Self-host first, managed later", "One model from local proof of concept to production cluster to managed service."),
 ]
 y = Inches(1.9)
 for t,b in points:

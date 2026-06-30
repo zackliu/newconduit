@@ -14,6 +14,8 @@ import type {
   SessionInput,
   SessionSummary,
   SessionStatus,
+  SessionEvent,
+  SessionObserveOptions,
   StartSessionInput,
   TurnEventOptions,
   WaitForResultOptions
@@ -404,6 +406,76 @@ export class SessionHandle {
     return this.runtime.readSessionEvents({ sessionId: this.id, afterSequence });
   }
 
+  /**
+   * The single way to render a session in a UI: a typed event stream covering every turn. Live events
+   * are delivered immediately (assistant.delta to append, turn.completed for the final message); prior
+   * history is replayed first unless includeHistory is false. Works whether this client drives the
+   * session or only observes one driven elsewhere.
+   *
+   * Ordering is exact: the live subscription is opened before history is read so no event is missed,
+   * but live events that arrive during the history round-trip are held in a backlog and only released
+   * after the whole history prefix has been emitted. History events carry sequence <= the read cursor
+   * and backlogged live events carry sequence > it, so emitting history then the backlog reproduces the
+   * session's causal order without any per-event sorting. eventId de-duplication drops the overlap.
+   */
+  async *observe(options?: SessionObserveOptions): AsyncIterable<SessionEvent> {
+    const ready: SessionEvent[] = [];
+    const liveBacklog: SdkRuntimeEvent[] = [];
+    const seen = new Set<string>();
+    let notify: (() => void) | undefined;
+    let closed = false;
+    let historyFlushed = options?.includeHistory === false;
+    const emit = (event: SdkRuntimeEvent): void => {
+      if (seen.has(event.eventId)) {
+        return;
+      }
+      seen.add(event.eventId);
+      const mapped = mapSessionEvent(event);
+      if (mapped) {
+        ready.push(mapped);
+        notify?.();
+      }
+    };
+    const onLive = (event: SdkRuntimeEvent): void => {
+      if (historyFlushed) {
+        emit(event);
+      } else {
+        liveBacklog.push(event);
+      }
+    };
+    const onAbort = (): void => { closed = true; notify?.(); };
+    options?.signal?.addEventListener('abort', onAbort, { once: true });
+    const subscription = await this.runtime.subscribeSessionEvents({ sessionId: this.id }, onLive);
+    if (options?.includeHistory !== false) {
+      try {
+        for (const event of await this.runtime.readSessionEvents({ sessionId: this.id, afterSequence: 0 })) {
+          emit(event);
+        }
+      } catch {
+        // history replay is best-effort; live events still stream
+      }
+      historyFlushed = true;
+      for (const event of liveBacklog) {
+        emit(event);
+      }
+      liveBacklog.length = 0;
+    }
+    try {
+      while (!closed) {
+        const event = ready.shift();
+        if (event) {
+          yield event;
+          continue;
+        }
+        await new Promise<void>((resolve) => { notify = resolve; });
+        notify = undefined;
+      }
+    } finally {
+      options?.signal?.removeEventListener('abort', onAbort);
+      await subscription.close();
+    }
+  }
+
   async pause(): Promise<void> {
     this.currentStatus = 'pausing';
     await this.runtime.publishTenantEvent({
@@ -519,85 +591,14 @@ export class AgentTurn {
   }
 
   private toTurnEvent(event: SdkRuntimeEvent): AgentTurnEvent | undefined {
-    if (event.sessionId !== this.sessionId) {
+    const mapped = mapSessionEvent(event);
+    if (!mapped || mapped.turnSeq !== this.sequence) {
       return undefined;
     }
-    const payload = this.toRecord(event.payload);
-    const payloadTurnSeq = typeof payload.turnSeq === 'number' ? payload.turnSeq : undefined;
-    if (event.turnSeq !== this.sequence && payloadTurnSeq !== this.sequence) {
+    if (mapped.type === 'user.message' || mapped.type === 'status') {
       return undefined;
     }
-    if (event.type === 'turn.completed') {
-      const resultPayload = this.toRecord(payload.result);
-      const result: AgentTurnResult = {
-        sessionId: this.sessionId,
-        turnSeq: this.sequence,
-        message: typeof resultPayload.message === 'string' ? resultPayload.message : undefined,
-        output: 'output' in resultPayload ? resultPayload.output : undefined
-      };
-      return { type: 'turn.completed', sessionId: this.sessionId, turnSeq: this.sequence, result };
-    }
-    if (event.type === 'turn.failed') {
-      return { type: 'turn.failed', sessionId: this.sessionId, turnSeq: this.sequence, error: this.toTurnError(payload.error) };
-    }
-    if (event.type !== 'agent.output') {
-      return undefined;
-    }
-    if (typeof payload.delta === 'string') {
-      return { type: 'assistant.delta', sessionId: this.sessionId, turnSeq: this.sequence, text: payload.delta };
-    }
-    if (typeof payload.progress === 'string') {
-      return { type: 'agent.progress', sessionId: this.sessionId, turnSeq: this.sequence, message: payload.progress };
-    }
-    const toolStarted = this.toRecord(payload.toolStarted);
-    if (typeof toolStarted.toolCallId === 'string' && typeof toolStarted.toolName === 'string') {
-      return {
-        type: 'tool.started',
-        sessionId: this.sessionId,
-        turnSeq: this.sequence,
-        toolCallId: toolStarted.toolCallId,
-        toolName: toolStarted.toolName,
-        inputSummary: toolStarted.inputSummary
-      };
-    }
-    const toolCompleted = this.toRecord(payload.toolCompleted);
-    if (typeof toolCompleted.toolCallId === 'string' && typeof toolCompleted.toolName === 'string') {
-      return {
-        type: 'tool.completed',
-        sessionId: this.sessionId,
-        turnSeq: this.sequence,
-        toolCallId: toolCompleted.toolCallId,
-        toolName: toolCompleted.toolName,
-        outputSummary: toolCompleted.outputSummary
-      };
-    }
-    if (payload.approvalRequested) {
-      return { type: 'approval.requested', sessionId: this.sessionId, turnSeq: this.sequence, approval: payload.approvalRequested };
-    }
-    if (payload.error) {
-      return { type: 'agent.internal', sessionId: this.sessionId, turnSeq: this.sequence, label: 'agent.error', detail: payload.error };
-    }
-    const internalEvent = this.toRecord(payload.internalEvent);
-    if (typeof internalEvent.type === 'string') {
-      return { type: 'agent.internal', sessionId: this.sessionId, turnSeq: this.sequence, label: internalEvent.type, detail: internalEvent.data };
-    }
-    return undefined;
-  }
-
-  private toRecord(value: unknown): Record<string, unknown> {
-    if (typeof value === 'object' && value !== null) {
-      return value as Record<string, unknown>;
-    }
-    return {};
-  }
-
-  private toTurnError(value: unknown): AgentTurnError {
-    const error = this.toRecord(value);
-    return {
-      message: typeof error.message === 'string' ? error.message : 'agent turn failed',
-      code: typeof error.code === 'string' ? error.code : undefined,
-      details: error.details
-    };
+    return mapped;
   }
 
   private throwIfAborted(signal: AbortSignal | undefined): void {
@@ -606,6 +607,75 @@ export class AgentTurn {
     }
   }
 }
+
+function mapRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
+}
+
+function mapTurnError(value: unknown): AgentTurnError {
+  const error = mapRecord(value);
+  return {
+    message: typeof error.message === 'string' ? error.message : 'agent turn failed',
+    code: typeof error.code === 'string' ? error.code : undefined,
+    details: error.details
+  };
+}
+
+/**
+ * The one mapper from raw runtime events to the typed SessionEvent model. Both session.observe() and
+ * AgentTurn.events() go through here, so there is exactly one place that knows the payload shapes.
+ */
+export function mapSessionEvent(event: SdkRuntimeEvent): SessionEvent | undefined {
+  const sessionId = event.sessionId;
+  if (!sessionId) {
+    return undefined;
+  }
+  const payload = mapRecord(event.payload);
+  const turnSeq = event.turnSeq ?? (typeof payload.turnSeq === 'number' ? payload.turnSeq : 0);
+  if (event.type === 'session.created' || event.type === 'input.accepted') {
+    const input = mapRecord(payload.input);
+    return typeof input.message === 'string' ? { type: 'user.message', sessionId, turnSeq, text: input.message } : undefined;
+  }
+  if (event.type === 'status.changed' || event.type === 'session.status.updated') {
+    return typeof payload.status === 'string' ? { type: 'status', sessionId, turnSeq, status: payload.status as SessionStatus } : undefined;
+  }
+  if (event.type === 'turn.completed') {
+    const result = mapRecord(payload.result);
+    return { type: 'turn.completed', sessionId, turnSeq, result: { sessionId, turnSeq, message: typeof result.message === 'string' ? result.message : undefined, output: 'output' in result ? result.output : undefined } };
+  }
+  if (event.type === 'turn.failed') {
+    return { type: 'turn.failed', sessionId, turnSeq, error: mapTurnError(payload.error) };
+  }
+  if (event.type !== 'agent.output') {
+    return undefined;
+  }
+  if (typeof payload.delta === 'string') {
+    return { type: 'assistant.delta', sessionId, turnSeq, text: payload.delta };
+  }
+  if (typeof payload.progress === 'string') {
+    return { type: 'agent.progress', sessionId, turnSeq, message: payload.progress };
+  }
+  const toolStarted = mapRecord(payload.toolStarted);
+  if (typeof toolStarted.toolCallId === 'string' && typeof toolStarted.toolName === 'string') {
+    return { type: 'tool.started', sessionId, turnSeq, toolCallId: toolStarted.toolCallId, toolName: toolStarted.toolName, inputSummary: toolStarted.inputSummary };
+  }
+  const toolCompleted = mapRecord(payload.toolCompleted);
+  if (typeof toolCompleted.toolCallId === 'string' && typeof toolCompleted.toolName === 'string') {
+    return { type: 'tool.completed', sessionId, turnSeq, toolCallId: toolCompleted.toolCallId, toolName: toolCompleted.toolName, outputSummary: toolCompleted.outputSummary };
+  }
+  if (payload.approvalRequested) {
+    return { type: 'approval.requested', sessionId, turnSeq, approval: payload.approvalRequested };
+  }
+  if (payload.error) {
+    return { type: 'agent.internal', sessionId, turnSeq, label: 'agent.error', detail: payload.error };
+  }
+  const internalEvent = mapRecord(payload.internalEvent);
+  if (typeof internalEvent.type === 'string') {
+    return { type: 'agent.internal', sessionId, turnSeq, label: internalEvent.type, detail: internalEvent.data };
+  }
+  return undefined;
+}
+
 
 async function stopWebPubSubClient(client: WebPubSubClient | undefined): Promise<void> {
   client?.stop();

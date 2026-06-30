@@ -10,6 +10,7 @@ export {
 	InMemoryRuntimeTransportAdapter,
 	LocalFileStorage,
 	POC_AGENT_SPEC,
+	POC_DOTNET_AGENT_SPEC,
 	registerPocCentralRoutes,
 	SessionAssignmentManager,
 	SessionLifecycleManager,

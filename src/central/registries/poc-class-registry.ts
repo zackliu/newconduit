@@ -49,3 +49,28 @@ export const POC_LOCAL_AGENT_SPEC: AgentSpec = {
   idlePauseTimeoutMs: 120_000,
   version: 'poc-v1'
 };
+
+export const POC_DOTNET_AGENT_SPEC: AgentSpec = {
+  agentSpecId: 'dotnet-poc',
+  labels: {
+    agent: 'dotnet',
+    tier: 'poc'
+  },
+  launch: {
+    command: 'copilot',
+    args: []
+  },
+  sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
+  workspaceClass: 'docker-workspace-volume-snapshot',
+  toolProfile: 'copilot-poc-tools',
+  workerSelector: {
+    matchLabels: {
+      agent: 'dotnet'
+    }
+  },
+  pausePolicy: 'turn-boundary-durable-pause',
+  recoveryPolicy: 'restart-with-context',
+  agentStatePolicy: 'copilot-session-volume-snapshot',
+  idlePauseTimeoutMs: 300_000,
+  version: 'poc-v1'
+};

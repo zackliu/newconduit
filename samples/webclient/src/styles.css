@@ -628,7 +628,6 @@ textarea:focus {
   min-height: 0;
   overflow: auto;
   padding: 16px 10px 22px;
-  scroll-behavior: smooth;
 }
 
 .startPanel {
@@ -858,7 +857,50 @@ select {
 }
 
 .bubble p {
+  margin: 0;
   white-space: pre-wrap;
+}
+
+.bubble > * + * {
+  margin-top: 6px;
+}
+
+.activity {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: #828a80;
+}
+
+.activity .activityIcon {
+  flex: none;
+  width: 12px;
+  text-align: center;
+}
+
+.activity .activityLabel {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.activity.tool.running .activityIcon {
+  color: #7d8a76;
+}
+
+.activity.tool.done .activityIcon {
+  color: #4f9d69;
+}
+
+.activity.progress {
+  font-style: italic;
+  color: #9a9f9a;
+}
+
+.turnError {
+  color: #b23b3b;
 }
 
 .tracePanel {

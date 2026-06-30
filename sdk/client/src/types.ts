@@ -66,6 +66,22 @@ export type AgentTurnEvent =
   | { type: 'turn.completed'; sessionId: string; turnSeq: number; result: AgentTurnResult }
   | { type: 'turn.failed'; sessionId: string; turnSeq: number; error: AgentTurnError };
 
+/**
+ * SessionEvent is the single typed model for everything that happens in a session, across all turns.
+ * It is the only stream a UI needs: subscribe once with session.observe() and render. assistant.delta
+ * carries incremental text to append; turn.completed carries the final message for that turn.
+ */
+export type SessionEvent =
+  | { type: 'user.message'; sessionId: string; turnSeq: number; text: string }
+  | { type: 'status'; sessionId: string; turnSeq: number; status: SessionStatus }
+  | AgentTurnEvent;
+
+export interface SessionObserveOptions {
+  signal?: AbortSignal;
+  includeHistory?: boolean;
+}
+
+
 export interface AgentTurnResult {
   sessionId: string;
   turnSeq: number;
