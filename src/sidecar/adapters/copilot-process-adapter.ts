@@ -67,6 +67,7 @@ interface ActiveGitHubCopilotSession {
 }
 
 export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
+  static readonly classId = 'copilot-process';
   private readonly sessions = new Map<string, ActiveGitHubCopilotSession>();
 
   constructor(

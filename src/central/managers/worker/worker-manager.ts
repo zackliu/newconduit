@@ -1,4 +1,4 @@
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type Clock, type RuntimeEvent, type RuntimeEventTransport, type RuntimeStorage, type SessionRecord, type TurnFailedPayload, type WorkerCondition, type WorkerHeartbeatPayload, type WorkerIdentityPayload, type WorkerRecord, type WorkerRegisterPayload } from '../../../shared';
+import type { Clock, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionRecord, TurnFailedPayload, WorkerCondition, WorkerHeartbeatPayload, WorkerIdentityPayload, WorkerRecord, WorkerRegisterPayload } from '../../../shared';
 
 const DEFAULT_KEEPALIVE_TTL_MS = 30_000;
 

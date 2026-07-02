@@ -1,9 +1,17 @@
 import { join } from 'node:path';
 import { CentralService } from './central-service';
 import { DockerHostPoolAdapter, WebPubSubTransportAdapter } from './adapters';
+import { FileConfigStore, type HostPoolControllerConfig } from './config/file-config-store';
 import { CentralHttpServer } from './http/central-http-server';
 import { registerPocCentralRoutes } from './http/poc-routes';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type TenantContext, type WorkerPoolRecord } from '../shared';
+import type { HostPoolAdapter } from './managers';
+import type { TenantContext } from '../shared';
+
+// Generic registry of host-pool adapter implementations keyed by each adapter's self-declared classId. Config
+// names an adapterKind; this map resolves it without enumerating any specific controller-class literal.
+const HOST_POOL_ADAPTER_FACTORIES: Record<string, (options: { imageName: string; dockerfilePath: string; workerType: string; snapshotRoot: string }) => HostPoolAdapter> = {
+  [DockerHostPoolAdapter.classId]: (options) => new DockerHostPoolAdapter(options)
+};
 
 async function main(): Promise<void> {
   const webPubSubEndpoint = process.env.WEBPUBSUB_ENDPOINT;
@@ -24,46 +32,15 @@ async function main(): Promise<void> {
   });
   const centralPort = Number(process.env.CENTRAL_PORT ?? '3000');
   const centralUrlForWorkers = process.env.CENTRAL_URL_FOR_WORKERS ?? `http://host.docker.internal:${centralPort}`;
-  const workerPool: WorkerPoolRecord = {
-    poolId: process.env.WORKER_POOL_ID ?? 'poc-docker-copilot',
-    tenantId: tenant.tenantId,
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
-    capacityPerWorker: 1,
-    hostPoolControllerClass: 'docker',
-    scalePolicy: {
-      scaleOutMaxPendingPerTick: 1,
-      scaleInIdleMs: Number(process.env.WORKER_POOL_SCALE_IN_IDLE_MS ?? '5000')
-    },
-    centralUrlForWorkers
-  };
-  const dotnetWorkerPool: WorkerPoolRecord = {
-    poolId: process.env.DOTNET_WORKER_POOL_ID ?? 'poc-docker-dotnet',
-    tenantId: tenant.tenantId,
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'dotnet' },
-    capacityPerWorker: 1,
-    hostPoolControllerClass: 'docker-dotnet',
-    scalePolicy: {
-      scaleOutMaxPendingPerTick: 1,
-      scaleInIdleMs: Number(process.env.WORKER_POOL_SCALE_IN_IDLE_MS ?? '5000')
-    },
-    centralUrlForWorkers
-  };
+  const configStore = new FileConfigStore();
+  const workerPools = configStore.loadWorkerPools({ tenantId: tenant.tenantId, centralUrlForWorkers });
+  const hostPoolAdapters = buildHostPoolAdapters(configStore.loadHostPoolControllers(), join(tenant.storageRoot, 'snapshots'));
   const service = new CentralService({
     tenant,
     eventTransport: webPubSubTransportAdapter,
     connectionIssuer: webPubSubTransportAdapter,
-    workerPools: [workerPool, dotnetWorkerPool],
-    hostPoolAdapters: {
-      docker: new DockerHostPoolAdapter({ snapshotRoot: join(tenant.storageRoot, 'snapshots') }),
-      'docker-dotnet': new DockerHostPoolAdapter({
-        imageName: 'agent-runtime-sidecar-dotnet-poc:latest',
-        dockerfilePath: 'containers/sidecar-dotnet/Dockerfile',
-        workerType: 'dotnet-process-wrapper',
-        snapshotRoot: join(tenant.storageRoot, 'snapshots')
-      })
-    }
+    workerPools,
+    hostPoolAdapters
   });
   await service.start();
 
@@ -71,8 +48,26 @@ async function main(): Promise<void> {
   registerPocCentralRoutes(server, service);
   const actualPort = await server.listen();
   console.log(`central service listening on http://localhost:${actualPort}`);
-  console.log(`worker pool ${workerPool.poolId} will connect sidecars to ${workerPool.centralUrlForWorkers}`);
-  console.log(`worker pool ${dotnetWorkerPool.poolId} will connect sidecars to ${dotnetWorkerPool.centralUrlForWorkers}`);
+  for (const pool of workerPools) {
+    console.log(`worker pool ${pool.poolId} will connect sidecars to ${pool.centralUrlForWorkers}`);
+  }
+}
+
+function buildHostPoolAdapters(controllers: HostPoolControllerConfig[], snapshotRoot: string): Record<string, HostPoolAdapter> {
+  const adapters: Record<string, HostPoolAdapter> = {};
+  for (const controller of controllers) {
+    const factory = HOST_POOL_ADAPTER_FACTORIES[controller.adapterKind];
+    if (!factory) {
+      throw new Error(`unknown host pool adapterKind: ${controller.adapterKind}`);
+    }
+    adapters[controller.id] = factory({
+      imageName: controller.imageName,
+      dockerfilePath: controller.dockerfilePath,
+      workerType: controller.workerType,
+      snapshotRoot
+    });
+  }
+  return adapters;
 }
 
 void main().catch((error) => {

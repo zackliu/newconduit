@@ -16,6 +16,7 @@ RUN apt-get update \
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY src ./src
+COPY config ./config
 COPY sdk/client/package.json ./sdk/client/package.json
 COPY samples/webclient/package.json ./samples/webclient/package.json
 COPY samples/issue-fixer/package.json ./samples/issue-fixer/package.json

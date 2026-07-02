@@ -1,0 +1,7 @@
+{
+  "id": "docker-dotnet",
+  "adapterKind": "docker",
+  "imageName": "agent-runtime-sidecar-dotnet-poc:latest",
+  "dockerfilePath": "containers/sidecar-dotnet/Dockerfile",
+  "workerType": "dotnet-process-wrapper"
+}

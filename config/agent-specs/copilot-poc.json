@@ -1,0 +1,24 @@
+{
+  "agentSpecId": "copilot-poc",
+  "labels": {
+    "agent": "copilot",
+    "tier": "poc"
+  },
+  "launch": {
+    "command": "copilot",
+    "args": []
+  },
+  "sidecarClass": "copilot-process-wrapper",
+  "workspaceClass": "docker-workspace-volume-snapshot",
+  "toolProfile": "copilot-poc-tools",
+  "workerSelector": {
+    "matchLabels": {
+      "agent": "copilot"
+    }
+  },
+  "pausePolicy": "turn-boundary-durable-pause",
+  "recoveryPolicy": "restart-with-context",
+  "agentStatePolicy": "copilot-session-volume-snapshot",
+  "idlePauseTimeoutMs": 120000,
+  "version": "poc-v1"
+}

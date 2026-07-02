@@ -1,0 +1,7 @@
+{
+  "id": "docker",
+  "adapterKind": "docker",
+  "imageName": "agent-runtime-sidecar-poc:latest",
+  "dockerfilePath": "containers/sidecar/Dockerfile",
+  "workerType": "copilot-process-wrapper"
+}

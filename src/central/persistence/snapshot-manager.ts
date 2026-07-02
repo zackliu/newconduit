@@ -11,10 +11,11 @@ export class SnapshotManager {
   private readonly persistenceByAgentStatePolicy: ReadonlyMap<string, PersistenceClass>;
 
   constructor(storage: RuntimeStorage, clock: Clock) {
-    this.persistenceByAgentStatePolicy = new Map<string, PersistenceClass>([
-      ['copilot-session-volume-snapshot', new VolumeSnapshotPersistenceClass(storage, clock)],
-      ['copilot-managed-local', new CopilotManagedLocalPersistenceClass()]
-    ]);
+    const persistenceClasses: PersistenceClass[] = [
+      new VolumeSnapshotPersistenceClass(storage, clock),
+      new CopilotManagedLocalPersistenceClass()
+    ];
+    this.persistenceByAgentStatePolicy = new Map(persistenceClasses.map((persistenceClass) => [persistenceClass.classId, persistenceClass]));
   }
 
   planCapture(session: SessionRecord): SnapshotCaptureRef | undefined {

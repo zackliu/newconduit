@@ -1,0 +1,13 @@
+{
+  "poolId": "poc-docker-dotnet",
+  "sidecarClass": "copilot-process-wrapper",
+  "labels": {
+    "agent": "dotnet"
+  },
+  "capacityPerWorker": 1,
+  "hostPoolControllerClass": "docker-dotnet",
+  "scalePolicy": {
+    "scaleOutMaxPendingPerTick": 1,
+    "scaleInIdleMs": 5000
+  }
+}

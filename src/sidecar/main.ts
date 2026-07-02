@@ -7,7 +7,11 @@ async function main(): Promise<void> {
   if (!centralUrl) {
     throw new Error('CENTRAL_URL is required to start sidecar');
   }
-  const workerType = resolveWorkerType(process.env.WORKER_TYPE ?? 'copilot-process-wrapper');
+  const workerTypeId = process.env.WORKER_TYPE;
+  if (!workerTypeId) {
+    throw new Error('WORKER_TYPE is required to start sidecar');
+  }
+  const workerType = resolveWorkerType(workerTypeId);
   const daemon = new SidecarDaemon({
     runtimeTransport: workerType.createRuntimeTransport({ tenantId }),
     workspaceAdapter: workerType.createWorkspaceAdapter(),

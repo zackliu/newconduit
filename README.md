@@ -88,9 +88,11 @@ On startup you should see `central service listening on http://localhost:3000`.
 | `CENTRAL_PORT` | no | `3000` | HTTP port. |
 | `RUNTIME_STORAGE_ROOT` | no | `.runtime-poc/tenants/<tenantId>` | Local storage root for sessions, events, workers, and snapshots. |
 | `CENTRAL_URL_FOR_WORKERS` | no | `http://host.docker.internal:<port>` | URL the containerized sidecar calls back to reach central. |
-| `WORKER_POOL_SCALE_IN_IDLE_MS` | no | `5000` | Idle time before an unused worker is scaled in (recycled). |
+| `CONFIG_DIR` | no | `config` | Directory of AgentSpec, WorkerPool, WorkerType, and host-pool-controller config documents read at startup. |
 
 Optional provider knobs: `COPILOT_PROVIDER_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`.
+
+The demo AgentSpecs, WorkerPools, WorkerTypes, and host-pool controllers are declarative JSON documents under `config/` (not hardcoded in `src/`). Central reads `config/agent-specs/`, `config/worker-pools/`, and `config/host-pool-controllers/` at startup; a sidecar resolves `config/worker-types/<WORKER_TYPE>.json`. Each pool sets its own `scalePolicy.scaleInIdleMs`. A config document references adapters and persistence classes by a `*Class` id string that maps to an adapter/class's self-declared `classId` in code, so `src/` holds only generic lookup — no per-config-value branching.
 
 ## Run a Local Worker (no Docker)
 

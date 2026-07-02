@@ -11,7 +11,8 @@ import { CentralService } from '../../src/central/central-service';
 import { CentralHttpServer } from '../../src/central/http/central-http-server';
 import { registerPocCentralRoutes } from '../../src/central/http/poc-routes';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type HostPoolInstanceRecord, type SessionRecord, type WorkerPoolRecord, type WorkerRecord } from '../../src/shared';
+import type { HostPoolInstanceRecord, SessionRecord, WorkerPoolRecord, WorkerRecord } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
 import { isCredentialUnavailable, loadTestEnv } from '../support/test-env';
 
 const execFileAsync = promisify(execFile);

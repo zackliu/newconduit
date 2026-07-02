@@ -10,7 +10,8 @@ import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { CopilotProcessAdapter, LocalWorkspaceAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
 import { resolveWorkerType } from '../../src/sidecar/worker-types';
-import { COPILOT_LOCAL_PROCESS_SIDECAR_CLASS, type RuntimeChannel, type RuntimeEvent, type RuntimeEventHandler, type RuntimeEventTransport, type RuntimeSubscription, type WorkerRegisterPayload } from '../../src/shared';
+import type { RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, WorkerRegisterPayload } from '../../src/shared';
+import { COPILOT_LOCAL_PROCESS_SIDECAR_CLASS } from '../support/config-fixtures';
 import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
 
 class SidecarInMemoryTransport implements SidecarRuntimeTransport {

@@ -12,6 +12,7 @@ export interface LocalWorkspaceAdapterOptions {
  * worker and are owned by Copilot. Capture/restore are intentionally no-ops; persistence is not central's concern.
  */
 export class LocalWorkspaceAdapter implements SidecarWorkspaceAdapter {
+  static readonly classId = 'local-managed';
   private readonly workRoot: string;
 
   constructor(options: LocalWorkspaceAdapterOptions = {}) {

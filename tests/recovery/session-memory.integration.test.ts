@@ -11,7 +11,8 @@ import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { DockerWorkspaceAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
 import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport } from '../../src/sidecar/contracts';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type RequestContext, type RuntimeChannel, type RuntimeEvent, type RuntimeEventHandler, type RuntimeEventTransport, type RuntimeSubscription, type SessionRecord, type WorkerPoolRecord, type WorkerRecord, type WorkerRegisterPayload } from '../../src/shared';
+import type { RequestContext, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SessionRecord, WorkerPoolRecord, WorkerRecord, WorkerRegisterPayload } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
 
 const CONTINUITY_FILE = 'continuity.txt';
 const CONTINUITY_CONTENT = 'RESUME-OK-7f3a';

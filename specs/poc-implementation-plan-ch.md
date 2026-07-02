@@ -35,7 +35,7 @@
 实现范围：
 
 - `AgentSpec`、`SessionRecord`、`RuntimeEvent` model。
-- POC 静态 AgentSpec 和预定义 class/profile registry。
+- POC AgentSpec 和预定义 class/profile registry（Slice 11 把这些 demo spec 从 `src/` 常量移到默认 config 目录加载）。
 - Central local file storage。
 - Event log append/replay。
 - Session lifecycle create/queued 状态。
@@ -778,7 +778,140 @@ Expect：
 
 Automated scenario test 使用实现同一 `agentProcessAdapter` contract 的 deterministic agent test harness 驱动 permission/external-tool 的 pending 与 resolve；测试必须经过 central-owned event log、worker command channel 和 session events channel，不允许 sidecar-local 旁路。
 
-## 13. Slice 11：Reconnect And Replay
+## 13. Slice 11：Externalize Demo Config To Default Config Directory
+
+目标：把 demo 用的 AgentSpec、WorkerPool、WorkerType 和 host-pool-controller 定义从 `src/` 里的硬编码常量移到仓库根部的 `config/` 目录，让它成为默认启动时读取配置的目录；同时消除 `src/` 里所有 type/spec class 值字面量，改成“adapter/class 自声明 classId + config 引用该 id + generic 解析”。这些 demo config 仍随代码发布（本项目是 demo），但不再写死在 runtime source 里。用户可见行为不变：`pnpm start:central`、`pnpm start:sidecar`、Docker WorkerPool、samples/webclient 体验与之前一致。
+
+本 slice 取代 Slice 1/7/9 里“把 AgentSpec/WorkerPool/WorkerType 作为 in-code 常量或 in-code map 注册”的部分。
+
+实现范围：
+
+- Config 目录布局。仓库根 `config/`，下分 `agent-specs/*.json`、`worker-pools/*.json`、`worker-types/*.json`、`host-pool-controllers/*.json`。每个 JSON 是纯数据 desired-state 文档，与 `src/` 分离，但随 demo 一起发布。默认目录是 `CONFIG_DIR ?? 'config'`（相对启动 cwd 解析）。
+- File config store adapter。central 侧新增 `FileConfigStore`（config-store，与 runtime-state 的 `LocalFileStorage` 并列的另一个 file adapter）：`loadAgentSpecs()`、`loadWorkerPools({ tenantId, centralUrlForWorkers })`、`loadHostPoolControllers()`。tenant 绑定与 `centralUrlForWorkers` 在 load 时注入，不进用户可见文档。session/worker/event/snapshot 等 runtime state 仍走 `RuntimeStorage`，与 config store 是不同 contract。
+- `src/` 无 class 值字面量。`src/` 不再出现 `docker-workspace-volume-snapshot`、`local-managed`、`copilot-session-volume-snapshot`、`copilot-managed-local`、`docker-dotnet`、`dotnet-process-wrapper`、`copilot-poc-tools`、`turn-boundary-durable-pause`、`stop-on-pause`、`restart-with-context`、`DOTNET_WORKER_POOL_ID` 等 config 值字面量，也不再出现按这些值分支的 map。AgentSpec 的 `workspaceClass`/`toolProfile`/`pausePolicy`/`recoveryPolicy`/`agentStatePolicy`、`sidecarClass`、`hostPoolControllerClass` 在 model 里是 generic `string`；`WorkerCondition`、`SessionStatus` 等固定运行时状态枚举保持 union，不受影响。
+- 自声明 classId + generic 解析。每个 sidecar adapter（runtime transport/workspace/agent-process）、persistence class、host-pool adapter 都用 `classId` 自声明自己的 id；worker-type、persistence、host-pool 的解析都是按 `classId` 索引的 registry 做 `registry.get(configValue)` 的 generic 查找，未知 id 报错。config 文档只用 `*Class`/`adapterKind` 字段按 id 引用这些 class。
+- WorkerType 数据外置 + adapter registry。`resolveWorkerType(id)` 从 `config/worker-types/<id>.json` 读 `workerTypeId`、`sidecarClass`、labels、capacity 和 `runtimeTransportClass`/`workspaceClass`/`agentProcessClass` 三个 class id，再从编译进 sidecar 的 adapter class 列表（按 `classId` 索引）解析出 adapter；`WorkerType` 接口与 `resolveWorkerType` 签名不变。sidecar 启动必须显式提供 `WORKER_TYPE`。
+- Host-pool-controller 外置。`config/host-pool-controllers/*.json` 声明 `id`（= `hostPoolControllerClass`）、`adapterKind`、`imageName`、`dockerfilePath`、`workerType`。central 按 `adapterKind` 从 host-pool adapter registry（按 `DockerHostPoolAdapter.classId` 索引）generic 构造 adapter，`docker` 与 `docker-dotnet` 两个变体都来自 config，`main.ts` 不再硬编码。WorkerPool 文档不自带 `tenantId`/`centralUrlForWorkers`，每个 pool 自带 `scalePolicy.scaleInIdleMs`，central 启动不再用 `WORKER_POOL_ID`/`DOTNET_WORKER_POOL_ID`/`WORKER_POOL_SCALE_IN_IDLE_MS` env 特判。
+- 容器交付。sidecar 容器镜像必须 `COPY config ./config`（`containers/sidecar/Dockerfile` 与 `containers/sidecar-dotnet/Dockerfile`），使容器内 `resolveWorkerType` 能读到 worker-type 数据。
+- Src 清理。删除 `src/` 里硬编码 AgentSpec/WorkerType 常量与 sidecar-class 值常量；scenario 测试从同一个 config 目录读取 fixture。
+
+Scenario-based test：`scenario: central loads agent specs from the default config directory`
+
+Given：
+
+- `config/agent-specs/` 含 `copilot-poc`、`copilot-local`、`dotnet-poc` 三个 AgentSpec 文档。
+- 构造 `CentralService` 时不注入 agentSpecRegistry。
+
+Expect：
+
+- runtime status 列出的 AgentSpec 与 config 目录内容一致（含 `copilot-poc` 及其 workerSelector）。
+- `src/` 内不存在 AgentSpec 常量定义或 sidecar-class 值常量。
+
+Scenario-based test：`scenario: worker pool config binds tenant and deployment wiring at load`
+
+Given：
+
+- `config/worker-pools/poc-docker-copilot.json` 声明 `hostPoolControllerClass=docker`、labels `agent=copilot`，不含 `tenantId`、`centralUrlForWorkers`。
+
+Expect：
+
+- `loadWorkerPools({ tenantId, centralUrlForWorkers })` 返回的 pool 带上注入的 tenantId 与 centralUrlForWorkers。
+- pool 的 `scalePolicy.scaleInIdleMs` 来自 pool 文档；用户可见的 pool 文档不含 tenant 或 central endpoint。
+
+Scenario-based test：`scenario: worker type binds adapters so startup only references the type`
+
+Given：
+
+- `config/worker-types/copilot-local.json` 声明 `sidecarClass=copilot-local-process`、labels `agent=local`、capacity 99、`workspaceClass=local-managed`、`agentProcessClass=copilot-process`。
+
+Expect：
+
+- `resolveWorkerType('copilot-local')` 的 sidecarClass、labels、capacity 来自 config 文档。
+- 解析出的 workspace adapter 是 local workspace adapter 实例、agent-process adapter 是 Copilot process adapter 实例，二者由按 `classId` 索引的 compiled adapter registry 提供；未知 worker type id 或未知 class id 报错。
+
+## 14. Slice 12：Resource Model Normalization（单一来源、代码事实回归、opaque storage handle）
+
+目标：Slice 11 把 demo 定义外置到 `config/` 后，property/class 层面暴露出四类结构性问题——**重复、把代码事实当配置、泄露存储实现假设、字段归错属主**。本 slice 用一套统一判据把资源模型收敛成两类“人写的” config：AgentSpec（需求）与 WorkerPool（供给制备）；其余要么由代码/镜像自声明，要么变成 central 不解析的 opaque 运行时状态。本 slice 修订 Slice 9（labels/capacity 归属）与 Slice 11（worker-type 内容归属）。
+
+判据（对每个 property/class 只问三点）：
+
+1. 它是**匹配值**吗？→ 只在供给侧定义一次；需求侧只 select，制备侧只 reference，谁都不 copy。
+2. 它是**代码/构建事实**吗（适配器实现、跑哪个 agent、走哪个 transport）？→ 由二进制/镜像自声明，不进 config。
+3. 它是**存储/实现定位符**吗？→ central 只存不解析的 opaque handle 信封，绝不假定 filesystem path 或后端前缀。
+
+研究结论（问题清单）：
+
+| property/class | 问题 | 判据 | 解决 |
+| --- | --- | --- | --- |
+| `sidecarClass`（AgentSpec、WorkerPool、WorkerType×2、HostController = 5 处） | 重复，且本质是能力 | 匹配值 | 变成 worker 的一条约定 label，由 `workerSelector` 统一匹配；删除 `SidecarClass` 类型与 `sidecarClass` 字段 |
+| `labels`（4 处对象） | 重复 | 匹配值 | 单一来源 = `WorkerPool.template.labels`；worker 启动带上、注册原样自报 |
+| `capacity`（WorkerPool、WorkerType） | 重复 | 匹配值 | 单一来源 = `WorkerPool.template.capacity` |
+| `agentProcessClass`、`runtimeTransportClass` | 把代码/部署事实当配置 | 代码事实 | sidecar 构建自声明；transport 提升为 deployment 级统一设置，不进任何 per-agent/per-pool spec |
+| WorkerType 的适配器组合 | 镜像已钉死却又写进 JSON | 代码事实 | worker type 收敛成**镜像自声明的 build profile**（只声明装了哪套 adapter）；不是运维写的 config |
+| `workspaceClass`（AgentSpec） | central 不用，且与 `agentStatePolicy` 是同一件事的两半 | 归错属主 | 与 `agentStatePolicy` 合并成一个 `storageClass` |
+| `agentStatePolicy` + snapshot `location`/`parts.path` + `workspaceRef: docker-volume:` | 泄露 filesystem/后端假设（central 铸 `docker-volume:` 前缀，sidecar 当 `workspacePath` 用） | 存储定位符 | 统一 `storageClass` + **opaque handle 信封**；central 不解析，control/data 两半各自解析 |
+| `hostPoolControllerClass`/`adapterKind` | `id` 与 `adapterKind` 概念不同却取值相同 | 引用 vs 代码事实 | `id` = 实例引用键；`adapterKind` = 代码 classId；命名与文档分清 |
+| WorkerPool 拷贝 sidecarClass/labels/capacity | 供给身份被拷进制备层 | 重复 | WorkerPool 只 reference（template + workerType + hostController），不 copy |
+| `launch`、`toolProfile`、`pausePolicy`、`recoveryPolicy` | 无问题（真需求配置；central 不解释 launch/toolProfile，只读 recovery/pause 语义） | 保留 | 留在 AgentSpec |
+
+实现范围：
+
+- **匹配统一到 labels。** 删除 `SidecarClass` 类型与 `sidecarClass` 字段（AgentSpec、WorkerPool、WorkerRecord、WorkerRegisterPayload）。worker “能跑哪类 agent” 作为一条约定 label 由 worker 注册时自报；session 选择、scale 匹配、worker 选择只比 `labels` + `capacity` + `conditions`。
+- **Worker 身份单一来源。** worker 的 labels + capacity 只在 `WorkerPool.template` 声明一次；pool scale-out 时把 `template.labels`/`template.capacity` 传给 worker，worker 注册时原样自报。standalone/local worker 无 pool，用显式启动参数传 labels/capacity。scale 循环用 `WorkerPool.template` 做匹配，不再拷贝或读 worker-type 里的 labels/capacity。
+- **适配器装配回归代码。** worker type 收敛成镜像自声明的 build profile：只声明它装了哪三类 adapter（runtimeTransport/workspace/agentProcess），这些 adapter 已在代码里 `classId` 自声明。`config/worker-types/*.json` 移除；`WORKER_TYPE` 仍在镜像内的 profile registry 里选 profile。`runtimeTransportClass` 从 per-type 提升为 deployment 级统一设置。
+- **持久化统一成 storageClass + opaque handle。** AgentSpec 的 `workspaceClass` + `agentStatePolicy` 合并成一个 `storageClass` 名字。central 按 `storageClass` 路由 control-half（分配/记 handle、决策恢复、按 handle 委托删除），worker 提供 data-half（抓/还原字节）。snapshot 记录改成 opaque 信封 `{ storageClass, handle, parts, baseEventCursor, size?, checksum? }`：`handle` 对 central 不透明（string|json），`parts` 是语义名。删除 `SnapshotPart.path` 与 `location: string`；`SnapshotCaptureRef`/`SnapshotRestoreRef` 同步改为携带 `storageClass` + opaque `handle`。`workspaceRef` 变 opaque handle：central 的 session-manager 不再铸 `docker-volume:` 前缀，sidecar 不再把它当 `workspacePath`，由 storageClass 的 data-half 解释。`storageClass` 同时是需求↔能力匹配维度：session 只能被 data-half 支持该 class 的 worker 承载，V1 同质 pool 天然一致，central 记名字用于路由与防错配。
+- **Provisioning 只引用。** WorkerPool 字段收敛为 `poolId + template{labels, capacity} + workerType + hostPoolController + scalePolicy`。HostPoolController 保持 `id + adapterKind + imageName + dockerfilePath + workerType`，文档明确 `id`（引用键）≠ `adapterKind`（代码 classId）。
+- **两类 config 定稿。** AgentSpec（需求）：`agentSpecId、launch、toolProfile、workerSelector、storageClass、pausePolicy、recoveryPolicy、idlePauseTimeoutMs、version`，可选 `labels` 仅作自身 metadata、不参与匹配。WorkerPool（供给制备）：`poolId、template{labels, capacity}、workerType、hostPoolController、scalePolicy`。其余（adapter 实现、agentProcess/transport、worker profile 组合、storage handle 格式）全部代码/镜像自声明或 opaque 运行时状态，无人手写。
+
+Scenario-based test：`scenario: worker selection is purely label based`
+
+Given：
+
+- 一个 AgentSpec 只有 `workerSelector.matchLabels`（含表达 sidecar 能力的约定 label），没有 `sidecarClass` 字段。
+- 一个 worker 注册时自报同样的 labels。
+
+Expect：
+
+- session 被选到该 worker；`src/` 中不存在 `SidecarClass` 类型或 `sidecarClass` 字段。
+- labels 不匹配的 worker 不被选；选择只用 labels + capacity + conditions。
+
+Scenario-based test：`scenario: worker labels and capacity are declared once on the pool template`
+
+Given：
+
+- `WorkerPool.template` 声明 labels + capacity；worker type build profile 只声明 adapter 组合。
+
+Expect：
+
+- scale 出的 worker 注册时的 labels/capacity 等于 `template`；`config/worker-types/*.json` 不含 labels/capacity/sidecarClass。
+- 新增一个同镜像的 agent 类型只改 `WorkerPool.template` 与 AgentSpec，不改任何 worker-type 文件。
+- standalone worker 用显式启动参数带 labels/capacity 注册。
+
+Scenario-based test：`scenario: persistence uses one storageClass with an opaque handle`
+
+Given：
+
+- 一个 AgentSpec 只声明 `storageClass`（无 `workspaceClass`/`agentStatePolicy`）。
+- pause 一个使用 volume-snapshot storageClass 的 session。
+
+Expect：
+
+- central 记录的 snapshot 信封含 `storageClass` + opaque `handle` + 语义 `parts` + `baseEventCursor`，不含任何 filesystem path。
+- central 代码不解析 `handle`；resume 时把 `{ storageClass, handle }` 交给新 worker 的 data-half 还原。
+- 换一个 handle 为非 path json 的 mock storageClass 时，central 代码路径与断言不变。
+
+Scenario-based test：`scenario: central mints no backend-specific workspace reference`
+
+Given：
+
+- 创建一个 session。
+
+Expect：
+
+- `workspaceRef` 是 storageClass data-half 产生的 opaque handle；central 的 session-manager 不出现 `docker-volume:` 之类后端前缀。
+- sidecar 不把 `workspaceRef` 当 `workspacePath` 直接用，而是经 workspace data-half 解析出实际挂载点。
+
+## 15. Slice 13：Reconnect And Replay
 
 目标：Client SDK 断线后能用 event cursor 追上 session history。
 
@@ -802,7 +935,7 @@ Expect：
 - Replay does not depend on Web PubSub message history。
 - Client SDK still does not know Worker endpoint。
 
-## 14. Slice 12：Thin Auth And Audit Boundary
+## 16. Slice 14：Thin Auth And Audit Boundary
 
 目标：POC 保留 central-owned negotiate 和 audit hook，但不展开完整 production auth matrix。
 
@@ -827,7 +960,7 @@ Expect：
 - Browser and sidecar do not choose their own `userId`。
 - Audit log records token issuance as record-only。
 
-## 15. Recommended Order
+## 17. Recommended Order
 
 按下面顺序实现和 review：
 
@@ -841,12 +974,14 @@ Expect：
 8. Durable session memory across worker recycle（pause+capture 与 resume+restore 合并）。
 9. Local worker type（worker-type-driven adapter binding 与 copilot-managed-local persistence）。
 10. Durable interaction broker（approval 与 client tool round-trip，Copilot pending-request 桥接成 central-owned durable interaction）。
-11. Reconnect and replay。
-12. Thin auth and audit boundary。
+11. Externalize demo config to default config dir（AgentSpec/WorkerPool/WorkerType/host-pool-controller 从 `src/` 常量移到 `config/`，并用 self-declared classId 做 generic 解析，`src/` 无 config 值字面量）。
+12. Normalize resource model（去重到单一来源、代码事实回归自声明、持久化统一成 storageClass + opaque handle 信封）。
+13. Reconnect and replay。
+14. Thin auth and audit boundary。
 
 前六个 slices 跑通后，POC 已经形成可交互主线和基本 lifecycle reconciliation：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot-backed agent runtime，并把回复持久化后推回 Client SDK；queued session 会在 Worker ready 后被主动分配，idle session 会按 AgentSpec policy 进入 paused，client open/history 不会隐式唤醒 session。Docker WorkerPool scale loop 在这条主线之后接入，验证 WorkerPool 只是 capacity source 和 host 操作 owner，不改变 Worker registration、selection、assignment、event loop 的统一路径。
 
-## 16. Validation Commands
+## 18. Validation Commands
 
 每个 slice 完成后都运行：
 
@@ -873,3 +1008,7 @@ Slice 8 必须包含 in-process continuity scenario test 和真实 Docker contin
 Slice 9 必须包含 worker-type binding scenario test 和 local agent assignment scenario test。前者断言 sidecar 只 ref `WORKER_TYPE`，registration body 的 sidecarClass/labels/capacity 全部来自 worker type registry，且实例化的是 type 注册的 local workspace adapter 与 Copilot process adapter；后者用真实 central runtime + in-memory runtime transport，断言 `copilot-local` session 选中 local worker、不调用 host pool adapter、单 worker 承载多 session、pause 释放一个 capacity 槽且不写 snapshot、resume 走 queued→assign 回到同一 worker 且 assign 不带 restore ref。真实 local Copilot smoke test 用 `WORKER_TYPE=copilot-local` 起本机 worker 并完成一轮 input/output；缺少 Copilot runtime/auth 配置时 skip。
 
 Slice 10 必须包含 interaction broker scenario tests，覆盖：approval interaction 在无 client 订阅时持久化并在 response 后续接 turn、并行两个 `tool_call` interaction 按 `interactionId` 独立 resolve 且不 head-of-line 阻塞 worker command 入站、agent-executed built-in/MCP tool 保持 observation 不产生 interaction、`scope: session` 的 approve 建立 gate rule 后同类 gated action 在 gate 自动放行且不产生 interaction/不往返 client、open interaction 跨 pause/resume 持久、未授权 principal 的 `interaction.respond.requested` 被 central 拒绝且不产生 `session.interaction.response`。真实 Copilot smoke test 必须让 Copilot 产生真实 permission request 并通过 pending-permission RPC 用 central-routed response 完成 approval，并验证 `scope: session` 让 Copilot 记下 session rule、后续同类请求不再 surface；缺少 Copilot runtime/auth 配置时 skip。Public protocol 变化必须同步 `sdk/client/public-protocol-spec-ch.md`、SDK code、runtime handlers、e2e tests。
+
+Slice 11 必须包含 config store scenario tests：`scenario: central loads agent specs from the default config directory` 断言 central 不注入 registry 时从默认 config 目录加载 AgentSpec 并在 runtime status 列出；`scenario: worker pool config binds tenant and deployment wiring at load` 断言 WorkerPool 文档在 load 时注入 tenantId 与 centralUrlForWorkers；Slice 9 的 `scenario: worker type binds adapters so startup only references the type` 现在从 `config/worker-types/` 读数据、adapter 按 self-declared classId 解析。`src/` 内不得再出现 AgentSpec/WorkerType 常量或 `docker-workspace-volume-snapshot`、`docker-dotnet`、`dotnet-process-wrapper`、`DOTNET_WORKER_POOL_ID` 等 config 值字面量；每个 adapter/persistence/host-pool class 用 `classId` 自声明 id，解析走 generic `registry.get(configValue)`。Docker sidecar 镜像必须 `COPY config ./config`。用户可见体验不变：`pnpm start:central`、`pnpm start:sidecar`、Docker WorkerPool、samples/webclient 全部照旧工作。
+
+Slice 12 必须包含 resource model scenario tests：`scenario: worker selection is purely label based` 断言 selection 只用 labels（`src/` 无 `SidecarClass` 类型/字段）；`scenario: worker labels and capacity are declared once on the pool template` 断言 labels/capacity 单一来源是 `WorkerPool.template`、`config/worker-types/*.json` 无 labels/capacity/sidecarClass；`scenario: persistence uses one storageClass with an opaque handle` 断言 snapshot 信封只含 `storageClass` + opaque `handle` + 语义 `parts` + cursor（无 filesystem path）、换非 path 的 mock storageClass 时 central 代码路径不变；`scenario: central mints no backend-specific workspace reference` 断言 central 不铸 `docker-volume:` 前缀、sidecar 经 data-half 解析 workspaceRef。持久化契约变化（`storageClass`、opaque snapshot 信封、workspaceRef）必须同步 `sdk/client/public-protocol-spec-ch.md`、SDK、runtime handlers、e2e tests。

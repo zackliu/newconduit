@@ -1,9 +1,7 @@
 import type { CentralService } from '../central-service';
 import type { CentralHttpServer } from './central-http-server';
-import { COPILOT_LOCAL_PROCESS_SIDECAR_CLASS, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type RequestContext, type SidecarClass, type WorkerRegisterPayload } from '../../shared';
+import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type RequestContext, type WorkerRegisterPayload } from '../../shared';
 import type { IncomingMessage } from 'node:http';
-
-const KNOWN_SIDECAR_CLASSES = new Set<SidecarClass>([COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, COPILOT_LOCAL_PROCESS_SIDECAR_CLASS]);
 
 const DEMO_CLIENT_CONTEXT: RequestContext = {
   principal: {
@@ -104,7 +102,8 @@ function isWorkerRegisterPayload(payload: unknown): payload is WorkerRegisterPay
     return false;
   }
   const candidate = payload as Partial<WorkerRegisterPayload>;
-  return KNOWN_SIDECAR_CLASSES.has(candidate.sidecarClass as SidecarClass)
+  return typeof candidate.sidecarClass === 'string'
+    && candidate.sidecarClass.length > 0
     && isStringRecord(candidate.labels)
     && typeof candidate.capacity === 'number'
     && typeof candidate.allocatable === 'number'

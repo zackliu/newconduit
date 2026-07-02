@@ -1,6 +1,6 @@
 import type { SidecarClass } from './worker';
 
-export type HostPoolControllerClass = 'docker' | string;
+export type HostPoolControllerClass = string;
 export type HostPoolInstanceState = 'pending' | 'ready' | 'stopping' | 'stopped' | 'failed';
 
 export interface WorkerPoolScalePolicy {

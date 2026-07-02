@@ -1,12 +1,12 @@
 import type { Clock, RuntimeStorage, SessionRecord, SnapshotCaptureRef, SnapshotPart, SnapshotRestoreRef, WorkspaceSnapshot } from '../../shared';
 
-const SNAPSHOT_RESTORE_HINTS: Record<string, string> = { mode: 'restart-with-context' };
-
 /**
  * Selects how a paused session's continuity material is captured and restored. A session resolves exactly one
- * persistence class from its AgentSpec; central asks the resolved class instead of branching on policy values.
+ * persistence class from its AgentSpec by matching agentStatePolicy to the class's self-declared classId; central
+ * asks the resolved class instead of branching on policy values.
  */
 export interface PersistenceClass {
+  readonly classId: string;
   planCapture(session: SessionRecord): SnapshotCaptureRef | undefined;
   planRestore(session: SessionRecord): Promise<SnapshotRestoreRef | undefined>;
   recordCapture(session: SessionRecord, input: { snapshotId: string; parts: SnapshotPart[] }): Promise<WorkspaceSnapshot | undefined>;
@@ -16,6 +16,8 @@ export interface PersistenceClass {
  * Volume-snapshot persistence: central allocates a session-addressed snapshot and records what the sidecar captured.
  */
 export class VolumeSnapshotPersistenceClass implements PersistenceClass {
+  readonly classId = 'copilot-session-volume-snapshot';
+
   constructor(private readonly storage: RuntimeStorage, private readonly clock: Clock) {}
 
   planCapture(session: SessionRecord): SnapshotCaptureRef {
@@ -42,7 +44,7 @@ export class VolumeSnapshotPersistenceClass implements PersistenceClass {
       location: this.buildLocation(session.sessionId, input.snapshotId),
       parts: input.parts,
       createdAt: this.clock.now(),
-      restoreHints: SNAPSHOT_RESTORE_HINTS
+      restoreHints: { mode: session.resolvedAgentSpec.recoveryPolicy }
     };
     await this.storage.writeSnapshot(snapshot);
     return snapshot;
@@ -58,6 +60,8 @@ export class VolumeSnapshotPersistenceClass implements PersistenceClass {
  * so central plans no capture and no restore. "No snapshot" is this class's behavior, not a central special case.
  */
 export class CopilotManagedLocalPersistenceClass implements PersistenceClass {
+  readonly classId = 'copilot-managed-local';
+
   planCapture(): undefined {
     return undefined;
   }

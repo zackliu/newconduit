@@ -1,0 +1,11 @@
+{
+  "workerTypeId": "copilot-process-wrapper",
+  "sidecarClass": "copilot-process-wrapper",
+  "labels": {
+    "agent": "copilot"
+  },
+  "capacity": 1,
+  "runtimeTransportClass": "web-pubsub",
+  "workspaceClass": "docker-workspace-volume-snapshot",
+  "agentProcessClass": "copilot-process"
+}

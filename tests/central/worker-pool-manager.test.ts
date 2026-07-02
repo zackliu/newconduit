@@ -6,7 +6,8 @@ import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type Clock, type HostPoolInstanceRecord, type RuntimeEvent, type WorkerPoolRecord, type WorkerRecord } from '../../src/shared';
+import type { Clock, HostPoolInstanceRecord, RuntimeEvent, WorkerPoolRecord, WorkerRecord } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
 import type { HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult } from '../../src/central/managers';
 
 class FixedClock implements Clock {

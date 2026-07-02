@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AgentSpecAdmissionManager, WorkerSelector } from '../../src/central/managers';
-import { POC_AGENT_SPEC } from '../../src/central/registries/poc-class-registry';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, SystemClock, type SessionRecord, type WorkerRecord } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, POC_AGENT_SPEC } from '../support/config-fixtures';
+import { SystemClock, type SessionRecord, type WorkerRecord } from '../../src/shared';
 
 test('scenario: queued session is assigned to matching ready worker', () => {
   const now = new Date().toISOString();

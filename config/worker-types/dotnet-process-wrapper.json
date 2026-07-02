@@ -1,0 +1,11 @@
+{
+  "workerTypeId": "dotnet-process-wrapper",
+  "sidecarClass": "copilot-process-wrapper",
+  "labels": {
+    "agent": "dotnet"
+  },
+  "capacity": 1,
+  "runtimeTransportClass": "web-pubsub",
+  "workspaceClass": "docker-workspace-volume-snapshot",
+  "agentProcessClass": "copilot-process"
+}

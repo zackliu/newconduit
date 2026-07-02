@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { AgentSpecAdmissionManager, WorkerManager, WorkerSelector } from '../../src/central/managers';
-import { POC_AGENT_SPEC } from '../../src/central/registries/poc-class-registry';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, POC_AGENT_SPEC } from '../support/config-fixtures';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type Clock, type RuntimeEvent, type SessionRecord, type WorkerRecord } from '../../src/shared';
+import type { Clock, RuntimeEvent, SessionRecord, WorkerRecord } from '../../src/shared';
 
 class FixedClock implements Clock {
   constructor(private currentTime: string) {}

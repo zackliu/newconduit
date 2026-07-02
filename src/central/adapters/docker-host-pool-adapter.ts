@@ -19,6 +19,7 @@ export interface DockerHostPoolAdapterOptions {
 }
 
 export class DockerHostPoolAdapter implements HostPoolAdapter {
+  static readonly classId = 'docker';
   private readonly imageName: string;
   private readonly dockerfilePath: string;
   private readonly contextPath: string;

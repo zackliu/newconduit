@@ -27,7 +27,8 @@ export {
 export type { AcceptInputOutcome, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput, WorkerPoolManagerStatus } from './managers';
 export { CopilotManagedLocalPersistenceClass, SnapshotManager, VolumeSnapshotPersistenceClass } from './persistence';
 export type { PersistenceClass } from './persistence';
-export { POC_AGENT_SPEC, POC_DOTNET_AGENT_SPEC, POC_LOCAL_AGENT_SPEC } from './registries/poc-class-registry';
 export { StaticAgentSpecRegistry } from './registries/agent-spec-registry';
 export type { AgentSpecRegistry } from './registries/agent-spec-registry';
+export { FileConfigStore, defaultConfigDir } from './config/file-config-store';
+export type { HostPoolControllerConfig, WorkerPoolBinding, WorkerPoolConfig } from './config/file-config-store';
 export { LocalFileStorage } from './storage/local-file-storage';

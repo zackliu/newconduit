@@ -6,7 +6,8 @@ import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type RuntimeEvent } from '../../src/shared';
+import type { RuntimeEvent } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
 
 test('scenario: create session request creates durable session truth', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-slice1-'));

@@ -44,6 +44,7 @@ This repository is the design and future implementation workspace for **Agent Ru
 - Keep model-visible context bounded. Any future prompt, context, memory, or event replay path needs explicit size limits and summarization behavior.
 - Design for tenant isolation, auditability, and recovery from the first implementation slice.
 - Avoid hidden special cases that encode a desired net effect directly. Model policy, subsidy, or override behavior as explicit mechanisms.
+- Do not hardcode config-value strings in `src/` (AgentSpec/WorkerType/WorkerPool/host-pool class names, policy names such as `docker-workspace-volume-snapshot` or `stop-on-pause`, per-instance ids such as `docker-dotnet`, or per-pool env var names such as `DOTNET_WORKER_POOL_ID`). User-configurable desired-state lives in `config/` documents; each adapter, persistence class, and host-pool adapter self-declares a `classId`, and `src/` resolves config values through generic `registry.get(value)` lookups with no per-value branches.
 - Do not write fallback code, compatibility shims, legacy compatibility layers, dual behavior paths, or "just in case" recovery branches unless the user explicitly asks for a migration or compatibility plan.
 - When something fails, debug in this order: first ask whether the design/model is wrong, then whether the implementation violates the design, and only then whether an explicit domain validation branch is missing.
 - Fix errors at the root cause. Do not add guard logic that merely hides an inconsistent state or papers over a broken contract.
@@ -52,6 +53,7 @@ This repository is the design and future implementation workspace for **Agent Ru
 ## Current Validation State
 
 - TypeScript POC scaffold is present under `src/`.
+- Demo AgentSpec, WorkerPool, WorkerType, and host-pool-controller definitions are declarative JSON documents under `config/` (`agent-specs/`, `worker-pools/`, `worker-types/`, `host-pool-controllers/`) and are the default startup config source (`CONFIG_DIR` defaults to `config`); the sidecar container ships them via `COPY config ./config`. `src/` holds no hardcoded AgentSpec/WorkerType/WorkerPool definitions.
 - Customer-facing TypeScript SDK package is present under `sdk/client/`; SDK source is under `sdk/client/src/`, SDK tests are under `sdk/client/tests/`, and SDK public protocol source of truth is `sdk/client/public-protocol-spec-ch.md`.
 - Scenario-based tests are under `tests/`; `pnpm test` compiles them to ignored `dist-tests/` output before running Node's test runner.
 - Web PubSub integration tests read `tests/.env` for `WEBPUBSUB_ENDPOINT` and use `DefaultAzureCredential`; run `az login` before expecting those tests to exercise the real Azure service.

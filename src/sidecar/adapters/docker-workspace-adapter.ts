@@ -13,6 +13,7 @@ export interface DockerWorkspaceAdapterOptions {
 }
 
 export class DockerWorkspaceAdapter implements SidecarWorkspaceAdapter {
+  static readonly classId = 'docker-workspace-volume-snapshot';
   private readonly workRoot: string;
   private readonly snapshotRootPath: string;
 

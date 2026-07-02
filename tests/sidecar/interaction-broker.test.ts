@@ -8,7 +8,8 @@ import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
 import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentTurnResult, SidecarInteractionResponseInput, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, type RequestContext, type RuntimeChannel, type RuntimeEvent, type RuntimeEventHandler, type RuntimeEventTransport, type RuntimeSubscription, type SessionRecord, type SnapshotPart, type WorkerRegisterPayload } from '../../src/shared';
+import type { RequestContext, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SessionRecord, SnapshotPart, WorkerRegisterPayload } from '../../src/shared';
+import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
 
 const TENANT = 'poc';
 

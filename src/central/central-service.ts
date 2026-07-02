@@ -1,7 +1,7 @@
 import { SystemClock, type Clock, type RequestContext, type RuntimeConnectionGrant, type RuntimeEventTransport, type RuntimeStorage, type TenantConnectionIssuer, type TenantContext, type WorkerPoolRecord, type WorkerRegisterPayload } from '../shared';
 import type { HostPoolAdapter, WorkerPoolManagerStatus } from './managers';
 import { StaticAgentSpecRegistry, type AgentSpecRegistry } from './registries/agent-spec-registry';
-import { POC_AGENT_SPEC, POC_DOTNET_AGENT_SPEC, POC_LOCAL_AGENT_SPEC } from './registries/poc-class-registry';
+import { FileConfigStore } from './config/file-config-store';
 import { LocalFileStorage } from './storage/local-file-storage';
 import { TenantRuntime } from './tenant-runtime';
 
@@ -33,7 +33,7 @@ export class CentralService {
       eventTransport: options.eventTransport,
       connectionIssuer: options.connectionIssuer,
       clock,
-      agentSpecRegistry: options.agentSpecRegistry ?? new StaticAgentSpecRegistry([POC_AGENT_SPEC, POC_LOCAL_AGENT_SPEC, POC_DOTNET_AGENT_SPEC]),
+      agentSpecRegistry: options.agentSpecRegistry ?? new StaticAgentSpecRegistry(new FileConfigStore().loadAgentSpecs()),
       workerPools: options.workerPools,
       hostPoolAdapters: options.hostPoolAdapters
     });

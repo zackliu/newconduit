@@ -7,6 +7,7 @@ export interface WebPubSubClientAdapterOptions {
 }
 
 export class WebPubSubClientAdapter implements SidecarRuntimeTransport {
+  static readonly classId = 'web-pubsub';
   private readonly channelMapper: WebPubSubRuntimeChannelMapper;
   private client: WebPubSubClient | undefined;
 
