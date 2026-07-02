@@ -51,7 +51,6 @@ export type {
 	SessionStatus,
 	SnapshotCaptureRef,
 	SnapshotCreatedPayload,
-	SnapshotPart,
 	SnapshotPartName,
 	SnapshotRestoreRef,
 	TenantConnectionIssuer,
@@ -62,6 +61,7 @@ export type {
 	HostPoolInstanceState,
 	WorkerPoolRecord,
 	WorkerPoolScalePolicy,
+	WorkerPoolTemplate,
 	WorkerRecord,
 	WorkspaceSnapshot
 } from './shared';

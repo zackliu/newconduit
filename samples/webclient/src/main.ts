@@ -42,9 +42,6 @@ interface RuntimeStatus {
 
 interface CentralAgentSpec {
   agentSpecId: string;
-  sidecarClass: string;
-  workspaceClass: string;
-  agentStatePolicy: string;
   labels: Record<string, string>;
   workerSelector: { matchLabels: Record<string, string> };
 }
@@ -52,9 +49,10 @@ interface CentralAgentSpec {
 interface WorkerPoolSummary {
   poolId: string;
   hostPoolControllerClass: string;
-  sidecarClass: string;
-  labels: Record<string, string>;
-  capacityPerWorker: number;
+  template: {
+    labels: Record<string, string>;
+    capacity: number;
+  };
   scalePolicy: {
     scaleOutMaxPendingPerTick: number;
     scaleInIdleMs: number;
@@ -73,8 +71,8 @@ interface HostPoolInstanceSummary {
 
 interface WorkerSummary {
   workerId: string;
-  sidecarClass: string;
   labels: Record<string, string>;
+  storageClass: string;
   description?: Record<string, string>;
   capacity: number;
   allocatable: number;
@@ -87,29 +85,23 @@ interface WorkerSummary {
 interface AgentSpecOption {
   agentSpecId: string;
   title: string;
-  sidecarClass: string;
   workerSelector: Record<string, string>;
-  provider: string;
-  workspaceClass: string;
+  storage: string;
 }
 
 const PLACEHOLDER_AGENT_SPEC: AgentSpecOption = {
   agentSpecId: 'connect to load AgentSpecs',
   title: 'Connect to central',
-  sidecarClass: '—',
   workerSelector: {},
-  provider: '—',
-  workspaceClass: '—'
+  storage: '—'
 };
 
 function agentSpecOptions(): AgentSpecOption[] {
   return state.runtimeStatus.agentSpecs.map((spec) => ({
     agentSpecId: spec.agentSpecId,
     title: `${spec.labels.agent ?? spec.agentSpecId} agent`,
-    sidecarClass: spec.sidecarClass,
     workerSelector: spec.workerSelector.matchLabels,
-    provider: spec.sidecarClass,
-    workspaceClass: spec.workspaceClass
+    storage: spec.workerSelector.matchLabels.storage ?? '—'
   }));
 }
 
@@ -858,7 +850,7 @@ function renderStandaloneWorkers(): string {
   }
   const standalone = state.runtimeStatus.workers.filter((worker) =>
     (worker.lifecycleState === 'registered' || worker.lifecycleState === 'active')
-    && !state.runtimeStatus.workerPools.some((pool) => worker.description?.workerPoolId === pool.poolId || matchesLabels(worker.labels, pool.labels))
+    && !state.runtimeStatus.workerPools.some((pool) => worker.description?.workerPoolId === pool.poolId || matchesLabels(worker.labels, pool.template.labels))
   );
   if (standalone.length === 0) {
     return '';
@@ -899,9 +891,7 @@ function renderAgentSpecDialog(agentSpec: AgentSpecOption): string {
           <dl>
             <dt>agent</dt><dd>${escapeHtml(agentSpec.title)}</dd>
             <dt>selector</dt><dd>${escapeHtml(labelString(agentSpec.workerSelector))}</dd>
-            <dt>sidecar</dt><dd>${escapeHtml(agentSpec.sidecarClass)}</dd>
-            <dt>workspace</dt><dd>${escapeHtml(agentSpec.workspaceClass)}</dd>
-            <dt>provider</dt><dd>${escapeHtml(agentSpec.provider)}</dd>
+            <dt>storage</dt><dd>${escapeHtml(agentSpec.storage)}</dd>
           </dl>
         </div>
         <footer>
@@ -923,7 +913,7 @@ function renderWorkerPools(): string {
     const poolInstances = state.runtimeStatus.hostPoolInstances.filter((instance) => instance.poolId === pool.poolId);
     const liveInstances = poolInstances.filter((instance) => instance.state === 'pending' || instance.state === 'ready' || instance.state === 'stopping');
     const retiredInstances = poolInstances.length - liveInstances.length;
-    const poolWorkers = state.runtimeStatus.workers.filter((worker) => worker.description?.workerPoolId === pool.poolId || matchesLabels(worker.labels, pool.labels));
+    const poolWorkers = state.runtimeStatus.workers.filter((worker) => worker.description?.workerPoolId === pool.poolId || matchesLabels(worker.labels, pool.template.labels));
     const liveWorkers = poolWorkers.filter((worker) => worker.lifecycleState === 'registered' || worker.lifecycleState === 'active');
     const retiredWorkers = poolWorkers.length - liveWorkers.length;
     return `
@@ -932,7 +922,7 @@ function renderWorkerPools(): string {
           <strong title="${escapeHtml(pool.poolId)}">${escapeHtml(pool.poolId)}</strong>
           <span class="poolBadge">${escapeHtml(pool.hostPoolControllerClass)}</span>
         </header>
-        <p class="poolMeta">${escapeHtml(labelString(pool.labels))} · cap ${pool.capacityPerWorker} · idle ${pool.scalePolicy.scaleInIdleMs / 1000}s</p>
+        <p class="poolMeta">${escapeHtml(labelString(pool.template.labels))} · cap ${pool.template.capacity} · idle ${pool.scalePolicy.scaleInIdleMs / 1000}s</p>
         <div class="poolGroup">
           <div class="poolGroupHead"><span>Host instances</span><small>${liveInstances.length || ''}</small></div>
           ${liveInstances.length ? liveInstances.map(renderHostPoolInstance).join('') : '<p class="groupEmpty">Waiting for queued sessions.</p>'}

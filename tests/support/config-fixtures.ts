@@ -16,5 +16,14 @@ function requireAgentSpec(agentSpecId: string): AgentSpec {
 }
 
 export const POC_AGENT_SPEC: AgentSpec = requireAgentSpec('copilot-poc');
-export const COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS = requireAgentSpec('copilot-poc').sidecarClass;
-export const COPILOT_LOCAL_PROCESS_SIDECAR_CLASS = requireAgentSpec('copilot-local').sidecarClass;
+export const LOCAL_AGENT_SPEC: AgentSpec = requireAgentSpec('copilot-local');
+
+/**
+ * Worker matching is pure labels. A worker self-reports the pool template labels (which include the storage
+ * capability label) and is backed by a storage driver whose classId is the worker's `storageClass`. These
+ * fixtures come from the real config so tests exercise the same values the runtime loads.
+ */
+export const COPILOT_WORKER_LABELS: Record<string, string> = POC_AGENT_SPEC.workerSelector.matchLabels;
+export const COPILOT_STORAGE_CLASS: string = POC_AGENT_SPEC.workerSelector.matchLabels.storage;
+export const LOCAL_WORKER_LABELS: Record<string, string> = LOCAL_AGENT_SPEC.workerSelector.matchLabels;
+export const LOCAL_STORAGE_CLASS: string = LOCAL_AGENT_SPEC.workerSelector.matchLabels.storage;

@@ -19,8 +19,8 @@ export class WorkerManager {
       workerId: crypto.randomUUID(),
       tenantId: input.tenantId,
       capacityScope: input.tenantId,
-      sidecarClass: input.sidecarClass,
       labels: input.labels,
+      storageClass: input.storageClass,
       description: input.description,
       capacity: input.capacity,
       allocatable: 0,
@@ -33,7 +33,7 @@ export class WorkerManager {
     };
     await this.storage.writeWorker(worker);
     await this.appendWorkerEvent(worker, 'worker.registered', {
-      sidecarClass: worker.sidecarClass,
+      storageClass: worker.storageClass,
       labels: worker.labels,
       description: worker.description,
       capacity: worker.capacity,

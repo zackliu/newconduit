@@ -1,5 +1,3 @@
-import type { SidecarClass } from './worker';
-
 export interface LabelSelector {
   matchLabels: Record<string, string>;
 }
@@ -11,13 +9,10 @@ export interface AgentSpec {
     command: string;
     args: string[];
   };
-  sidecarClass: SidecarClass;
-  workspaceClass: string;
   toolProfile: string;
   workerSelector: LabelSelector;
   pausePolicy: string;
   recoveryPolicy: string;
-  agentStatePolicy: string;
   idlePauseTimeoutMs: number;
   version: string;
 }

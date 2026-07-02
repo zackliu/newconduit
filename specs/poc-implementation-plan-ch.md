@@ -831,7 +831,7 @@ Expect：
 
 ## 14. Slice 12：Resource Model Normalization（单一来源、代码事实回归、opaque storage handle）
 
-目标：Slice 11 把 demo 定义外置到 `config/` 后，property/class 层面暴露出四类结构性问题——**重复、把代码事实当配置、泄露存储实现假设、字段归错属主**。本 slice 用一套统一判据把资源模型收敛成两类“人写的” config：AgentSpec（需求）与 WorkerPool（供给制备）；其余要么由代码/镜像自声明，要么变成 central 不解析的 opaque 运行时状态。本 slice 修订 Slice 9（labels/capacity 归属）与 Slice 11（worker-type 内容归属）。
+目标：Slice 11 把 demo 定义外置到 `config/` 后，property/class 层面暴露出四类结构性问题——**重复、把代码事实当配置、泄露存储实现假设、字段归错属主**。本 slice 用一套统一判据把资源模型收敛成两类“人写的” config：AgentSpec（需求）与 WorkerPool（供给制备）；其余要么由代码/镜像自声明，要么变成 central 不解析的 opaque 运行时状态。本 slice 修订 Slice 9（labels/capacity 归属、`workspaceClass`/`agentStatePolicy` 归属）与 Slice 11（worker-type 内容归属）。
 
 判据（对每个 property/class 只问三点）：
 
@@ -848,8 +848,8 @@ Expect：
 | `capacity`（WorkerPool、WorkerType） | 重复 | 匹配值 | 单一来源 = `WorkerPool.template.capacity` |
 | `agentProcessClass`、`runtimeTransportClass` | 把代码/部署事实当配置 | 代码事实 | sidecar 构建自声明；transport 提升为 deployment 级统一设置，不进任何 per-agent/per-pool spec |
 | WorkerType 的适配器组合 | 镜像已钉死却又写进 JSON | 代码事实 | worker type 收敛成**镜像自声明的 build profile**（只声明装了哪套 adapter）；不是运维写的 config |
-| `workspaceClass`（AgentSpec） | central 不用，且与 `agentStatePolicy` 是同一件事的两半 | 归错属主 | 与 `agentStatePolicy` 合并成一个 `storageClass` |
-| `agentStatePolicy` + snapshot `location`/`parts.path` + `workspaceRef: docker-volume:` | 泄露 filesystem/后端假设（central 铸 `docker-volume:` 前缀，sidecar 当 `workspacePath` 用） | 存储定位符 | 统一 `storageClass` + **opaque handle 信封**；central 不解析，control/data 两半各自解析 |
+| storage 需求（原 AgentSpec `workspaceClass`/`agentStatePolicy`） | 把“要哪种存储”当成 AgentSpec 上的 class 字段，其实是匹配值 | 匹配值 | 变成 `workerSelector` 的一条约定 storage label（单一来源 = `WorkerPool.template.labels`），和 sidecar 能力走同一套 label 匹配；AgentSpec/WorkerType 不再有 `storageClass`/`workspaceClass`/`agentStatePolicy` 字段 |
+| storage driver + snapshot `location`/`parts.path` + `workspaceRef: docker-volume:` | 泄露 filesystem/后端假设（central 铸 `docker-volume:` 前缀、sidecar 当 `workspacePath` 用），并把“具体后端 driver”当需求配置 | 代码事实 + 存储定位符 | 具体 storageClass driver 由镜像/供给自声明（代码 classId）；central 选完 worker 才绑定、记进 **opaque handle 信封**，不解析 handle、不搬字节；capture/restore 谁搬字节由 driver 的 attachment kind 决定 |
 | `hostPoolControllerClass`/`adapterKind` | `id` 与 `adapterKind` 概念不同却取值相同 | 引用 vs 代码事实 | `id` = 实例引用键；`adapterKind` = 代码 classId；命名与文档分清 |
 | WorkerPool 拷贝 sidecarClass/labels/capacity | 供给身份被拷进制备层 | 重复 | WorkerPool 只 reference（template + workerType + hostController），不 copy |
 | `launch`、`toolProfile`、`pausePolicy`、`recoveryPolicy` | 无问题（真需求配置；central 不解释 launch/toolProfile，只读 recovery/pause 语义） | 保留 | 留在 AgentSpec |
@@ -859,9 +859,14 @@ Expect：
 - **匹配统一到 labels。** 删除 `SidecarClass` 类型与 `sidecarClass` 字段（AgentSpec、WorkerPool、WorkerRecord、WorkerRegisterPayload）。worker “能跑哪类 agent” 作为一条约定 label 由 worker 注册时自报；session 选择、scale 匹配、worker 选择只比 `labels` + `capacity` + `conditions`。
 - **Worker 身份单一来源。** worker 的 labels + capacity 只在 `WorkerPool.template` 声明一次；pool scale-out 时把 `template.labels`/`template.capacity` 传给 worker，worker 注册时原样自报。standalone/local worker 无 pool，用显式启动参数传 labels/capacity。scale 循环用 `WorkerPool.template` 做匹配，不再拷贝或读 worker-type 里的 labels/capacity。
 - **适配器装配回归代码。** worker type 收敛成镜像自声明的 build profile：只声明它装了哪三类 adapter（runtimeTransport/workspace/agentProcess），这些 adapter 已在代码里 `classId` 自声明。`config/worker-types/*.json` 移除；`WORKER_TYPE` 仍在镜像内的 profile registry 里选 profile。`runtimeTransportClass` 从 per-type 提升为 deployment 级统一设置。
-- **持久化统一成 storageClass + opaque handle。** AgentSpec 的 `workspaceClass` + `agentStatePolicy` 合并成一个 `storageClass` 名字。central 按 `storageClass` 路由 control-half（分配/记 handle、决策恢复、按 handle 委托删除），worker 提供 data-half（抓/还原字节）。snapshot 记录改成 opaque 信封 `{ storageClass, handle, parts, baseEventCursor, size?, checksum? }`：`handle` 对 central 不透明（string|json），`parts` 是语义名。删除 `SnapshotPart.path` 与 `location: string`；`SnapshotCaptureRef`/`SnapshotRestoreRef` 同步改为携带 `storageClass` + opaque `handle`。`workspaceRef` 变 opaque handle：central 的 session-manager 不再铸 `docker-volume:` 前缀，sidecar 不再把它当 `workspacePath`，由 storageClass 的 data-half 解释。`storageClass` 同时是需求↔能力匹配维度：session 只能被 data-half 支持该 class 的 worker 承载，V1 同质 pool 天然一致，central 记名字用于路由与防错配。
-- **Provisioning 只引用。** WorkerPool 字段收敛为 `poolId + template{labels, capacity} + workerType + hostPoolController + scalePolicy`。HostPoolController 保持 `id + adapterKind + imageName + dockerfilePath + workerType`，文档明确 `id`（引用键）≠ `adapterKind`（代码 classId）。
-- **两类 config 定稿。** AgentSpec（需求）：`agentSpecId、launch、toolProfile、workerSelector、storageClass、pausePolicy、recoveryPolicy、idlePauseTimeoutMs、version`，可选 `labels` 仅作自身 metadata、不参与匹配。WorkerPool（供给制备）：`poolId、template{labels, capacity}、workerType、hostPoolController、scalePolicy`。其余（adapter 实现、agentProcess/transport、worker profile 组合、storage handle 格式）全部代码/镜像自声明或 opaque 运行时状态，无人手写。
+- **持久化：需求用 label，driver 归代码/供给，central 只记 opaque 信封。** AgentSpec/WorkerType 不再有 `workspaceClass`/`agentStatePolicy`/`storageClass` 字段；“要哪种存储”只作为 `workerSelector` 的一条 storage label 参与统一 label 匹配。具体 storageClass driver 是代码 adapter（自声明 `classId`）、装在 worker build profile 里由供给侧提供；worker 注册时自报 storage label（供匹配）并带上自己被哪个 driver backing 的 `classId`（供 central 记录）。central 在 assign 时把该 driver 身份绑定到 session，capture 时写进 snapshot **opaque 信封** `{ storageClass, handle, parts, baseEventCursor, size?, checksum? }`：`storageClass` 是 central 记下的具体 driver classId、`handle` 对 central 不透明（string|json）、`parts` 是语义名。删除 `SnapshotPart.path` 与 `location: string`；`SnapshotCaptureRef`/`SnapshotRestoreRef` 同步携带 `storageClass` + opaque `handle`。`workspaceRef` 也是 opaque handle：由 driver 的 data-half 在 assign 时铸造，central 不再铸 `docker-volume:` 前缀、sidecar 不再当 `workspacePath`。central 全程不解析 `handle`、不搬字节。
+- **谁搬字节由 attachment kind 决定；匹配仍走 label，不新增独立 controller。** 被选中的 storageClass driver 的 control-half 提供 `prepareCapture/prepareRestore(handle) → StorageAttachment{ kind, spec }`（`spec` 对 central 不透明）；`kind` 是标准词汇（同 CSI 把任意 driver×任意节点归一到一个接口的思路），只决定 capture/restore 时谁搬字节，归成三种：
+  - `worker-pull`：worker 的 data-half 用 `spec` 在 agent 前拉字节、pause 时推字节回后端（Foundry 可注 env、任何有网+凭据的 host）。
+  - `host-managed`：谁都不搬，host/agent 自管，central 只持 `handle` ref（= 现有 `copilot-managed-local` no-op persistence）。
+  - `volume-mount`：平台在 agent 前把卷挂进 compute、pause 时快照（k8s/Docker），hostPoolController 消费 `spec` 塑造 compute。
+  **V1 只实现 `worker-pull` 与 `host-managed`；`volume-mount` 后续走同一 seam 接入，不改 central 代码路径。** 匹配不引入 `requiredKind ∈ supportedKinds` 这套独立机制：host 能提供哪种存储，就在 `WorkerPool.template.labels` 上带一条对应的 storage label，AgentSpec `workerSelector` 要求它，标准 label 匹配即保证兼容——needing `worker-pull` 的 session 不会被排到只带 `host-managed` label 的 pool，会保持 `queued` 并记明确 reason（如 k8s `Pending`）。`kind` 只是被选中 driver 的内部属性，assign 时用于分发（`worker-pull` → 注入 worker env、`host-managed` → 不动、`volume-mount` → 交 hostPoolController），不是匹配字段。恢复时 central 用 session 记下的具体 storageClass driver 还原，并只把 session 排到能还原该 handle 的 worker（V1 同质部署下 storage label 与 driver 1:1，天然满足）。协调由现有 session reconciler 承担，不引入独立 storage controller。
+- **Provisioning 只引用。** WorkerPool 字段收敛为 `poolId + template{labels, capacity} + hostPoolControllerClass + scalePolicy`；storage 能力就是 `template.labels` 里的那条 storage label，不单列字段。WorkerPool 只按 `hostPoolControllerClass` 引用 HostPoolController；HostPoolController 为 `id + adapterKind + imageName + dockerfilePath + workerType`，独占 workerType 与镜像信息（不在 WorkerPool 重复），文档明确 `id`（实例引用键）≠ `adapterKind`（代码 classId）。
+- **两类 config 定稿。** AgentSpec（需求）：`agentSpecId、launch、toolProfile、workerSelector、pausePolicy、recoveryPolicy、idlePauseTimeoutMs、version`；存储需求就在 `workerSelector` 的 storage label 里，`recoveryPolicy`/`pausePolicy` 是与存储后端正交的恢复/暂停语义（restart-with-context 在 volume-snapshot 下靠还原快照、在 host-managed 下靠 host 自留状态，都成立）；可选 `labels` 仅作自身 metadata、不参与匹配。WorkerPool（供给制备）：`poolId、template{labels, capacity}、hostPoolControllerClass、scalePolicy`（workerType 与镜像由被引用的 HostPoolController 持有，不在 WorkerPool 重复）。其余（adapter 实现、agentProcess/transport、worker profile 组合、具体 storageClass driver 与 storage handle 格式）全部代码/镜像自声明或 opaque 运行时状态，无人手写。
 
 Scenario-based test：`scenario: worker selection is purely label based`
 
@@ -883,33 +888,59 @@ Given：
 
 Expect：
 
-- scale 出的 worker 注册时的 labels/capacity 等于 `template`；`config/worker-types/*.json` 不含 labels/capacity/sidecarClass。
+- scale 出的 worker 注册时的 labels/capacity 等于 `template`；worker type build profile（镜像自声明）不含 labels/capacity/sidecarClass，`config/worker-types/*.json` 已移除。
 - 新增一个同镜像的 agent 类型只改 `WorkerPool.template` 与 AgentSpec，不改任何 worker-type 文件。
 - standalone worker 用显式启动参数带 labels/capacity 注册。
 
-Scenario-based test：`scenario: persistence uses one storageClass with an opaque handle`
+Scenario-based test：`scenario: storage requirement is matched by label`
 
 Given：
 
-- 一个 AgentSpec 只声明 `storageClass`（无 `workspaceClass`/`agentStatePolicy`）。
-- pause 一个使用 volume-snapshot storageClass 的 session。
+- 一个 AgentSpec 的 `workerSelector.matchLabels` 含一条 storage label（如 `storage=volume-snapshot`）和 sidecar 能力 label，没有 `storageClass`/`workspaceClass`/`agentStatePolicy` 字段。
+- 一个 pool 的 `template.labels` 带同样的 storage label；另一个 pool 只带 `storage=host-managed`。
 
 Expect：
 
-- central 记录的 snapshot 信封含 `storageClass` + opaque `handle` + 语义 `parts` + `baseEventCursor`，不含任何 filesystem path。
+- session 被选到带 `storage=volume-snapshot` 的 worker；选择只用 labels + capacity + conditions。
+- 只带 `storage=host-managed` 的 pool 不接这个 session，session 保持 `queued` 并记明确 reason（无兼容 pool）。
+- `src/` 中不存在把 `storageClass`/`workspaceClass`/`agentStatePolicy` 作为 AgentSpec 字段的定义。
+
+Scenario-based test：`scenario: persistence records an opaque handle from a supply-declared driver`
+
+Given：
+
+- 一个 worker 由 volume-snapshot storageClass driver backing（driver 是代码 adapter，自声明 `classId`）。
+- pause 一个跑在该 worker 上的 session。
+
+Expect：
+
+- central 选完 worker 才把该 driver 的 `classId` 记到 session；central 记录的 snapshot 信封含 `storageClass`（该 driver classId）+ opaque `handle` + 语义 `parts` + `baseEventCursor`，不含任何 filesystem path。
 - central 代码不解析 `handle`；resume 时把 `{ storageClass, handle }` 交给新 worker 的 data-half 还原。
-- 换一个 handle 为非 path json 的 mock storageClass 时，central 代码路径与断言不变。
+- 换一个 handle 为非 path json 的 mock storageClass driver 时，central 代码路径与断言不变。
 
 Scenario-based test：`scenario: central mints no backend-specific workspace reference`
 
 Given：
 
-- 创建一个 session。
+- 创建一个 session 并分配到 worker。
 
 Expect：
 
-- `workspaceRef` 是 storageClass data-half 产生的 opaque handle；central 的 session-manager 不出现 `docker-volume:` 之类后端前缀。
+- `workspaceRef` 是被选中 storageClass driver 的 data-half 在 assign 时产生的 opaque handle；central 的 session-manager 不出现 `docker-volume:` 之类后端前缀。
 - sidecar 不把 `workspaceRef` 当 `workspacePath` 直接用，而是经 workspace data-half 解析出实际挂载点。
+
+Scenario-based test：`scenario: attachment kind dispatches bytes and recovery reuses the recorded driver`
+
+Given：
+
+- 一个 worker 由 `worker-pull` kind 的 storageClass driver backing，另一个由 `host-managed` kind 的 driver backing。
+
+Expect：
+
+- assign 到 worker-pull worker 时，central 调 driver control-half 拿 `StorageAttachment{ kind: 'worker-pull', spec }`，把 `spec` 注入 worker env，worker data-half 在 agent 前用它拉字节；central 不解析 `spec`。
+- assign 到 host-managed worker 时，central 不产分发、不搬字节，只持 `handle` ref（= 现有 copilot-managed-local no-op）。
+- resume 时 central 用 session 记下的具体 storageClass driver 还原，并只把 session 排到能还原该 handle 的 worker（V1 storage label 与 driver 1:1）。
+- 换 `spec` 为非 path 的任意 json 时，central 的分发代码路径与断言不变。
 
 ## 15. Slice 13：Reconnect And Replay
 
@@ -975,7 +1006,7 @@ Expect：
 9. Local worker type（worker-type-driven adapter binding 与 copilot-managed-local persistence）。
 10. Durable interaction broker（approval 与 client tool round-trip，Copilot pending-request 桥接成 central-owned durable interaction）。
 11. Externalize demo config to default config dir（AgentSpec/WorkerPool/WorkerType/host-pool-controller 从 `src/` 常量移到 `config/`，并用 self-declared classId 做 generic 解析，`src/` 无 config 值字面量）。
-12. Normalize resource model（去重到单一来源、代码事实回归自声明、持久化统一成 storageClass + opaque handle 信封）。
+12. Normalize resource model（去重到单一来源、代码事实回归自声明、存储需求用 label 匹配、持久化用 opaque handle 信封）。
 13. Reconnect and replay。
 14. Thin auth and audit boundary。
 
@@ -1011,4 +1042,4 @@ Slice 10 必须包含 interaction broker scenario tests，覆盖：approval inte
 
 Slice 11 必须包含 config store scenario tests：`scenario: central loads agent specs from the default config directory` 断言 central 不注入 registry 时从默认 config 目录加载 AgentSpec 并在 runtime status 列出；`scenario: worker pool config binds tenant and deployment wiring at load` 断言 WorkerPool 文档在 load 时注入 tenantId 与 centralUrlForWorkers；Slice 9 的 `scenario: worker type binds adapters so startup only references the type` 现在从 `config/worker-types/` 读数据、adapter 按 self-declared classId 解析。`src/` 内不得再出现 AgentSpec/WorkerType 常量或 `docker-workspace-volume-snapshot`、`docker-dotnet`、`dotnet-process-wrapper`、`DOTNET_WORKER_POOL_ID` 等 config 值字面量；每个 adapter/persistence/host-pool class 用 `classId` 自声明 id，解析走 generic `registry.get(configValue)`。Docker sidecar 镜像必须 `COPY config ./config`。用户可见体验不变：`pnpm start:central`、`pnpm start:sidecar`、Docker WorkerPool、samples/webclient 全部照旧工作。
 
-Slice 12 必须包含 resource model scenario tests：`scenario: worker selection is purely label based` 断言 selection 只用 labels（`src/` 无 `SidecarClass` 类型/字段）；`scenario: worker labels and capacity are declared once on the pool template` 断言 labels/capacity 单一来源是 `WorkerPool.template`、`config/worker-types/*.json` 无 labels/capacity/sidecarClass；`scenario: persistence uses one storageClass with an opaque handle` 断言 snapshot 信封只含 `storageClass` + opaque `handle` + 语义 `parts` + cursor（无 filesystem path）、换非 path 的 mock storageClass 时 central 代码路径不变；`scenario: central mints no backend-specific workspace reference` 断言 central 不铸 `docker-volume:` 前缀、sidecar 经 data-half 解析 workspaceRef。持久化契约变化（`storageClass`、opaque snapshot 信封、workspaceRef）必须同步 `sdk/client/public-protocol-spec-ch.md`、SDK、runtime handlers、e2e tests。
+Slice 12 必须包含 resource model scenario tests：`scenario: worker selection is purely label based` 断言 selection 只用 labels（`src/` 无 `SidecarClass` 类型/字段）；`scenario: worker labels and capacity are declared once on the pool template` 断言 labels/capacity 单一来源是 `WorkerPool.template`、worker type build profile（镜像自声明）无 labels/capacity/sidecarClass（`config/worker-types/*.json` 已移除）；`scenario: storage requirement is matched by label` 断言存储需求是 `workerSelector` 的一条 storage label、AgentSpec 无 `storageClass`/`workspaceClass`/`agentStatePolicy` 字段、无兼容 storage label 的 pool 让 session 保持 queued；`scenario: persistence records an opaque handle from a supply-declared driver` 断言具体 storageClass driver 由供给/代码自声明、central 选完 worker 才记 driver 身份、snapshot 信封只含 `storageClass`（driver classId）+ opaque `handle` + 语义 `parts` + cursor（无 filesystem path）、换非 path 的 mock driver 时 central 代码路径不变；`scenario: central mints no backend-specific workspace reference` 断言 workspaceRef 由被选中 driver 的 data-half 在 assign 时铸造、central 不铸 `docker-volume:` 前缀、sidecar 经 data-half 解析；`scenario: attachment kind dispatches bytes and recovery reuses the recorded driver` 断言 central 按被选中 driver 的 attachment kind 分发（worker-pull 注入 env、host-managed 不动）、不解析 `spec`、resume 复用 session 记下的 driver，V1 只实现 worker-pull 与 host-managed。持久化契约变化（storage label 匹配、具体 storageClass driver 身份、opaque snapshot 信封、workspaceRef、StorageAttachment kind）必须同步 `sdk/client/public-protocol-spec-ch.md`、SDK、runtime handlers、e2e tests。

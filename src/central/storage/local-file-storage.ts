@@ -93,7 +93,7 @@ export class LocalFileStorage implements RuntimeStorage {
   }
 
   async writeSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
-    await this.writeJson(join(this.root, 'snapshots', snapshot.location, 'snapshot.json'), snapshot);
+    await this.writeJson(join(this.root, 'snapshots', snapshot.sessionId, snapshot.snapshotId, 'snapshot.json'), snapshot);
   }
 
   async readSnapshot(sessionId: string, snapshotId: string): Promise<WorkspaceSnapshot | undefined> {

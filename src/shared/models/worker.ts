@@ -1,4 +1,3 @@
-export type SidecarClass = string;
 export type WorkerCondition = 'ready' | 'busy' | 'draining' | 'disconnected';
 export type WorkerLifecycleState = 'registered' | 'active' | 'closed' | 'expired';
 
@@ -6,8 +5,8 @@ export interface WorkerRecord {
   workerId: string;
   tenantId: string;
   capacityScope: string;
-  sidecarClass: SidecarClass;
   labels: Record<string, string>;
+  storageClass: string;
   description?: Record<string, string>;
   capacity: number;
   allocatable: number;
@@ -21,8 +20,8 @@ export interface WorkerRecord {
 }
 
 export interface WorkerRegisterPayload {
-  sidecarClass: SidecarClass;
   labels: Record<string, string>;
+  storageClass: string;
   description?: Record<string, string>;
   capacity: number;
   allocatable: number;

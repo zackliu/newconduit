@@ -8,8 +8,7 @@ export class WorkerSelector {
 
   select(session: SessionRecord, workers: WorkerRecord[]): WorkerRecord | undefined {
     return workers.find((worker) =>
-      worker.sidecarClass === session.resolvedAgentSpec.sidecarClass
-      && worker.lifecycleState === 'active'
+      worker.lifecycleState === 'active'
       && Date.parse(worker.expiresAt) > this.now()
       && worker.allocatable > 0
       && worker.conditions.includes('ready')

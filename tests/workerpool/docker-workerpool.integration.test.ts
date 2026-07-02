@@ -12,7 +12,7 @@ import { CentralHttpServer } from '../../src/central/http/central-http-server';
 import { registerPocCentralRoutes } from '../../src/central/http/poc-routes';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import type { HostPoolInstanceRecord, SessionRecord, WorkerPoolRecord, WorkerRecord } from '../../src/shared';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
 import { isCredentialUnavailable, loadTestEnv } from '../support/test-env';
 
 const execFileAsync = promisify(execFile);
@@ -44,9 +44,7 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
   const workerPool: WorkerPoolRecord = {
     poolId,
     tenantId,
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
-    capacityPerWorker: 1,
+    template: { labels: COPILOT_WORKER_LABELS, capacity: 1 },
     hostPoolControllerClass: 'docker',
     scalePolicy: {
       scaleOutMaxPendingPerTick: 1,
@@ -101,8 +99,8 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
     assert.equal(typeof instance.containerId, 'string');
     assert.equal(typeof instance.workerId, 'string');
     const worker = await waitForActiveWorker(storage, instance.workerId!, 30_000);
-    assert.deepEqual(worker.labels, { agent: 'copilot' });
-    assert.equal(worker.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
+    assert.deepEqual(worker.labels, COPILOT_WORKER_LABELS);
+    assert.equal(worker.storageClass, COPILOT_STORAGE_CLASS);
 
     const running = await waitForSession(storage, session.id, (candidate) => candidate.status === 'running', 120_000);
     assert.equal(running.currentWorkerId, worker.workerId);
@@ -163,9 +161,7 @@ test('scenario: docker worker pool restores session memory across worker recycle
   const workerPool: WorkerPoolRecord = {
     poolId,
     tenantId,
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
-    capacityPerWorker: 1,
+    template: { labels: COPILOT_WORKER_LABELS, capacity: 1 },
     hostPoolControllerClass: 'docker',
     scalePolicy: {
       scaleOutMaxPendingPerTick: 1,

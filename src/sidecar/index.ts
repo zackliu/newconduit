@@ -3,4 +3,4 @@ export type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorksp
 export { HeartbeatController, LeaseCommandController } from './controllers';
 export { SidecarDaemon } from './sidecar-daemon';
 export { resolveWorkerType } from './worker-types';
-export type { WorkerType } from './worker-types';
+export type { WorkerBuildProfile } from './worker-types';

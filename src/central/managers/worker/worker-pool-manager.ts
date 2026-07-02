@@ -71,9 +71,8 @@ export class WorkerPoolManager {
           tenantId: pool.tenantId,
           poolId: pool.poolId,
           hostPoolControllerClass: pool.hostPoolControllerClass,
-          sidecarClass: pool.sidecarClass,
-          labels: pool.labels,
-          capacity: pool.capacityPerWorker,
+          labels: pool.template.labels,
+          capacity: pool.template.capacity,
           state: 'pending',
           createdAt: now,
           updatedAt: now
@@ -154,19 +153,17 @@ export class WorkerPoolManager {
     return session.tenantId === pool.tenantId
       && session.status === 'queued'
       && Date.parse(this.clock.now()) - Date.parse(session.lastEventUpdatedAt) < session.resolvedAgentSpec.idlePauseTimeoutMs
-      && session.resolvedAgentSpec.sidecarClass === pool.sidecarClass
-      && Object.entries(session.resolvedAgentSpec.workerSelector.matchLabels).every(([key, value]) => pool.labels[key] === value);
+      && Object.entries(session.resolvedAgentSpec.workerSelector.matchLabels).every(([key, value]) => pool.template.labels[key] === value);
   }
 
   private hasMatchingReadyWorker(workers: WorkerRecord[], pool: WorkerPoolRecord): boolean {
     const now = Date.parse(this.clock.now());
     return workers.some((worker) => worker.tenantId === pool.tenantId
-      && worker.sidecarClass === pool.sidecarClass
       && worker.lifecycleState === 'active'
       && Date.parse(worker.expiresAt) > now
       && worker.allocatable > 0
       && worker.conditions.includes('ready')
-      && Object.entries(pool.labels).every(([key, value]) => worker.labels[key] === value));
+      && Object.entries(pool.template.labels).every(([key, value]) => worker.labels[key] === value));
   }
 
   private hasPendingInstance(instances: HostPoolInstanceRecord[], pool: WorkerPoolRecord): boolean {

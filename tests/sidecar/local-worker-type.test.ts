@@ -11,7 +11,7 @@ import { CopilotProcessAdapter, LocalWorkspaceAdapter } from '../../src/sidecar/
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
 import { resolveWorkerType } from '../../src/sidecar/worker-types';
 import type { RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, WorkerRegisterPayload } from '../../src/shared';
-import { COPILOT_LOCAL_PROCESS_SIDECAR_CLASS } from '../support/config-fixtures';
+import { LOCAL_STORAGE_CLASS, LOCAL_WORKER_LABELS } from '../support/config-fixtures';
 import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
 
 class SidecarInMemoryTransport implements SidecarRuntimeTransport {
@@ -55,13 +55,12 @@ class DeterministicAgentProcessAdapter implements SidecarAgentProcessAdapter {
   }
 }
 
-test('scenario: worker type binds adapters so startup only references the type', () => {
-  const workerType = resolveWorkerType('copilot-local');
-  assert.equal(workerType.sidecarClass, COPILOT_LOCAL_PROCESS_SIDECAR_CLASS);
-  assert.deepEqual(workerType.labels, { agent: 'local' });
-  assert.equal(workerType.capacity, 99);
-  assert.ok(workerType.createWorkspaceAdapter() instanceof LocalWorkspaceAdapter);
-  assert.ok(workerType.createAgentProcessAdapter() instanceof CopilotProcessAdapter);
+test('scenario: worker type build profile declares only the adapter combination', () => {
+  const profile = resolveWorkerType('copilot-local');
+  assert.equal(profile.workerTypeId, 'copilot-local');
+  assert.equal(profile.storageClass, LOCAL_STORAGE_CLASS);
+  assert.ok(profile.createWorkspaceAdapter() instanceof LocalWorkspaceAdapter);
+  assert.ok(profile.createAgentProcessAdapter() instanceof CopilotProcessAdapter);
   assert.throws(() => resolveWorkerType('does-not-exist'));
 });
 
@@ -76,7 +75,7 @@ test('scenario: local agent spec assigns to local worker without docker scale-ou
     const grant = await central.negotiateSidecarConnectionForTenant('poc', sidecarContext(), localWorkerRegistration());
     const worker = grant.worker;
     assert.ok(worker);
-    assert.equal(worker.sidecarClass, COPILOT_LOCAL_PROCESS_SIDECAR_CLASS);
+    assert.equal(worker.storageClass, LOCAL_STORAGE_CLASS);
     assert.equal(worker.capacity, 99);
     await runtimeTransport.publish({ kind: 'tenant-inbox' }, workerHeartbeatEvent(worker.workerId), sidecarContext());
 
@@ -119,8 +118,8 @@ test('scenario: local agent spec assigns to local worker without docker scale-ou
 });
 
 function localWorkerRegistration(): WorkerRegisterPayload {
-  const workerType = resolveWorkerType('copilot-local');
-  return { sidecarClass: workerType.sidecarClass, labels: workerType.labels, capacity: workerType.capacity, allocatable: workerType.capacity };
+  const profile = resolveWorkerType('copilot-local');
+  return { storageClass: profile.storageClass, labels: LOCAL_WORKER_LABELS, capacity: 99, allocatable: 99 };
 }
 
 function workerHeartbeatEvent(workerId: string): RuntimeEvent {

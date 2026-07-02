@@ -39,10 +39,8 @@ export type {
 	SessionRecord,
 	SessionResumeRequestedPayload,
 	SessionStatus,
-	SidecarClass,
 	SnapshotCaptureRef,
 	SnapshotCreatedPayload,
-	SnapshotPart,
 	SnapshotPartName,
 	SnapshotRestoreRef,
 	StatusChangedPayload,
@@ -59,6 +57,7 @@ export type {
 	WorkerLifecycleState,
 	WorkerPoolRecord,
 	WorkerPoolScalePolicy,
+	WorkerPoolTemplate,
 	WorkerRecord,
 	WorkerRegisterPayload,
 	WorkspaceSnapshot

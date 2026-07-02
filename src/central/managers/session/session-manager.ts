@@ -70,7 +70,7 @@ export class SessionManager {
       owner: context.principal.principalId,
       resolvedAgentSpec,
       nextTurnSeq: 2,
-      workspaceRef: `docker-volume:${crypto.randomUUID()}`
+      workspaceRef: crypto.randomUUID()
     });
     const event = await this.eventLogManager.append({
       type: 'session.created',

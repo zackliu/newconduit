@@ -23,6 +23,7 @@ export interface SessionRecord {
   status: SessionStatus;
   currentWorkerId?: string;
   sessionLeaseId?: string;
+  storageClass?: string;
   eventCursor: number;
   nextTurnSeq: number;
   workspaceRef: string;

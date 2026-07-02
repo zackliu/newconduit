@@ -1,4 +1,4 @@
-import type { AgentOutputPayload, InteractionRequestedPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPart, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
+import type { AgentOutputPayload, InteractionRequestedPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPartName, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
 import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
 import { SnapshotManager } from '../persistence';
 
@@ -284,11 +284,11 @@ export class AgentRuntimeEventController {
     if (!this.isRecord(value) || typeof value.snapshotId !== 'string' || !Array.isArray(value.parts)) {
       throw new Error('invalid session.paused snapshot');
     }
-    const parts = value.parts.map((part): SnapshotPart => {
-      if (!this.isRecord(part) || (part.name !== 'workspace' && part.name !== 'agent-state') || typeof part.path !== 'string') {
+    const parts = value.parts.map((part): SnapshotPartName => {
+      if (part !== 'workspace' && part !== 'agent-state') {
         throw new Error('invalid session.paused snapshot part');
       }
-      return { name: part.name, path: part.path };
+      return part;
     });
     return { snapshotId: value.snapshotId, parts };
   }

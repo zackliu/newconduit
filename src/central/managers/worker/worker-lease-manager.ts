@@ -11,6 +11,7 @@ export class SessionLeaseManager {
       ...session,
       currentWorkerId: worker.workerId,
       sessionLeaseId: crypto.randomUUID(),
+      storageClass: session.storageClass ?? worker.storageClass,
       status: 'starting'
     };
     await this.storage.writeSession(next);

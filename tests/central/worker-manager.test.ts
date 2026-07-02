@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { AgentSpecAdmissionManager, WorkerManager, WorkerSelector } from '../../src/central/managers';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, POC_AGENT_SPEC } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import type { Clock, RuntimeEvent, SessionRecord, WorkerRecord } from '../../src/shared';
 
@@ -28,8 +28,8 @@ test('scenario: standalone sidecar registers worker and becomes ready after firs
     const worker = await registerWorker(manager);
 
     assert.equal(worker.tenantId, 'poc');
-    assert.equal(worker.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
-    assert.deepEqual(worker.labels, { agent: 'copilot' });
+    assert.equal(worker.storageClass, COPILOT_STORAGE_CLASS);
+    assert.deepEqual(worker.labels, COPILOT_WORKER_LABELS);
     assert.equal(worker.capacity, 1);
     assert.equal(worker.allocatable, 0);
     assert.deepEqual(worker.conditions, ['disconnected']);
@@ -316,8 +316,8 @@ async function withStorage(testBody: (input: { root: string; storage: LocalFileS
 async function registerWorker(manager: WorkerManager): Promise<WorkerRecord> {
   return manager.register({
     tenantId: 'poc',
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
     capacity: 1,
     allocatable: 1
   });

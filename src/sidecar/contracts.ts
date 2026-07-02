@@ -1,10 +1,16 @@
-import type { AgentOutputPayload, InteractionKind, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPart } from '../shared';
+import type { AgentOutputPayload, InteractionKind, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPartName } from '../shared';
 
 export interface SidecarRuntimeTransport {
   connect(accessUrl: string): Promise<void>;
   publish(channel: RuntimeChannel, event: RuntimeEvent): Promise<void>;
   subscribe(channel: RuntimeChannel, handler: RuntimeEventHandler): Promise<RuntimeSubscription>;
   stop(): Promise<void>;
+}
+
+/** Opaque storage handles central routes to the worker; the workspace data-half resolves them to real paths. */
+export interface SidecarWorkspaceHandles {
+  workspaceRef: string;
+  agentStateRef: string;
 }
 
 export interface SidecarWorkspaceMount {
@@ -14,18 +20,18 @@ export interface SidecarWorkspaceMount {
 
 export interface SidecarWorkspaceCaptureInput {
   mount: SidecarWorkspaceMount;
-  location: string;
+  handle: string;
 }
 
 export interface SidecarWorkspaceRestoreInput {
   mount: SidecarWorkspaceMount;
-  location: string;
-  parts: SnapshotPart[];
+  handle: string;
+  parts: SnapshotPartName[];
 }
 
 export interface SidecarWorkspaceAdapter {
-  mount(input: SidecarWorkspaceMount): SidecarWorkspaceMount;
-  capture(input: SidecarWorkspaceCaptureInput): Promise<SnapshotPart[]>;
+  mount(input: SidecarWorkspaceHandles): SidecarWorkspaceMount;
+  capture(input: SidecarWorkspaceCaptureInput): Promise<SnapshotPartName[]>;
   restore(input: SidecarWorkspaceRestoreInput): Promise<void>;
 }
 

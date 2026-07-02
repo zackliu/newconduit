@@ -52,8 +52,8 @@ test('scenario: central starts server with health and negotiate endpoints', asyn
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        sidecarClass: 'copilot-process-wrapper',
-        labels: { agent: 'copilot' },
+        labels: { agent: 'copilot', storage: 'volume-snapshot' },
+        storageClass: 'volume-snapshot',
         capacity: 1,
         allocatable: 1
       })
@@ -68,15 +68,15 @@ test('scenario: central starts server with health and negotiate endpoints', asyn
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        sidecarClass: 'copilot-local-process',
-        labels: { agent: 'local' },
+        labels: { agent: 'local', storage: 'host-managed' },
+        storageClass: 'host-managed',
         capacity: 99,
         allocatable: 99
       })
     });
     assert.equal(localSidecarNegotiateResponse.status, 200);
-    const localWorker = await localSidecarNegotiateResponse.json() as { worker: { sidecarClass: string } };
-    assert.equal(localWorker.worker.sidecarClass, 'copilot-local-process');
+    const localWorker = await localSidecarNegotiateResponse.json() as { worker: { storageClass: string } };
+    assert.equal(localWorker.worker.storageClass, 'host-managed');
   } finally {
     await server.close();
     await rm(root, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { SnapshotPart } from '../../shared';
-import type { SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../contracts';
+import type { SnapshotPartName } from '../../shared';
+import type { SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceHandles, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../contracts';
 
 export interface LocalWorkspaceAdapterOptions {
   workRoot?: string;
@@ -12,25 +12,25 @@ export interface LocalWorkspaceAdapterOptions {
  * worker and are owned by Copilot. Capture/restore are intentionally no-ops; persistence is not central's concern.
  */
 export class LocalWorkspaceAdapter implements SidecarWorkspaceAdapter {
-  static readonly classId = 'local-managed';
+  static readonly classId = 'host-managed';
   private readonly workRoot: string;
 
   constructor(options: LocalWorkspaceAdapterOptions = {}) {
     this.workRoot = resolve(options.workRoot ?? (process.env.SIDECAR_WORK_ROOT?.trim() || '.runtime-poc/sidecar-local'));
   }
 
-  mount(input: SidecarWorkspaceMount): SidecarWorkspaceMount {
-    if (!input.workspacePath || !input.copilotSessionStatePath) {
-      throw new Error('workspacePath and copilotSessionStatePath are required');
+  mount(input: SidecarWorkspaceHandles): SidecarWorkspaceMount {
+    if (!input.workspaceRef || !input.agentStateRef) {
+      throw new Error('workspaceRef and agentStateRef are required');
     }
-    const workspacePath = resolve(this.workRoot, 'workspaces', this.toSafePathSegment(input.workspacePath));
-    const copilotSessionStatePath = resolve(this.workRoot, 'copilot-sessions', this.toSafePathSegment(input.copilotSessionStatePath));
+    const workspacePath = resolve(this.workRoot, 'workspaces', this.toSafePathSegment(input.workspaceRef));
+    const copilotSessionStatePath = resolve(this.workRoot, 'copilot-sessions', this.toSafePathSegment(input.agentStateRef));
     mkdirSync(workspacePath, { recursive: true });
     mkdirSync(copilotSessionStatePath, { recursive: true });
     return { workspacePath, copilotSessionStatePath };
   }
 
-  async capture(_input: SidecarWorkspaceCaptureInput): Promise<SnapshotPart[]> {
+  async capture(_input: SidecarWorkspaceCaptureInput): Promise<SnapshotPartName[]> {
     return [];
   }
 

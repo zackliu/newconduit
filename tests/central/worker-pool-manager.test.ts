@@ -7,7 +7,7 @@ import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import type { Clock, HostPoolInstanceRecord, RuntimeEvent, WorkerPoolRecord, WorkerRecord } from '../../src/shared';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
 import type { HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult } from '../../src/central/managers';
 
 class FixedClock implements Clock {
@@ -45,7 +45,7 @@ test('scenario: queued session causes worker pool to scale out, assign provision
     assert.equal(adapter.scaleOutInputs.length, 1);
     const [scaleOut] = adapter.scaleOutInputs;
     assert.equal(scaleOut.pool.poolId, 'poc-docker-copilot');
-    assert.deepEqual(scaleOut.pool.labels, { agent: 'copilot' });
+    assert.deepEqual(scaleOut.pool.template.labels, COPILOT_WORKER_LABELS);
     assert.equal(scaleOut.instance.state, 'pending');
     assert.equal(scaleOut.instance.capacity, 1);
 
@@ -128,9 +128,7 @@ async function withRuntime(testBody: (input: { root: string; storage: LocalFileS
     const workerPool: WorkerPoolRecord = {
       poolId: 'poc-docker-copilot',
       tenantId: 'poc',
-      sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-      labels: { agent: 'copilot' },
-      capacityPerWorker: 1,
+      template: { labels: COPILOT_WORKER_LABELS, capacity: 1 },
       hostPoolControllerClass: 'docker',
       scalePolicy: {
         scaleOutMaxPendingPerTick: 1,
@@ -182,8 +180,8 @@ async function registerWorkerFromInstance(central: CentralService, instance: Hos
     principal: { principalId: 'docker-sidecar', type: 'service' },
     connectionId: `connection-${instance.instanceId}`
   }, {
-    sidecarClass: instance.sidecarClass,
     labels: instance.labels,
+    storageClass: COPILOT_STORAGE_CLASS,
     description: {
       workerPoolId: instance.poolId,
       workerPoolInstanceId: instance.instanceId

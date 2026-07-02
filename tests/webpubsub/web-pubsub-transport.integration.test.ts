@@ -10,7 +10,7 @@ import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { DockerWorkspaceAdapter, WebPubSubClientAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar';
 import { WebPubSubRuntimeChannelMapper, type RuntimeEvent, type SessionAssignPayload, type SessionRecord, type WorkerRecord } from '../../src/shared';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
 import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult } from '../../src/sidecar/contracts';
 import { isCredentialUnavailable, loadTestEnv } from '../support/test-env';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -154,16 +154,16 @@ test('scenario: sidecar negotiates real Web PubSub connection and registers work
     await sidecar.startStandaloneWorker({
       centralUrl: `http://localhost:${port}`,
       tenantId,
-      sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-      labels: { agent: 'copilot' },
+      labels: COPILOT_WORKER_LABELS,
+      storageClass: COPILOT_STORAGE_CLASS,
       capacity: 1,
       allocatable: 1
     });
 
     const worker = await waitForReadyWorker(storage);
     assert.equal(worker.tenantId, tenantId);
-    assert.equal(worker.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
-    assert.deepEqual(worker.labels, { agent: 'copilot' });
+    assert.equal(worker.storageClass, COPILOT_STORAGE_CLASS);
+    assert.deepEqual(worker.labels, COPILOT_WORKER_LABELS);
     assert.equal(worker.lifecycleState, 'active');
     assert.deepEqual(worker.conditions, ['ready']);
   } catch (error) {
@@ -223,8 +223,8 @@ test('scenario: client SDK creates session and assignment reaches registered wor
     await sidecar.startStandaloneWorker({
       centralUrl,
       tenantId,
-      sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-      labels: { agent: 'copilot' },
+      labels: COPILOT_WORKER_LABELS,
+      storageClass: COPILOT_STORAGE_CLASS,
       capacity: 1,
       allocatable: 1
     });
@@ -269,7 +269,7 @@ test('scenario: client SDK creates session and assignment reaches registered wor
     assert.equal(assignment.payload.workerId, worker.workerId);
     assert.equal(typeof assignment.payload.sessionLeaseId, 'string');
     assert.equal(assignment.payload.resolvedAgentSpec.agentSpecId, 'copilot-poc');
-    assert.equal(assignment.payload.resolvedAgentSpec.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
+    assert.equal(assignment.payload.resolvedAgentSpec.workerSelector.matchLabels.storage, COPILOT_STORAGE_CLASS);
     assert.equal(typeof assignment.payload.workspaceRef, 'string');
 
     const storedSession = await storage.readSession(assignment.payload.sessionId) as SessionRecord | undefined;

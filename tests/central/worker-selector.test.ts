@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AgentSpecAdmissionManager, WorkerSelector } from '../../src/central/managers';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, POC_AGENT_SPEC } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
 import { SystemClock, type SessionRecord, type WorkerRecord } from '../../src/shared';
 
 test('scenario: queued session is assigned to matching ready worker', () => {
@@ -25,8 +25,8 @@ test('scenario: queued session is assigned to matching ready worker', () => {
     workerId: 'worker-1',
     tenantId: 'tenant-1',
     capacityScope: 'tenant-1',
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
     capacity: 1,
     allocatable: 1,
     conditions: ['ready'],
@@ -63,8 +63,8 @@ test('scenario: expired ready worker is not selected for queued session', () => 
     workerId: 'worker-1',
     tenantId: 'tenant-1',
     capacityScope: 'tenant-1',
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
     capacity: 1,
     allocatable: 1,
     conditions: ['ready'],

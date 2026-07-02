@@ -25,8 +25,8 @@ export {
 	WorkerSelector
 } from './managers';
 export type { AcceptInputOutcome, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput, WorkerPoolManagerStatus } from './managers';
-export { CopilotManagedLocalPersistenceClass, SnapshotManager, VolumeSnapshotPersistenceClass } from './persistence';
-export type { PersistenceClass } from './persistence';
+export { HostManagedStorageClass, SnapshotManager, VolumeSnapshotStorageClass } from './persistence';
+export type { StorageAttachmentKind, StorageClass } from './persistence';
 export { StaticAgentSpecRegistry } from './registries/agent-spec-registry';
 export type { AgentSpecRegistry } from './registries/agent-spec-registry';
 export { FileConfigStore, defaultConfigDir } from './config/file-config-store';

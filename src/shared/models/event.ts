@@ -1,6 +1,6 @@
 import type { ResolvedAgentSpec } from './agent-spec';
 import type { InteractionKind, SessionStatus } from './session';
-import type { SnapshotCaptureRef, SnapshotPart, SnapshotRestoreRef } from './snapshot';
+import type { SnapshotCaptureRef, SnapshotPartName, SnapshotRestoreRef } from './snapshot';
 
 export type RuntimeEventType =
   | 'session.create.requested'
@@ -133,7 +133,7 @@ export interface SessionPausedPayload {
   reason?: 'idle_timeout' | 'client_requested';
   snapshot?: {
     snapshotId: string;
-    parts: SnapshotPart[];
+    parts: SnapshotPartName[];
   };
 }
 

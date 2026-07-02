@@ -7,7 +7,7 @@ import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import type { RuntimeEvent } from '../../src/shared';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
 
 test('scenario: create session request creates durable session truth', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-slice1-'));
@@ -246,8 +246,8 @@ test('scenario: sidecar negotiate creates registered worker truth', async () => 
       },
       connectionId: 'sidecar-connection'
     }, {
-      sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-      labels: { agent: 'copilot' },
+      labels: COPILOT_WORKER_LABELS,
+      storageClass: COPILOT_STORAGE_CLASS,
       capacity: 1,
       allocatable: 1
     });
@@ -259,7 +259,7 @@ test('scenario: sidecar negotiate creates registered worker truth', async () => 
     const workerFile = await readFile(join(root, 'workers', `${workerIds[0]}.json`), 'utf8');
     const worker = JSON.parse(workerFile) as {
       tenantId: string;
-      sidecarClass: string;
+      storageClass: string;
       labels: Record<string, string>;
       capacity: number;
       allocatable: number;
@@ -268,8 +268,8 @@ test('scenario: sidecar negotiate creates registered worker truth', async () => 
     };
 
     assert.equal(worker.tenantId, 'poc');
-    assert.equal(worker.sidecarClass, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS);
-    assert.deepEqual(worker.labels, { agent: 'copilot' });
+    assert.equal(worker.storageClass, COPILOT_STORAGE_CLASS);
+    assert.deepEqual(worker.labels, COPILOT_WORKER_LABELS);
     assert.equal(worker.capacity, 1);
     assert.equal(worker.allocatable, 0);
     assert.equal(worker.lifecycleState, 'registered');

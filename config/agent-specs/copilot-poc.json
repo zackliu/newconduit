@@ -8,17 +8,15 @@
     "command": "copilot",
     "args": []
   },
-  "sidecarClass": "copilot-process-wrapper",
-  "workspaceClass": "docker-workspace-volume-snapshot",
   "toolProfile": "copilot-poc-tools",
   "workerSelector": {
     "matchLabels": {
-      "agent": "copilot"
+      "agent": "copilot",
+      "storage": "volume-snapshot"
     }
   },
   "pausePolicy": "turn-boundary-durable-pause",
   "recoveryPolicy": "restart-with-context",
-  "agentStatePolicy": "copilot-session-volume-snapshot",
   "idlePauseTimeoutMs": 120000,
   "version": "poc-v1"
 }

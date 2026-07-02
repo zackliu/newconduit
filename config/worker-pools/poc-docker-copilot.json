@@ -1,10 +1,12 @@
 {
   "poolId": "poc-docker-copilot",
-  "sidecarClass": "copilot-process-wrapper",
-  "labels": {
-    "agent": "copilot"
+  "template": {
+    "labels": {
+      "agent": "copilot",
+      "storage": "volume-snapshot"
+    },
+    "capacity": 1
   },
-  "capacityPerWorker": 1,
   "hostPoolControllerClass": "docker",
   "scalePolicy": {
     "scaleOutMaxPendingPerTick": 1,

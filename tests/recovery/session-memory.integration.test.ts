@@ -12,7 +12,7 @@ import { DockerWorkspaceAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
 import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport } from '../../src/sidecar/contracts';
 import type { RequestContext, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SessionRecord, WorkerPoolRecord, WorkerRecord, WorkerRegisterPayload } from '../../src/shared';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
 
 const CONTINUITY_FILE = 'continuity.txt';
 const CONTINUITY_CONTENT = 'RESUME-OK-7f3a';
@@ -25,9 +25,7 @@ test('scenario: a recycled session restores its workspace and memory before the 
   const workerPool: WorkerPoolRecord = {
     poolId: 'memory-pool',
     tenantId,
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
-    capacityPerWorker: 1,
+    template: { labels: COPILOT_WORKER_LABELS, capacity: 1 },
     hostPoolControllerClass: 'inproc',
     scalePolicy: { scaleOutMaxPendingPerTick: 1, scaleInIdleMs: 0 },
     centralUrlForWorkers: 'inproc://central'
@@ -237,10 +235,10 @@ class InProcessHostPoolAdapter implements HostPoolAdapter {
     const grant = await this.options.negotiate({
       principalId: `sidecar-${instanceId}`,
       payload: {
-        sidecarClass: input.pool.sidecarClass,
-        labels: input.pool.labels,
-        capacity: input.pool.capacityPerWorker,
-        allocatable: input.pool.capacityPerWorker,
+        labels: input.pool.template.labels,
+        storageClass: COPILOT_STORAGE_CLASS,
+        capacity: input.pool.template.capacity,
+        allocatable: input.pool.template.capacity,
         description: { workerPoolInstanceId: instanceId }
       }
     });

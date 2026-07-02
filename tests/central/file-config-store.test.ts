@@ -13,8 +13,7 @@ test('scenario: central loads agent specs from the default config directory', as
   assert.deepEqual(specs.map((spec) => spec.agentSpecId).sort(), ['copilot-local', 'copilot-poc', 'dotnet-poc']);
   const copilotPoc = specs.find((spec) => spec.agentSpecId === 'copilot-poc');
   assert.ok(copilotPoc);
-  assert.equal(copilotPoc.sidecarClass, 'copilot-process-wrapper');
-  assert.deepEqual(copilotPoc.workerSelector.matchLabels, { agent: 'copilot' });
+  assert.deepEqual(copilotPoc.workerSelector.matchLabels, { agent: 'copilot', storage: 'volume-snapshot' });
 
   const root = await mkdtemp(join(tmpdir(), 'ars-config-store-'));
   try {
@@ -34,5 +33,5 @@ test('scenario: worker pool config binds tenant and deployment wiring at load', 
   assert.equal(copilotPool.tenantId, 'tenant-x');
   assert.equal(copilotPool.centralUrlForWorkers, 'http://central.example:3000');
   assert.equal(copilotPool.hostPoolControllerClass, 'docker');
-  assert.deepEqual(copilotPool.labels, { agent: 'copilot' });
+  assert.deepEqual(copilotPool.template.labels, { agent: 'copilot', storage: 'volume-snapshot' });
 });

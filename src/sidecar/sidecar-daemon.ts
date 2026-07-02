@@ -131,7 +131,7 @@ export class SidecarDaemon {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        sidecarClass: input.sidecarClass,
+        storageClass: input.storageClass,
         labels: input.labels,
         description: input.description,
         capacity: input.capacity,
@@ -148,14 +148,14 @@ export class SidecarDaemon {
     const payload = this.parseAssignPayload(event.payload);
     const sessionLeaseId = this.requireSessionLeaseId(event, payload.sessionLeaseId);
     const mounted = this.options.workspaceAdapter.mount({
-      workspacePath: payload.workspaceRef,
-      copilotSessionStatePath: payload.copilotSessionStateRef
+      workspaceRef: payload.workspaceRef,
+      agentStateRef: payload.copilotSessionStateRef
     });
     const ready = (async () => {
       if (payload.restore) {
         await this.options.workspaceAdapter.restore({
           mount: mounted,
-          location: payload.restore.location,
+          handle: payload.restore.handle,
           parts: payload.restore.parts
         });
       }
@@ -338,7 +338,7 @@ export class SidecarDaemon {
     await this.options.agentProcessAdapter.pauseAtTurnBoundary?.({ sessionId: payload.sessionId });
     await this.options.agentProcessAdapter.stop?.({ sessionId: payload.sessionId });
     const snapshot = payload.capture
-      ? { snapshotId: payload.capture.snapshotId, parts: await this.options.workspaceAdapter.capture({ mount: active.mount, location: payload.capture.location }) }
+      ? { snapshotId: payload.capture.snapshotId, parts: await this.options.workspaceAdapter.capture({ mount: active.mount, handle: payload.capture.handle }) }
       : undefined;
     this.activeRuns.delete(payload.sessionId);
     await this.publishTenantEvent<SessionPausedPayload>({
@@ -418,7 +418,8 @@ export class SidecarDaemon {
     }
     if (candidate.restore !== undefined
       && (typeof candidate.restore.snapshotId !== 'string'
-        || typeof candidate.restore.location !== 'string'
+        || typeof candidate.restore.storageClass !== 'string'
+        || typeof candidate.restore.handle !== 'string'
         || !Array.isArray(candidate.restore.parts))) {
       throw new Error('invalid session.assign restore ref');
     }
@@ -450,7 +451,7 @@ export class SidecarDaemon {
       || typeof candidate.sessionLeaseId !== 'string') {
       throw new Error('invalid session.pause.requested payload');
     }
-    if (candidate.capture !== undefined && (typeof candidate.capture.snapshotId !== 'string' || typeof candidate.capture.location !== 'string')) {
+    if (candidate.capture !== undefined && (typeof candidate.capture.snapshotId !== 'string' || typeof candidate.capture.storageClass !== 'string' || typeof candidate.capture.handle !== 'string')) {
       throw new Error('invalid session.pause.requested capture ref');
     }
     if (candidate.reason !== undefined && candidate.reason !== 'idle_timeout' && candidate.reason !== 'client_requested') {

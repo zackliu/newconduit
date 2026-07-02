@@ -7,12 +7,12 @@ import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { AgentSpecAdmissionManager } from '../../src/central/managers';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, POC_AGENT_SPEC } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { DockerWorkspaceAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
-import type { RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SnapshotPart, WorkerRegisterPayload } from '../../src/shared';
-import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
+import type { RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SnapshotPartName, WorkerRegisterPayload } from '../../src/shared';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceHandles, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
 
 class SidecarInMemoryTransport implements SidecarRuntimeTransport {
   constructor(private readonly transport: RuntimeEventTransport, readonly publishedEvents: RuntimeEvent[] = []) {}
@@ -44,13 +44,13 @@ class PassthroughWorkspaceAdapter implements SidecarWorkspaceAdapter {
   readonly captures: SidecarWorkspaceCaptureInput[] = [];
   readonly restores: SidecarWorkspaceRestoreInput[] = [];
 
-  mount(input: SidecarWorkspaceMount): SidecarWorkspaceMount {
-    return input;
+  mount(input: SidecarWorkspaceHandles): SidecarWorkspaceMount {
+    return { workspacePath: input.workspaceRef, copilotSessionStatePath: input.agentStateRef };
   }
 
-  async capture(input: SidecarWorkspaceCaptureInput): Promise<SnapshotPart[]> {
+  async capture(input: SidecarWorkspaceCaptureInput): Promise<SnapshotPartName[]> {
     this.captures.push(input);
-    return [{ name: 'workspace', path: 'parts/workspace' }, { name: 'agent-state', path: 'parts/agent-state' }];
+    return ['workspace', 'agent-state'];
   }
 
   async restore(input: SidecarWorkspaceRestoreInput): Promise<void> {
@@ -298,8 +298,8 @@ test('scenario: Docker workspace adapter maps runtime refs to existing local dir
   process.env.SIDECAR_WORK_ROOT = root;
   try {
     const mounted = new DockerWorkspaceAdapter().mount({
-      workspacePath: 'workspace-volume:session-1',
-      copilotSessionStatePath: 'copilot-session:session-1'
+      workspaceRef: 'workspace-volume:session-1',
+      agentStateRef: 'copilot-session:session-1'
     });
 
     assert.ok(existsSync(mounted.workspacePath));
@@ -315,8 +315,8 @@ test('scenario: Docker workspace adapter maps runtime refs to existing local dir
 
 function workerRegistration(): WorkerRegisterPayload {
   return {
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
     capacity: 1,
     allocatable: 1
   };
@@ -357,7 +357,7 @@ test('scenario: pause command stops agent run and publishes paused event', async
 
   assert.deepEqual(agentProcessAdapter.pauses, ['session-1']);
   assert.deepEqual(agentProcessAdapter.stops, ['session-1']);
-  assert.deepEqual(workspaceAdapter.captures.map((capture) => capture.location), ['session-1/snap-1']);
+  assert.deepEqual(workspaceAdapter.captures.map((capture) => capture.handle), ['session-1/snap-1']);
   const paused = sidecarTransport.publishedEvents.find((event) => event.type === 'session.paused');
   assert.equal(paused?.sessionId, 'session-1');
   assert.equal(paused?.sessionLeaseId, 'lease-2');
@@ -365,7 +365,7 @@ test('scenario: pause command stops agent run and publishes paused event', async
     reason: 'client_requested',
     snapshot: {
       snapshotId: 'snap-1',
-      parts: [{ name: 'workspace', path: 'parts/workspace' }, { name: 'agent-state', path: 'parts/agent-state' }]
+      parts: ['workspace', 'agent-state']
     }
   });
 });
@@ -499,7 +499,7 @@ function sessionPauseCommandEvent(input: { sessionLeaseId: string; reason: 'idle
       workerId,
       sessionLeaseId: input.sessionLeaseId,
       reason: input.reason,
-      capture: { snapshotId: 'snap-1', location: `${sessionId}/snap-1` }
+      capture: { snapshotId: 'snap-1', storageClass: COPILOT_STORAGE_CLASS, handle: `${sessionId}/snap-1` }
     }
   };
 }

@@ -1,5 +1,3 @@
-import type { SidecarClass } from './worker';
-
 export type HostPoolControllerClass = string;
 export type HostPoolInstanceState = 'pending' | 'ready' | 'stopping' | 'stopped' | 'failed';
 
@@ -8,12 +6,19 @@ export interface WorkerPoolScalePolicy {
   scaleInIdleMs: number;
 }
 
+/**
+ * Worker identity (labels + capacity) is declared once on the pool template. A scaled worker registers with
+ * exactly these labels and capacity; the storage capability the worker offers is one of the template labels.
+ */
+export interface WorkerPoolTemplate {
+  labels: Record<string, string>;
+  capacity: number;
+}
+
 export interface WorkerPoolRecord {
   poolId: string;
   tenantId: string;
-  sidecarClass: SidecarClass;
-  labels: Record<string, string>;
-  capacityPerWorker: number;
+  template: WorkerPoolTemplate;
   hostPoolControllerClass: HostPoolControllerClass;
   scalePolicy: WorkerPoolScalePolicy;
   centralUrlForWorkers: string;
@@ -24,7 +29,6 @@ export interface HostPoolInstanceRecord {
   tenantId: string;
   poolId: string;
   hostPoolControllerClass: HostPoolControllerClass;
-  sidecarClass: SidecarClass;
   labels: Record<string, string>;
   capacity: number;
   state: HostPoolInstanceState;

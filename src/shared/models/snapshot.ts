@@ -1,27 +1,31 @@
 export type SnapshotPartName = 'workspace' | 'agent-state';
 
-export interface SnapshotPart {
-  name: SnapshotPartName;
-  path: string;
-}
-
+/**
+ * A snapshot is an opaque handle envelope. `storageClass` names the concrete driver central recorded from the
+ * worker; `handle` is opaque to central (only the driver's data-half/control-half interpret it); `parts` are
+ * semantic names, not filesystem paths. Central never assumes a path or backend prefix.
+ */
 export interface WorkspaceSnapshot {
   snapshotId: string;
   sessionId: string;
+  storageClass: string;
+  handle: string;
+  parts: SnapshotPartName[];
   baseEventCursor: number;
-  location: string;
-  parts: SnapshotPart[];
+  size?: number;
+  checksum?: string;
   createdAt: string;
-  restoreHints: Record<string, string>;
 }
 
 export interface SnapshotCaptureRef {
   snapshotId: string;
-  location: string;
+  storageClass: string;
+  handle: string;
 }
 
 export interface SnapshotRestoreRef {
   snapshotId: string;
-  location: string;
-  parts: SnapshotPart[];
+  storageClass: string;
+  handle: string;
+  parts: SnapshotPartName[];
 }

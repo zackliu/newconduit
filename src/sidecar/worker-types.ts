@@ -1,80 +1,46 @@
-import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { type SidecarClass } from '../shared';
-import { CopilotProcessAdapter, DockerWorkspaceAdapter, LocalWorkspaceAdapter, WebPubSubClientAdapter } from './adapters';
-import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter } from './contracts';
+import { CopilotProcessAdapter, DockerWorkspaceAdapter, LocalWorkspaceAdapter } from './adapters';
+import type { SidecarAgentProcessAdapter, SidecarWorkspaceAdapter } from './contracts';
 
 /**
- * A worker type names which sidecarClass, labels, capacity, and adapter classes a worker runs with. A worker
- * startup only references a worker type; it does not self-report sidecarClass/labels/capacity or wire adapters.
- * The worker-type data is user-configurable and read from the config directory; the adapter classes named by
- * the data are resolved from the compiled sidecar factory registries below.
+ * A worker type is an image-declared build profile: it names the storage data-half (workspace) adapter and the
+ * agent-process adapter the image ships with. Labels and capacity are NOT part of the build profile - they are
+ * declared once on the WorkerPool template (or passed explicitly for standalone workers). Runtime transport is a
+ * deployment-level choice, not per-type.
+ *
+ * The profile's workspace adapter self-declares a classId; that same id is the worker's `storageClass`, which
+ * central records at assignment and uses to resolve the matching storage control-half.
  */
-export interface WorkerType {
+export interface WorkerBuildProfile {
   workerTypeId: string;
-  sidecarClass: SidecarClass;
-  labels: Record<string, string>;
-  capacity: number;
-  createRuntimeTransport(input: { tenantId: string }): SidecarRuntimeTransport;
+  storageClass: string;
   createWorkspaceAdapter(): SidecarWorkspaceAdapter;
   createAgentProcessAdapter(): SidecarAgentProcessAdapter;
 }
 
-interface WorkerTypeConfig {
-  workerTypeId: string;
-  sidecarClass: SidecarClass;
-  labels: Record<string, string>;
-  capacity: number;
-  runtimeTransportClass: string;
-  workspaceClass: string;
-  agentProcessClass: string;
-}
-
-type RuntimeTransportAdapterClass = (new (options: { tenantId: string }) => SidecarRuntimeTransport) & { classId: string };
 type WorkspaceAdapterClass = (new () => SidecarWorkspaceAdapter) & { classId: string };
-type AgentProcessAdapterClass = (new () => SidecarAgentProcessAdapter) & { classId: string };
+type AgentProcessAdapterClass = new () => SidecarAgentProcessAdapter;
 
-// Each adapter self-declares its classId; the registries are generic maps keyed by that id, and config
-// references the id. The lookup logic holds no config-value string literals.
-const runtimeTransportsByClassId = indexByClassId<RuntimeTransportAdapterClass>([WebPubSubClientAdapter]);
-const workspacesByClassId = indexByClassId<WorkspaceAdapterClass>([DockerWorkspaceAdapter, LocalWorkspaceAdapter]);
-const agentProcessesByClassId = indexByClassId<AgentProcessAdapterClass>([CopilotProcessAdapter]);
-
-export function resolveWorkerType(workerTypeId: string): WorkerType {
-  const config = readWorkerTypeConfig(workerTypeId);
-  const RuntimeTransport = requireClass(runtimeTransportsByClassId, config.runtimeTransportClass, 'runtimeTransportClass');
-  const Workspace = requireClass(workspacesByClassId, config.workspaceClass, 'workspaceClass');
-  const AgentProcess = requireClass(agentProcessesByClassId, config.agentProcessClass, 'agentProcessClass');
+function buildProfile(workerTypeId: string, Workspace: WorkspaceAdapterClass, AgentProcess: AgentProcessAdapterClass): WorkerBuildProfile {
   return {
-    workerTypeId: config.workerTypeId,
-    sidecarClass: config.sidecarClass,
-    labels: config.labels,
-    capacity: config.capacity,
-    createRuntimeTransport: ({ tenantId }) => new RuntimeTransport({ tenantId }),
+    workerTypeId,
+    storageClass: Workspace.classId,
     createWorkspaceAdapter: () => new Workspace(),
     createAgentProcessAdapter: () => new AgentProcess()
   };
 }
 
-function readWorkerTypeConfig(workerTypeId: string): WorkerTypeConfig {
-  const directory = resolve(process.env.CONFIG_DIR ?? 'config', 'worker-types');
-  let text: string;
-  try {
-    text = readFileSync(join(directory, `${workerTypeId}.json`), 'utf8');
-  } catch {
+// Each worker type is a fixed adapter combination baked into an image; there is no per-type config document.
+// The adapters self-declare their classId and the combination is code.
+const BUILD_PROFILES: Record<string, WorkerBuildProfile> = {
+  'copilot-process-wrapper': buildProfile('copilot-process-wrapper', DockerWorkspaceAdapter, CopilotProcessAdapter),
+  'copilot-local': buildProfile('copilot-local', LocalWorkspaceAdapter, CopilotProcessAdapter),
+  'dotnet-process-wrapper': buildProfile('dotnet-process-wrapper', DockerWorkspaceAdapter, CopilotProcessAdapter)
+};
+
+export function resolveWorkerType(workerTypeId: string): WorkerBuildProfile {
+  const resolved = BUILD_PROFILES[workerTypeId];
+  if (!resolved) {
     throw new Error(`unknown WORKER_TYPE: ${workerTypeId}`);
   }
-  return JSON.parse(text) as WorkerTypeConfig;
-}
-
-function indexByClassId<T extends { classId: string }>(adapterClasses: T[]): Map<string, T> {
-  return new Map(adapterClasses.map((adapterClass) => [adapterClass.classId, adapterClass]));
-}
-
-function requireClass<T>(byClassId: Map<string, T>, classId: string, field: string): T {
-  const adapterClass = byClassId.get(classId);
-  if (!adapterClass) {
-    throw new Error(`unknown ${field}: ${classId}`);
-  }
-  return adapterClass;
+  return resolved;
 }

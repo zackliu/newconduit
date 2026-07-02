@@ -8,17 +8,15 @@
     "command": "copilot",
     "args": []
   },
-  "sidecarClass": "copilot-local-process",
-  "workspaceClass": "local-managed",
   "toolProfile": "copilot-poc-tools",
   "workerSelector": {
     "matchLabels": {
-      "agent": "local"
+      "agent": "local",
+      "storage": "host-managed"
     }
   },
   "pausePolicy": "stop-on-pause",
   "recoveryPolicy": "restart-with-context",
-  "agentStatePolicy": "copilot-managed-local",
   "idlePauseTimeoutMs": 120000,
   "version": "poc-v1"
 }

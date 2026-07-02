@@ -7,9 +7,9 @@ import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
-import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentTurnResult, SidecarInteractionResponseInput, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
-import type { RequestContext, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SessionRecord, SnapshotPart, WorkerRegisterPayload } from '../../src/shared';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from '../support/config-fixtures';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentTurnResult, SidecarInteractionResponseInput, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceHandles, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
+import type { RequestContext, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SessionRecord, SnapshotPartName, WorkerRegisterPayload } from '../../src/shared';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
 
 const TENANT = 'poc';
 
@@ -27,11 +27,11 @@ class SidecarInMemoryTransport implements SidecarRuntimeTransport {
 }
 
 class PassthroughWorkspaceAdapter implements SidecarWorkspaceAdapter {
-  mount(input: SidecarWorkspaceMount): SidecarWorkspaceMount {
-    return input;
+  mount(input: SidecarWorkspaceHandles): SidecarWorkspaceMount {
+    return { workspacePath: input.workspaceRef, copilotSessionStatePath: input.agentStateRef };
   }
-  async capture(_input: SidecarWorkspaceCaptureInput): Promise<SnapshotPart[]> {
-    return [{ name: 'workspace', path: 'parts/workspace' }, { name: 'agent-state', path: 'parts/agent-state' }];
+  async capture(_input: SidecarWorkspaceCaptureInput): Promise<SnapshotPartName[]> {
+    return ['workspace', 'agent-state'];
   }
   async restore(_input: SidecarWorkspaceRestoreInput): Promise<void> {}
 }
@@ -328,8 +328,8 @@ async function waitForEvents(h: Harness, predicate: (events: RuntimeEvent[]) => 
 
 function workerRegistration(): WorkerRegisterPayload {
   return {
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
     capacity: 5,
     allocatable: 5
   };

@@ -1,3 +1,4 @@
+import { WebPubSubClientAdapter } from './adapters';
 import { SidecarDaemon } from './sidecar-daemon';
 import { resolveWorkerType } from './worker-types';
 
@@ -11,22 +12,30 @@ async function main(): Promise<void> {
   if (!workerTypeId) {
     throw new Error('WORKER_TYPE is required to start sidecar');
   }
-  const workerType = resolveWorkerType(workerTypeId);
+  const labelsJson = process.env.SIDECAR_LABELS_JSON;
+  if (!labelsJson) {
+    throw new Error('SIDECAR_LABELS_JSON is required to start sidecar');
+  }
+  const capacity = Number(process.env.SIDECAR_CAPACITY);
+  if (!Number.isInteger(capacity) || capacity <= 0) {
+    throw new Error('SIDECAR_CAPACITY must be a positive integer');
+  }
+  const profile = resolveWorkerType(workerTypeId);
   const daemon = new SidecarDaemon({
-    runtimeTransport: workerType.createRuntimeTransport({ tenantId }),
-    workspaceAdapter: workerType.createWorkspaceAdapter(),
-    agentProcessAdapter: workerType.createAgentProcessAdapter()
+    runtimeTransport: new WebPubSubClientAdapter({ tenantId }),
+    workspaceAdapter: profile.createWorkspaceAdapter(),
+    agentProcessAdapter: profile.createAgentProcessAdapter()
   });
   await daemon.startStandaloneWorker({
     centralUrl,
     tenantId,
-    sidecarClass: workerType.sidecarClass,
-    labels: workerType.labels,
+    storageClass: profile.storageClass,
+    labels: JSON.parse(labelsJson) as Record<string, string>,
     description: sidecarDescription(),
-    capacity: workerType.capacity,
-    allocatable: workerType.capacity
+    capacity,
+    allocatable: capacity
   });
-  console.log(`sidecar daemon started as worker type ${workerType.workerTypeId}`);
+  console.log(`sidecar daemon started as worker type ${profile.workerTypeId}`);
 }
 
 function sidecarDescription(): Record<string, string> | undefined {

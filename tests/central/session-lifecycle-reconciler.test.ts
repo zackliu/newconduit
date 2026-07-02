@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { AgentSpecAdmissionManager } from '../../src/central/managers';
-import { COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS, POC_AGENT_SPEC } from '../support/config-fixtures';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import type { Clock, RuntimeEvent, SessionRecord, WorkerRecord } from '../../src/shared';
 
@@ -263,8 +263,8 @@ async function registerWorker(central: CentralService): Promise<WorkerRecord> {
     principal: { principalId: 'sidecar', type: 'service' },
     connectionId: 'sidecar-connection'
   }, {
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
     capacity: 1,
     allocatable: 1
   });
@@ -294,8 +294,8 @@ async function writeActiveWorker(storage: LocalFileStorage, workerId: string, no
     workerId,
     tenantId: 'poc',
     capacityScope: 'poc',
-    sidecarClass: COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS,
-    labels: { agent: 'copilot' },
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
     capacity: 1,
     allocatable: 1,
     conditions: ['ready'],
@@ -317,6 +317,7 @@ async function writeRunningSession(storage: LocalFileStorage, workerId: string, 
     status: 'running',
     currentWorkerId: workerId,
     sessionLeaseId,
+    storageClass: COPILOT_STORAGE_CLASS,
     eventCursor: 1,
     nextTurnSeq: 2,
     workspaceRef: 'workspace-volume',
