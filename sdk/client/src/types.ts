@@ -55,6 +55,8 @@ export interface WaitForResultOptions {
   signal?: AbortSignal;
 }
 
+export type InteractionKind = 'approval' | 'tool_call';
+
 export type AgentTurnEvent =
   | { type: 'turn.started'; sessionId: string; turnSeq: number }
   | { type: 'assistant.delta'; sessionId: string; turnSeq: number; text: string }
@@ -62,7 +64,6 @@ export type AgentTurnEvent =
   | { type: 'agent.progress'; sessionId: string; turnSeq: number; message: string }
   | { type: 'tool.started'; sessionId: string; turnSeq: number; toolCallId: string; toolName: string; inputSummary?: unknown }
   | { type: 'tool.completed'; sessionId: string; turnSeq: number; toolCallId: string; toolName: string; outputSummary?: unknown }
-  | { type: 'approval.requested'; sessionId: string; turnSeq: number; approval: unknown }
   | { type: 'turn.completed'; sessionId: string; turnSeq: number; result: AgentTurnResult }
   | { type: 'turn.failed'; sessionId: string; turnSeq: number; error: AgentTurnError };
 
@@ -70,10 +71,14 @@ export type AgentTurnEvent =
  * SessionEvent is the single typed model for everything that happens in a session, across all turns.
  * It is the only stream a UI needs: subscribe once with session.observe() and render. assistant.delta
  * carries incremental text to append; turn.completed carries the final message for that turn.
+ * interaction.requested surfaces a durable off-agent request (approval or client tool) that suspends the
+ * turn until the app answers it with session.respondToInteraction(); interaction.responded marks it resolved.
  */
 export type SessionEvent =
   | { type: 'user.message'; sessionId: string; turnSeq: number; text: string }
   | { type: 'status'; sessionId: string; turnSeq: number; status: SessionStatus }
+  | { type: 'interaction.requested'; sessionId: string; turnSeq: number; interactionId: string; kind: InteractionKind; request: unknown }
+  | { type: 'interaction.responded'; sessionId: string; turnSeq: number; interactionId: string; kind: InteractionKind; response: unknown }
   | AgentTurnEvent;
 
 export interface SessionObserveOptions {
@@ -128,6 +133,10 @@ export type SdkRuntimeEventType =
   | 'session.pause.requested'
   | 'session.resume.requested'
   | 'session.cancel.requested'
+  | 'interaction.requested'
+  | 'interaction.responded'
+  | 'interaction.respond.requested'
+  | 'interaction.responded.ack'
   | 'session.created'
   | 'session.assign'
   | 'session.paused'

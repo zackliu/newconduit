@@ -1,5 +1,5 @@
 import type { ResolvedAgentSpec } from './agent-spec';
-import type { SessionStatus } from './session';
+import type { InteractionKind, SessionStatus } from './session';
 import type { SnapshotCaptureRef, SnapshotPart, SnapshotRestoreRef } from './snapshot';
 
 export type RuntimeEventType =
@@ -37,7 +37,12 @@ export type RuntimeEventType =
   | 'worker.expired'
   | 'worker.heartbeat.rejected'
   | 'worker.command.rejected'
-  | 'session.lease.lost';
+  | 'session.lease.lost'
+  | 'interaction.requested'
+  | 'interaction.responded'
+  | 'interaction.respond.requested'
+  | 'interaction.responded.ack'
+  | 'session.interaction.response';
 
 export interface RuntimeEvent<TPayload = unknown> {
   eventId: string;
@@ -153,4 +158,36 @@ export interface WorkerCommandRejectedPayload {
   reason: 'stale_session_lease' | 'unknown_session' | 'agent_not_running';
   expectedSessionLeaseId?: string;
   receivedSessionLeaseId?: string;
+}
+
+/** Agent (via sidecar) surfaced an off-agent request; the turn is suspended until it is answered. */
+export interface InteractionRequestedPayload {
+  interactionId: string;
+  kind: InteractionKind;
+  request: unknown;
+}
+
+/** Central-owned fact that an interaction was resolved. `response` mirrors the kind's typed answer. */
+export interface InteractionRespondedPayload {
+  interactionId: string;
+  kind: InteractionKind;
+  response: unknown;
+}
+
+/** Client-authored command asking central to resolve an open interaction. */
+export interface InteractionRespondRequestPayload {
+  interactionId: string;
+  decision?: 'approved' | 'denied';
+  scope?: 'once' | 'session';
+  result?: unknown;
+}
+
+/** Worker command routing a resolved interaction back to the leased worker. */
+export interface SessionInteractionResponseCommandPayload {
+  sessionId: string;
+  workerId: string;
+  sessionLeaseId: string;
+  interactionId: string;
+  kind: InteractionKind;
+  response: unknown;
 }

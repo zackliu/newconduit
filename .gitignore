@@ -3,5 +3,6 @@ dist/
 dist-es/
 dist-tests/
 .runtime-poc/
+.runtime-demo/
 *.log
 *.pptx

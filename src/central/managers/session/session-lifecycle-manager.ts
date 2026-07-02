@@ -1,4 +1,5 @@
 import type { Clock, ResolvedAgentSpec, RuntimeStorage, SessionRecord, SessionStatus } from '../../../shared';
+import type { OpenInteraction } from '../../../shared';
 
 /**
  * Owns the durable session record transitions that describe where a session is in the runtime lifecycle.
@@ -63,6 +64,20 @@ export class SessionLifecycleManager {
   async advanceEventCursor(session: SessionRecord, sequence: number): Promise<SessionRecord> {
     const now = this.clock.now();
     const next = { ...session, eventCursor: sequence, lastEventUpdatedAt: now, updatedAt: now };
+    await this.storage.writeSession(next);
+    return next;
+  }
+
+  async addOpenInteraction(session: SessionRecord, interaction: OpenInteraction): Promise<SessionRecord> {
+    const openInteractions = [...(session.openInteractions ?? []).filter((entry) => entry.interactionId !== interaction.interactionId), interaction];
+    const next = { ...session, openInteractions, updatedAt: this.clock.now() };
+    await this.storage.writeSession(next);
+    return next;
+  }
+
+  async removeOpenInteraction(session: SessionRecord, interactionId: string): Promise<SessionRecord> {
+    const openInteractions = (session.openInteractions ?? []).filter((entry) => entry.interactionId !== interactionId);
+    const next = { ...session, openInteractions, updatedAt: this.clock.now() };
     await this.storage.writeSession(next);
     return next;
   }

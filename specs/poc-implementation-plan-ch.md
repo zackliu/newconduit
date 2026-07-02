@@ -697,7 +697,88 @@ Expect：
 - Session 经 `queued`→`starting` 重新分配到同一 local worker，assign 不带 restore ref。
 - Copilot process adapter 用 `getLastSessionId()` 续接本机 session，第二轮能续接之前记忆，回到 `running`。
 
-## 12. Slice 10：Reconnect And Replay
+## 12. Slice 10：Durable Interaction Broker For Approval And Client Tools
+
+目标：把 Copilot SDK 的 pending-request 模型桥接成 central-owned durable interaction，让一个 turn 在 agent 请求 off-agent 响应（human approval 或 client 兑现的 tool result）时挂起，并且这个挂起不依赖 client 是否在线，能跨 pause/resume 和 reconnect 继续等待。Agent 自己执行的 built-in/MCP/handler-backed tool 保持纯 observation，不进入 interaction。
+
+实现范围：
+
+- Interaction 边界：一个 turn 只有在 Copilot surface 出 off-agent 请求时才挂起——`permission.requested`（kind `approval`）或 declaration-only tool 被 externalize 成 external tool request（kind `tool_call`）。built-in、MCP、以及带 handler 的 custom tool 由 agent runtime 自己执行，继续走 `tool.started`/`tool.completed` observation，不产生 interaction，也不挂起 turn。执行位置（agent 本地 vs host 兑现）与 approval gate 是两条正交轴：一个 agent 本地执行的 MCP 调用仍可能带 approval gate，此时挂起的是那道 gate，而不是把执行搬到 client。
+- Sidecar bridge：移除 `approveAll`。Copilot session 配置为不自动解决 permission（不挂 auto-resolve handler），让 permission 以 pending event 形式 surface；AgentSpec 声明的 client tools 以 declaration-only `Tool`（无 handler）注册，使其调用被 externalize 成 pending external tool request。correlation 直接复用 Copilot 的 `requestId`：sidecar 把 `interactionId` 取成对应 pending request 的 `requestId`（`tool_call` 来自 `external_tool.requested` 的 `requestId`，`approval` 来自 pending permission 的 `requestId`），不另建映射表；resolve 时按 `kind` 把 `interactionId` 当 `requestId` 传回对应 pending RPC。
+- Durable interaction event：sidecar 把 `interaction.requested` publish 到 tenant inbox runtime channel，携带 `interactionId`（= Copilot `requestId`，作为回包关联键）、`kind`、`turnSeq`、typed `request` 和当前 `sessionLeaseId`；`tool_call` 的 `request` 带 `toolName`、`arguments`（供 client 执行）和 `toolCallId`（供 trace/分组）。Central append `interaction.requested` 到 `events.jsonl`，并把它加入 session record 的 `openInteractions`。
+- Central open-interaction truth：session record 增加以 `interactionId` 索引的 `openInteractions`（含 `kind`、`turnSeq`、requested 时间）。`interaction.requested` 加入，`interaction.responded` 移除。只要该 turn 还有 open interaction，central 就不认为 turn 结束，也不 synthesize `turn.completed`；只有 Worker 真正的 `turn.completed` 才关闭 turn。Placement status（running/paused）与 interaction 正交；client 侧从 `openInteractions` 派生“需要响应”，而不是新增一个互斥 status。
+- Client response command：新增 client-authored runtime event `interaction.respond.requested`，携带 `sessionId`、`interactionId` 和 typed `response`。`approval` 的 response 带 `decision`（`approved`/`denied`）和 `scope`（`once` 或 `session`）；`tool_call` 的 response 带 tool result。Central `ClientRuntimeEventController` 处理它：先按 session 和 interaction kind 授权 principal，再校验该 interaction 当前 open，append 带 `scope` 的 `interaction.responded` durable event（`scope: session` 的 approve 即一条可审计的常驻放行记录），从 `openInteractions` 移除，并把 `session.interaction.response` worker command route 到当前 `sessionLeaseId` 对应的 Worker；`interaction.responded.ack` 回 client private inbox。
+- Sidecar response command：sidecar 处理 `session.interaction.response` worker command：校验 `sessionLeaseId`，按 `kind` 把 `interactionId` 当 `requestId` 回给对应 pending RPC——`tool_call` → `rpc.tools.handlePendingToolCall({ requestId, result })`，`approval` → `rpc.permissions.handlePendingPermissionRequest({ requestId, result })`，因此 response 精确命中 Copilot 那次 pending request，无需额外映射。`approval` response 的 `scope` 映射到 Copilot permission decision：`once` → `Approved`，`session` → `ApprovedForSession`，让 Copilot permission rule engine 记下 session 级放行规则。挂起的 turn 与 worker command 处理并发进行，resolve 命令能在 turn 挂起期间被接收，不被 in-flight turn head-of-line 阻塞；同一 turn 的多个 open interaction 按 `interactionId` 独立 resolve。
+- Standing approval rule（auto-approve after first）：一次 `scope: session` 的 approve 不是 client 端记忆，而是 gate 上的一条 rule。之后命中该 rule 的 gated action 由 Copilot permission rule engine 在 gate 处直接放行，不 surface 成 `interaction.requested`、不挂起 turn、不往返 client；central 靠那条带 `scope` 的 `interaction.responded` 记录该常驻放行以供 audit 与吊销。SDK 不实现有状态的 auto-approver，app 也不盲返回 approval——“第一次问、之后自动”完全由 scope 化 decision + gate rule 承担。本 slice 用 Copilot session permission rule 落地常驻放行；把它泛化成 central-owned approval policy 不在本 slice。
+- Pause/resume：带 open interaction 的 session 被 pause 时，`openInteractions` 随 session record 和 event log 持久化（它是 durable fact，不是 worker-local state），pause 照常释放 Worker lease。Resume 重新 lease Worker 并从 agent session state 重启该 turn；central 始终是该 obligation 的 source of truth。Pause 期间收到的 decision 在重启后的 agent 再次请求同一 interaction（按 kind+turn 对齐）时下发；recovery 语义是 restart-with-context，不承诺 tool 调用中点的透明续跑。
+- Reconnect / client offline：interaction 存在于 event log 和 `openInteractions`，与任何 client connection 无关。晚到的 client 连接后从历史里 fold `interaction.requested`/`interaction.responded` 得到仍然 open 的 interaction，并通过同一 command 响应；interaction 的存在和持久不需要任何 client 在线。
+- SDK surface：Client SDK 把 `interaction.requested`/`interaction.responded` 映射成 typed session event 暴露在 `observe()`，暴露当前 open interactions，并提供 `respond({ interactionId, decision, scope })`（`approval` 可选 `scope: 'once' | 'session'`）以及可选的 per-kind registered handler；handler 只做逐请求的动态决策，不做常驻自动批准。SDK 不暴露 Worker endpoint 或 pending-RPC 机制，也不持有 auto-approve 状态。移除旧的 observation-only `approval.requested` event 和 `agent.output.approvalRequested` 字段，approval 只走 durable interaction。Public protocol 变化同步 `sdk/client/public-protocol-spec-ch.md`、SDK 类型、central/sidecar handler、e2e tests。
+
+Scenario-based test：`scenario: approval interaction survives client absence and resumes the turn`
+
+Given：
+
+- 一个 session 的 agent runtime 在没有任何 client 订阅 session events 时请求一个 gated action（Copilot `permission.requested`）。
+
+Expect：
+
+- Sidecar 让该 Copilot permission 保持 pending，并 publish `interaction.requested{kind:'approval'}` 到 tenant inbox，携带稳定 `interactionId` 和当前 `sessionLeaseId`。
+- Central append `interaction.requested` 到 `events.jsonl`，并把它记入 session 的 `openInteractions`；turn 保持 open，不出现 `turn.completed`。
+- 无 client 连接时该 interaction 持续存在；随后连接的 client replay history 能看到这个 open `approval` interaction。
+- Client publish `interaction.respond.requested{ interactionId, decision: approved, scope: once }` 后，central 授权、append `interaction.responded`、从 `openInteractions` 移除，并 route `session.interaction.response` 到当前 Worker。
+- Sidecar 用 pending-permission RPC resolve 该 permission，turn 继续走到真实的 `turn.completed`。
+
+Scenario-based test：`scenario: parallel client tool interactions resolve independently`
+
+Given：
+
+- Agent 在同一个 turn 内发起两个 declaration-only tool 调用。
+
+Expect：
+
+- Sidecar publish 两条 `interaction.requested{kind:'tool_call'}`，`interactionId` 不同、`turnSeq` 相同，两条都保持 pending。
+- 先响应第二个 `interactionId` 只 resolve 对应的 Copilot tool request，第一个仍然 open。
+- Turn 挂起期间 sidecar 仍在处理 worker command，command 入站不被 in-flight turn 阻塞。
+- 两条 `interaction.respond.requested` 都到达后，两个 tool result 都被下发，turn 走到 `turn.completed`。
+
+Scenario-based test：`scenario: agent-executed MCP tool stays observation, not interaction`
+
+Given：
+
+- Agent 调用一个 built-in/MCP/handler-backed tool。
+
+Expect：
+
+- Central append `tool.started`/`tool.completed` observation event，不产生 `interaction.requested`。
+- Turn 不挂起，`openInteractions` 保持为空。
+
+Scenario-based test：`scenario: session-scoped approval auto-resolves later matching actions at the gate`
+
+Given：
+
+- 第一个 gated action 的 approval interaction 被 `interaction.respond.requested{ interactionId, decision: approved, scope: session }` 响应。
+
+Expect：
+
+- Central append 带 `scope: session` 的 `interaction.responded`，作为该常驻放行的可审计记录。
+- Sidecar 用 `ApprovedForSession` resolve 该 permission，Copilot 记下 session rule。
+- 之后同类 gated action 被 gate 直接放行，不产生新的 `interaction.requested`，turn 不挂起、也不往返 client。
+- 该常驻放行后 `openInteractions` 对同类动作保持为空。
+
+Scenario-based test：`scenario: open interaction persists across pause and resume`
+
+Given：
+
+- 一个 session 带一个 open `approval` interaction。
+
+Expect：
+
+- Pause 释放 Worker lease，session status 是 `paused`，`openInteractions` 仍包含该 interaction（持久在 session record 和 event log）。
+- Resume 重新 lease Worker，该 interaction 仍是 central-owned obligation；重启的 agent 再次请求该 gated action 时，用 `interaction.respond.requested` 记录的 decision resolve 它，turn 继续。
+
+Automated scenario test 使用实现同一 `agentProcessAdapter` contract 的 deterministic agent test harness 驱动 permission/external-tool 的 pending 与 resolve；测试必须经过 central-owned event log、worker command channel 和 session events channel，不允许 sidecar-local 旁路。
+
+## 13. Slice 11：Reconnect And Replay
 
 目标：Client SDK 断线后能用 event cursor 追上 session history。
 
@@ -721,7 +802,7 @@ Expect：
 - Replay does not depend on Web PubSub message history。
 - Client SDK still does not know Worker endpoint。
 
-## 13. Slice 11：Thin Auth And Audit Boundary
+## 14. Slice 12：Thin Auth And Audit Boundary
 
 目标：POC 保留 central-owned negotiate 和 audit hook，但不展开完整 production auth matrix。
 
@@ -746,7 +827,7 @@ Expect：
 - Browser and sidecar do not choose their own `userId`。
 - Audit log records token issuance as record-only。
 
-## 14. Recommended Order
+## 15. Recommended Order
 
 按下面顺序实现和 review：
 
@@ -759,12 +840,13 @@ Expect：
 7. Docker WorkerPool scale loop。
 8. Durable session memory across worker recycle（pause+capture 与 resume+restore 合并）。
 9. Local worker type（worker-type-driven adapter binding 与 copilot-managed-local persistence）。
-10. Reconnect and replay。
-11. Thin auth and audit boundary。
+10. Durable interaction broker（approval 与 client tool round-trip，Copilot pending-request 桥接成 central-owned durable interaction）。
+11. Reconnect and replay。
+12. Thin auth and audit boundary。
 
 前六个 slices 跑通后，POC 已经形成可交互主线和基本 lifecycle reconciliation：Client SDK 能创建 session，central 能把同一个 session 的多轮 input 路由到 registered Worker 上的 running Copilot-backed agent runtime，并把回复持久化后推回 Client SDK；queued session 会在 Worker ready 后被主动分配，idle session 会按 AgentSpec policy 进入 paused，client open/history 不会隐式唤醒 session。Docker WorkerPool scale loop 在这条主线之后接入，验证 WorkerPool 只是 capacity source 和 host 操作 owner，不改变 Worker registration、selection、assignment、event loop 的统一路径。
 
-## 15. Validation Commands
+## 16. Validation Commands
 
 每个 slice 完成后都运行：
 
@@ -789,3 +871,5 @@ Slice 7 必须包含真实 Docker validation。先 build `containers/sidecar/Doc
 Slice 8 必须包含 in-process continuity scenario test 和真实 Docker continuity e2e。In-process test 用真实 SidecarDaemon、真实 central runtime、in-memory runtime transport，以及一个把会话记忆写进 agent session state 目录的 deterministic agent process adapter；它用两个共享同一个 session-addressed snapshot 区、但各自独立 work root 的 sidecar 模拟 Worker 回收，断言 pause 后 snapshot 区的 `parts/workspace` 含写入文件、resume 后新 Worker 的 workspace 含恢复文件、第二轮能读回该文件并续接记忆。真实 Docker continuity e2e 在 Slice 7 的 WorkerPool 主线上扩展：第一轮让 Copilot 在 workspace 写文件，pause 触发 capture 与 scale-in 回收 Worker，resume scale 出新 Worker 并 restore，第二轮 Copilot 通过 `resumeSession()` 续接并读回文件。Docker 或本机 `az login` 不可用时该 e2e skip，但 in-process continuity scenario test 必须随每次构建运行并通过。
 
 Slice 9 必须包含 worker-type binding scenario test 和 local agent assignment scenario test。前者断言 sidecar 只 ref `WORKER_TYPE`，registration body 的 sidecarClass/labels/capacity 全部来自 worker type registry，且实例化的是 type 注册的 local workspace adapter 与 Copilot process adapter；后者用真实 central runtime + in-memory runtime transport，断言 `copilot-local` session 选中 local worker、不调用 host pool adapter、单 worker 承载多 session、pause 释放一个 capacity 槽且不写 snapshot、resume 走 queued→assign 回到同一 worker 且 assign 不带 restore ref。真实 local Copilot smoke test 用 `WORKER_TYPE=copilot-local` 起本机 worker 并完成一轮 input/output；缺少 Copilot runtime/auth 配置时 skip。
+
+Slice 10 必须包含 interaction broker scenario tests，覆盖：approval interaction 在无 client 订阅时持久化并在 response 后续接 turn、并行两个 `tool_call` interaction 按 `interactionId` 独立 resolve 且不 head-of-line 阻塞 worker command 入站、agent-executed built-in/MCP tool 保持 observation 不产生 interaction、`scope: session` 的 approve 建立 gate rule 后同类 gated action 在 gate 自动放行且不产生 interaction/不往返 client、open interaction 跨 pause/resume 持久、未授权 principal 的 `interaction.respond.requested` 被 central 拒绝且不产生 `session.interaction.response`。真实 Copilot smoke test 必须让 Copilot 产生真实 permission request 并通过 pending-permission RPC 用 central-routed response 完成 approval，并验证 `scope: session` 让 Copilot 记下 session rule、后续同类请求不再 surface；缺少 Copilot runtime/auth 配置时 skip。Public protocol 变化必须同步 `sdk/client/public-protocol-spec-ch.md`、SDK code、runtime handlers、e2e tests。

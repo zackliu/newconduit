@@ -1,8 +1,8 @@
 export type { AgentSpec, LabelSelector, ResolvedAgentSpec } from './agent-spec';
 export type { AuditRecord } from './audit';
 export type { AgentSpecRef, CreateSessionRequest, PrincipalContext, RequestContext, SessionInputRequest, TenantContext } from './create-session';
-export type { AgentOutputPayload, RuntimeEvent, RuntimeEventType, SessionAssignPayload, SessionInputCommandPayload, SessionPauseCommandPayload, SessionPausedPayload, SessionPauseRequestedPayload, SessionResumeRequestedPayload, SnapshotCreatedPayload, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from './event';
-export type { SessionRecord, SessionStatus } from './session';
+export type { AgentOutputPayload, InteractionRequestedPayload, InteractionRespondedPayload, InteractionRespondRequestPayload, RuntimeEvent, RuntimeEventType, SessionAssignPayload, SessionInputCommandPayload, SessionInteractionResponseCommandPayload, SessionPauseCommandPayload, SessionPausedPayload, SessionPauseRequestedPayload, SessionResumeRequestedPayload, SnapshotCreatedPayload, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from './event';
+export type { InteractionKind, OpenInteraction, SessionRecord, SessionStatus } from './session';
 export type { SnapshotCaptureRef, SnapshotPart, SnapshotPartName, SnapshotRestoreRef, WorkspaceSnapshot } from './snapshot';
 export { COPILOT_LOCAL_PROCESS_SIDECAR_CLASS, COPILOT_PROCESS_WRAPPER_SIDECAR_CLASS } from './worker';
 export type { WorkerCondition, WorkerHeartbeatPayload, WorkerIdentityPayload, WorkerLifecycleState, WorkerRecord, WorkerRegisterPayload } from './worker';

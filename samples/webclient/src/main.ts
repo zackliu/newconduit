@@ -26,6 +26,13 @@ interface TraceEvent {
   detail?: string;
 }
 
+interface PendingInteraction {
+  interactionId: string;
+  turnSeq: number;
+  kind: 'approval' | 'tool_call';
+  request: unknown;
+}
+
 interface RuntimeStatus {
   workerPools: WorkerPoolSummary[];
   hostPoolInstances: HostPoolInstanceSummary[];
@@ -119,6 +126,7 @@ const state = {
   runtimeStatus: { workerPools: [], hostPoolInstances: [], workers: [], agentSpecs: [] } as RuntimeStatus,
   turns: new Map<number, ConversationTurn>(),
   traceEvents: [] as TraceEvent[],
+  openInteractions: [] as PendingInteraction[],
   pending: false,
   connectionState: 'disconnected' as 'disconnected' | 'connecting' | 'connected' | 'error',
   error: ''
@@ -221,6 +229,8 @@ function render(): void {
           </aside>
         </div>
 
+        ${renderPendingApprovals()}
+
         ${state.currentSession ? `
           <form id="composer" class="composer">
             <textarea id="prompt" rows="1" placeholder="${canSend ? 'Message the agent' : 'Input unlocks when the session is running'}" ${canSend ? '' : 'disabled'}></textarea>
@@ -284,6 +294,16 @@ function wireEvents(): void {
       const sessionId = button.dataset.sessionId;
       if (sessionId) {
         void openSession(sessionId);
+      }
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('.approvalButton').forEach((button) => {
+    button.addEventListener('click', () => {
+      const interactionId = button.dataset.interactionId;
+      const decision = button.dataset.decision as 'approved' | 'denied' | undefined;
+      const scope = button.dataset.scope as 'once' | 'session' | undefined;
+      if (interactionId && decision) {
+        void respondToApproval(interactionId, decision, scope);
       }
     });
   });
@@ -497,6 +517,16 @@ function applyTyped(event: SessionEvent): boolean {
     case 'status':
       state.traceEvents.push({ id: `s:${turnSeq}:${state.traceEvents.length}`, turnSeq, label: event.status });
       return true;
+    case 'interaction.requested':
+      if (event.kind === 'approval' && !state.openInteractions.some((entry) => entry.interactionId === event.interactionId)) {
+        state.openInteractions.push({ interactionId: event.interactionId, turnSeq, kind: event.kind, request: event.request });
+      }
+      state.traceEvents.push({ id: `ir:${turnSeq}:${event.interactionId}`, turnSeq, label: 'interaction.requested', detail: event.kind });
+      return true;
+    case 'interaction.responded':
+      state.openInteractions = state.openInteractions.filter((entry) => entry.interactionId !== event.interactionId);
+      state.traceEvents.push({ id: `id:${turnSeq}:${event.interactionId}`, turnSeq, label: 'interaction.responded', detail: event.kind });
+      return true;
   }
   return false;
 }
@@ -560,6 +590,21 @@ async function sendMessage(text: string): Promise<void> {
     state.error = error instanceof Error ? error.message : String(error);
   } finally {
     state.pending = false;
+    render();
+  }
+}
+
+async function respondToApproval(interactionId: string, decision: 'approved' | 'denied', scope?: 'once' | 'session'): Promise<void> {
+  if (!state.currentSession) {
+    return;
+  }
+  // Optimistically clear the card; the durable interaction.responded event will also remove it.
+  state.openInteractions = state.openInteractions.filter((entry) => entry.interactionId !== interactionId);
+  render();
+  try {
+    await state.currentSession.respondToInteraction({ interactionId, decision, scope });
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
     render();
   }
 }
@@ -938,6 +983,43 @@ function matchesLabels(labels: Record<string, string>, selector: Record<string, 
 
 function toRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
+}
+
+function renderPendingApprovals(): string {
+  const approvals = state.openInteractions.filter((entry) => entry.kind === 'approval');
+  if (approvals.length === 0) {
+    return '';
+  }
+  return `
+    <div class="approvalDock">
+      ${approvals.map((interaction) => `
+        <div class="approvalCard">
+          <div class="approvalInfo">
+            <span class="approvalKind">Approval needed</span>
+            <span class="approvalDetail">${escapeHtml(describeInteraction(interaction))}</span>
+          </div>
+          <div class="approvalActions">
+            <button class="approvalButton deny" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="denied">Deny</button>
+            <button class="approvalButton approve" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="approved" data-scope="once">Approve</button>
+            <button class="approvalButton always" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="approved" data-scope="session">Always approve</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function describeInteraction(interaction: PendingInteraction): string {
+  const request = interaction.request;
+  if (request && typeof request === 'object') {
+    const record = request as Record<string, unknown>;
+    for (const key of ['action', 'toolName', 'command', 'fileName', 'path', 'url']) {
+      if (typeof record[key] === 'string') {
+        return `${key}: ${record[key] as string}`;
+      }
+    }
+  }
+  return `interaction ${shortId(interaction.interactionId)}`;
 }
 
 function renderConversation(activeSession: SessionSummary | undefined): string {

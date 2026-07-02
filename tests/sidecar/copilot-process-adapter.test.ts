@@ -9,7 +9,22 @@ import { loadTestEnv } from '../support/test-env';
 
 class FakeCopilotSession {
   readonly prompts: string[] = [];
+  readonly permissionResponses: Array<{ requestId: string; result: unknown }> = [];
+  readonly toolResponses: Array<{ requestId: string; result: unknown }> = [];
   disconnected = false;
+
+  readonly rpc = {
+    permissions: {
+      handlePendingPermissionRequest: async (input: { requestId: string; result: unknown }): Promise<void> => {
+        this.permissionResponses.push(input);
+      }
+    },
+    tools: {
+      handlePendingToolCall: async (input: { requestId: string; result: unknown }): Promise<void> => {
+        this.toolResponses.push(input);
+      }
+    }
+  };
 
   on(): () => void {
     return () => undefined;
@@ -45,12 +60,12 @@ class FakeCopilotClient {
     return undefined;
   }
 
-  async createSession(options: { streaming: boolean; gitHubToken?: string; model?: string; provider?: unknown; onPermissionRequest: unknown }): Promise<FakeCopilotSession> {
+  async createSession(options: { streaming: boolean; gitHubToken?: string; model?: string; provider?: unknown; onPermissionRequest?: unknown; tools?: unknown }): Promise<FakeCopilotSession> {
     this.createSessionOptions = options;
     return this.session;
   }
 
-  async resumeSession(_sessionId: string, options: { streaming: boolean; gitHubToken?: string; model?: string; provider?: unknown; onPermissionRequest: unknown }): Promise<FakeCopilotSession> {
+  async resumeSession(_sessionId: string, options: { streaming: boolean; gitHubToken?: string; model?: string; provider?: unknown; onPermissionRequest?: unknown; tools?: unknown }): Promise<FakeCopilotSession> {
     this.createSessionOptions = options;
     return this.session;
   }
@@ -103,7 +118,7 @@ test('scenario: Copilot provider env is passed to SDK with Azure Identity bearer
     assert.deepEqual(client.options.connection, { kind: 'tcp' });
     assert.equal(client.options.workingDirectory, 'workspace-path');
     assert.equal(client.options.baseDirectory, 'copilot-state-path');
-    assert.equal(typeof client.createSessionOptions?.onPermissionRequest, 'function');
+    assert.equal(client.createSessionOptions?.onPermissionRequest, undefined);
     assert.deepEqual(requestedScopes, ['https://cognitiveservices.azure.com/.default']);
     assert.deepEqual({ ...client.createSessionOptions, onPermissionRequest: undefined }, {
       streaming: true,
@@ -190,6 +205,11 @@ test('scenario: final assistant message from the stream becomes the turn result 
 
   class StreamingSession {
     private handler: ((event: { type: string; data: Record<string, unknown> }) => void) | undefined;
+
+    readonly rpc = {
+      permissions: { handlePendingPermissionRequest: async (): Promise<void> => undefined },
+      tools: { handlePendingToolCall: async (): Promise<void> => undefined }
+    };
 
     on(handler: (event: { type: string; data: Record<string, unknown> }) => void): () => void {
       this.handler = handler;

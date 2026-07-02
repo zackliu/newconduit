@@ -1,5 +1,5 @@
 import type { AgentSpecRegistry } from '../../registries/agent-spec-registry';
-import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionPauseCommandPayload, SessionPauseRequestedPayload, SessionRecord, SessionResumeRequestedPayload, TenantContext, TurnFailedPayload } from '../../../shared';
+import type { CreateSessionRequest, InteractionKind, InteractionRespondedPayload, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionInteractionResponseCommandPayload, SessionPauseCommandPayload, SessionPauseRequestedPayload, SessionRecord, SessionResumeRequestedPayload, TenantContext, TurnFailedPayload } from '../../../shared';
 import { AgentSpecAdmissionManager } from '../admission/agent-spec-admission-manager';
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
@@ -38,6 +38,12 @@ export interface PauseSessionOutcome {
   session: SessionRecord;
   pauseRequestedEvent: RuntimeEvent<SessionPauseRequestedPayload>;
   workerCommand: WorkerCommandOutput<SessionPauseCommandPayload>;
+}
+
+export interface RespondInteractionOutcome {
+  session: SessionRecord;
+  interactionRespondedEvent: RuntimeEvent<InteractionRespondedPayload>;
+  workerCommand?: WorkerCommandOutput<SessionInteractionResponseCommandPayload>;
 }
 
 /**
@@ -278,5 +284,64 @@ export class SessionManager {
       resumeRequestedEvent: event,
       workerCommands: reconcileOutcome?.workerCommands.filter((command): command is WorkerCommandOutput => command.event.type === 'session.assign') ?? []
     };
+  }
+
+  async respondInteraction(context: RequestContext, sessionId: string, ackId: string | undefined, request: InteractionRespondRequestPayload): Promise<RespondInteractionOutcome> {
+    const session = await this.storage.readSession(sessionId);
+    if (!session || session.owner !== context.principal.principalId) {
+      throw new Error(`session ${sessionId} was not found`);
+    }
+    const open = (session.openInteractions ?? []).find((entry) => entry.interactionId === request.interactionId);
+    if (!open) {
+      throw new Error(`interaction ${request.interactionId} is not open for session ${sessionId}`);
+    }
+    const response = this.buildInteractionResponse(open.kind, request);
+    const event = await this.eventLogManager.append<InteractionRespondedPayload>({
+      type: 'interaction.responded',
+      actor: 'client',
+      payload: { interactionId: open.interactionId, kind: open.kind, response },
+      ackId,
+      turnSeq: open.turnSeq,
+      sequence: session.eventCursor + 1,
+      sessionId,
+      workerId: session.currentWorkerId,
+      sessionLeaseId: session.sessionLeaseId
+    });
+    const advanced = await this.sessionLifecycleManager.advanceEventCursor(session, event.sequence);
+    const removed = await this.sessionLifecycleManager.removeOpenInteraction(advanced, open.interactionId);
+    const workerCommand = removed.currentWorkerId && removed.sessionLeaseId
+      ? {
+          workerId: removed.currentWorkerId,
+          event: {
+            eventId: crypto.randomUUID(),
+            sessionId,
+            workerId: removed.currentWorkerId,
+            turnSeq: open.turnSeq,
+            sequence: event.sequence,
+            type: 'session.interaction.response' as const,
+            timestamp: event.timestamp,
+            actor: 'central' as const,
+            sessionLeaseId: removed.sessionLeaseId,
+            payload: {
+              sessionId,
+              workerId: removed.currentWorkerId,
+              sessionLeaseId: removed.sessionLeaseId,
+              interactionId: open.interactionId,
+              kind: open.kind,
+              response
+            }
+          }
+        }
+      : undefined;
+    return { session: removed, interactionRespondedEvent: event, workerCommand };
+  }
+
+  private buildInteractionResponse(kind: InteractionKind, request: InteractionRespondRequestPayload): unknown {
+    if (kind === 'approval') {
+      const decision = request.decision === 'denied' ? 'denied' : 'approved';
+      const scope = request.scope === 'session' ? 'session' : 'once';
+      return { decision, scope };
+    }
+    return { result: request.result };
   }
 }

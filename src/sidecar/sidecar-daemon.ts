@@ -1,4 +1,4 @@
-import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentOutputPayload, type RuntimeConnectionGrant, type RuntimeEvent, type SessionAssignPayload, type SessionInputCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
+import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentOutputPayload, type InteractionRequestedPayload, type RuntimeConnectionGrant, type RuntimeEvent, type SessionAssignPayload, type SessionInputCommandPayload, type SessionInteractionResponseCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
 import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount } from './contracts';
 
 export interface StandaloneSidecarStartInput extends WorkerRegisterPayload {
@@ -61,6 +61,9 @@ export class SidecarDaemon {
         return;
       case 'session.pause.requested':
         await this.handlePause(event as RuntimeEvent<SessionPauseCommandPayload>);
+        return;
+      case 'session.interaction.response':
+        await this.handleInteractionResponse(event as RuntimeEvent<SessionInteractionResponseCommandPayload>);
         return;
       default:
         throw new Error(`unexpected sidecar command: ${event.type}`);
@@ -220,51 +223,104 @@ export class SidecarDaemon {
       await this.publishCommandRejected(event, 'agent_not_running', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
       return;
     }
-    try {
-      const result = await this.options.agentProcessAdapter.send({
-        sessionId: payload.sessionId,
-        turnSeq: payload.turnSeq,
-        message: payload.input.message
-      }, async (output) => {
-        if (output.type !== 'output') {
-          return;
-        }
+    // Await the turn only until it completes or suspends on its first interaction. A suspended turn
+    // keeps running in the background so the interaction response can arrive on this same command loop.
+    await this.runTurn(payload);
+  }
+
+  private async runTurn(payload: SessionInputCommandPayload): Promise<void> {
+    let settled = false;
+    let resolveSettled!: () => void;
+    const settledPromise = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    const settle = (): void => {
+      if (!settled) {
+        settled = true;
+        resolveSettled();
+      }
+    };
+    const run = (async () => {
+      try {
+        const result = await this.options.agentProcessAdapter.send({
+          sessionId: payload.sessionId,
+          turnSeq: payload.turnSeq,
+          message: payload.input.message
+        }, async (event) => {
+          if (event.type === 'interaction') {
+            await this.publishTenantEvent<InteractionRequestedPayload>({
+              type: 'interaction.requested',
+              sessionId: payload.sessionId,
+              workerId: payload.workerId,
+              sessionLeaseId: payload.sessionLeaseId,
+              turnSeq: payload.turnSeq,
+              payload: event.payload
+            });
+            settle();
+            return;
+          }
+          await this.publishTenantEvent({
+            type: 'agent.output',
+            sessionId: payload.sessionId,
+            workerId: payload.workerId,
+            sessionLeaseId: payload.sessionLeaseId,
+            turnSeq: payload.turnSeq,
+            payload: event.payload
+          });
+        });
+        await this.publishTenantEvent<TurnCompletedPayload>({
+          type: 'turn.completed',
+          sessionId: payload.sessionId,
+          workerId: payload.workerId,
+          sessionLeaseId: payload.sessionLeaseId,
+          turnSeq: payload.turnSeq,
+          payload: { result: { message: result.message, output: result.output } }
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         await this.publishTenantEvent({
           type: 'agent.output',
           sessionId: payload.sessionId,
           workerId: payload.workerId,
           sessionLeaseId: payload.sessionLeaseId,
           turnSeq: payload.turnSeq,
-          payload: output.payload
+          payload: { error: { message } }
         });
-      });
-      await this.publishTenantEvent<TurnCompletedPayload>({
-        type: 'turn.completed',
-        sessionId: payload.sessionId,
-        workerId: payload.workerId,
-        sessionLeaseId: payload.sessionLeaseId,
-        turnSeq: payload.turnSeq,
-        payload: { result: { message: result.message, output: result.output } }
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.publishTenantEvent({
-        type: 'agent.output',
-        sessionId: payload.sessionId,
-        workerId: payload.workerId,
-        sessionLeaseId: payload.sessionLeaseId,
-        turnSeq: payload.turnSeq,
-        payload: { error: { message } }
-      });
-      await this.publishTenantEvent<TurnFailedPayload>({
-        type: 'turn.failed',
-        sessionId: payload.sessionId,
-        workerId: payload.workerId,
-        sessionLeaseId: payload.sessionLeaseId,
-        turnSeq: payload.turnSeq,
-        payload: { error: { message } }
-      });
+        await this.publishTenantEvent<TurnFailedPayload>({
+          type: 'turn.failed',
+          sessionId: payload.sessionId,
+          workerId: payload.workerId,
+          sessionLeaseId: payload.sessionLeaseId,
+          turnSeq: payload.turnSeq,
+          payload: { error: { message } }
+        });
+      } finally {
+        settle();
+      }
+    })();
+    run.catch((error: unknown) => {
+      console.error('sidecar turn runner failed', error);
+    });
+    await settledPromise;
+  }
+
+  private async handleInteractionResponse(event: RuntimeEvent<SessionInteractionResponseCommandPayload>): Promise<void> {
+    const payload = this.parseInteractionResponsePayload(event.payload);
+    const active = this.activeRuns.get(payload.sessionId);
+    if (!active) {
+      await this.publishCommandRejected(event, 'unknown_session', undefined, payload.sessionLeaseId);
+      return;
     }
+    if (active.sessionLeaseId !== payload.sessionLeaseId || event.sessionLeaseId !== active.sessionLeaseId) {
+      await this.publishCommandRejected(event, 'stale_session_lease', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
+      return;
+    }
+    await this.options.agentProcessAdapter.respondToInteraction?.({
+      sessionId: payload.sessionId,
+      interactionId: payload.interactionId,
+      kind: payload.kind,
+      response: payload.response
+    });
   }
 
   private async handlePause(event: RuntimeEvent<SessionPauseCommandPayload>): Promise<void> {
@@ -401,5 +457,20 @@ export class SidecarDaemon {
       throw new Error('invalid session.pause.requested reason');
     }
     return payload as SessionPauseCommandPayload;
+  }
+
+  private parseInteractionResponsePayload(payload: unknown): SessionInteractionResponseCommandPayload {
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('invalid session.interaction.response payload');
+    }
+    const candidate = payload as Partial<SessionInteractionResponseCommandPayload>;
+    if (typeof candidate.sessionId !== 'string'
+      || typeof candidate.workerId !== 'string'
+      || typeof candidate.sessionLeaseId !== 'string'
+      || typeof candidate.interactionId !== 'string'
+      || (candidate.kind !== 'approval' && candidate.kind !== 'tool_call')) {
+      throw new Error('invalid session.interaction.response payload');
+    }
+    return payload as SessionInteractionResponseCommandPayload;
   }
 }

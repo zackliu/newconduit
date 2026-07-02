@@ -44,6 +44,10 @@ export class CentralService {
     await Promise.all([...this.tenantRuntimes.values()].map((tenantRuntime) => tenantRuntime.start()));
   }
 
+  async stop(): Promise<void> {
+    await Promise.all([...this.tenantRuntimes.values()].map((tenantRuntime) => tenantRuntime.stop()));
+  }
+
   async negotiateClientConnectionForTenant(tenantId: string | null, context: RequestContext): Promise<RuntimeConnectionGrant> {
     return this.resolveTenantRuntime(tenantId, 'client negotiate').negotiateClientConnection(context);
   }

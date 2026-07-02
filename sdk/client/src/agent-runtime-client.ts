@@ -502,6 +502,24 @@ export class SessionHandle {
       payload: { reason }
     });
   }
+
+  /**
+   * Answer an open interaction (from an `interaction.requested` session event). For an approval, pass
+   * `decision` ('approved' | 'denied') and optionally `scope` ('once' | 'session', where 'session'
+   * establishes a standing approval rule). For a client tool call, pass `result`.
+   */
+  async respondToInteraction(input: { interactionId: string; decision?: 'approved' | 'denied'; scope?: 'once' | 'session'; result?: unknown }): Promise<void> {
+    await this.runtime.publishTenantEvent({
+      type: 'interaction.respond.requested',
+      sessionId: this.id,
+      payload: {
+        interactionId: input.interactionId,
+        decision: input.decision,
+        scope: input.scope,
+        result: input.result
+      }
+    });
+  }
 }
 
 export class AgentTurn {
@@ -595,7 +613,7 @@ export class AgentTurn {
     if (!mapped || mapped.turnSeq !== this.sequence) {
       return undefined;
     }
-    if (mapped.type === 'user.message' || mapped.type === 'status') {
+    if (mapped.type === 'user.message' || mapped.type === 'status' || mapped.type === 'interaction.requested' || mapped.type === 'interaction.responded') {
       return undefined;
     }
     return mapped;
@@ -646,6 +664,18 @@ export function mapSessionEvent(event: SdkRuntimeEvent): SessionEvent | undefine
   if (event.type === 'turn.failed') {
     return { type: 'turn.failed', sessionId, turnSeq, error: mapTurnError(payload.error) };
   }
+  if (event.type === 'interaction.requested') {
+    const kind = payload.kind === 'tool_call' ? 'tool_call' : 'approval';
+    return typeof payload.interactionId === 'string'
+      ? { type: 'interaction.requested', sessionId, turnSeq, interactionId: payload.interactionId, kind, request: payload.request }
+      : undefined;
+  }
+  if (event.type === 'interaction.responded') {
+    const kind = payload.kind === 'tool_call' ? 'tool_call' : 'approval';
+    return typeof payload.interactionId === 'string'
+      ? { type: 'interaction.responded', sessionId, turnSeq, interactionId: payload.interactionId, kind, response: payload.response }
+      : undefined;
+  }
   if (event.type !== 'agent.output') {
     return undefined;
   }
@@ -662,9 +692,6 @@ export function mapSessionEvent(event: SdkRuntimeEvent): SessionEvent | undefine
   const toolCompleted = mapRecord(payload.toolCompleted);
   if (typeof toolCompleted.toolCallId === 'string' && typeof toolCompleted.toolName === 'string') {
     return { type: 'tool.completed', sessionId, turnSeq, toolCallId: toolCompleted.toolCallId, toolName: toolCompleted.toolName, outputSummary: toolCompleted.outputSummary };
-  }
-  if (payload.approvalRequested) {
-    return { type: 'approval.requested', sessionId, turnSeq, approval: payload.approvalRequested };
   }
   if (payload.error) {
     return { type: 'agent.internal', sessionId, turnSeq, label: 'agent.error', detail: payload.error };

@@ -1,4 +1,4 @@
-import type { AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPart, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
+import type { AgentOutputPayload, InteractionRequestedPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPart, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
 import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
 import { SnapshotManager } from '../persistence';
 
@@ -59,6 +59,18 @@ export class AgentRuntimeEventController {
       case 'worker.command.rejected': {
         const payload = this.parseWorkerCommandRejectedPayload(event.payload);
         await this.appendSessionEvent(event, payload, { assertCurrentLease: false });
+        return true;
+      }
+      case 'interaction.requested': {
+        const payload = this.parseInteractionRequestedPayload(event.payload);
+        const appended = await this.appendSessionEvent(event, payload);
+        const session = await this.requireSession(event);
+        await this.sessionLifecycleManager.addOpenInteraction(session, {
+          interactionId: payload.interactionId,
+          kind: payload.kind,
+          turnSeq: event.turnSeq ?? session.nextTurnSeq,
+          requestedAt: appended.timestamp
+        });
         return true;
       }
       case 'session.paused': {
@@ -210,6 +222,20 @@ export class AgentRuntimeEventController {
       reason: payload.reason,
       expectedSessionLeaseId: typeof payload.expectedSessionLeaseId === 'string' ? payload.expectedSessionLeaseId : undefined,
       receivedSessionLeaseId: typeof payload.receivedSessionLeaseId === 'string' ? payload.receivedSessionLeaseId : undefined
+    };
+  }
+
+  private parseInteractionRequestedPayload(payload: unknown): InteractionRequestedPayload {
+    if (!this.isRecord(payload) || typeof payload.interactionId !== 'string') {
+      throw new Error('invalid interaction.requested payload');
+    }
+    if (payload.kind !== 'approval' && payload.kind !== 'tool_call') {
+      throw new Error('invalid interaction.requested kind');
+    }
+    return {
+      interactionId: payload.interactionId,
+      kind: payload.kind,
+      request: payload.request
     };
   }
 

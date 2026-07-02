@@ -189,6 +189,13 @@ function applyEvent(work: IssueWork, ev: SessionEvent): void {
   else if (ev.type === 'agent.progress') work.trace.push({ kind: 'progress', text: ev.message });
   else if (ev.type === 'tool.started') work.trace.push({ kind: 'tool', text: `\u25b6 ${ev.toolName}` });
   else if (ev.type === 'tool.completed') work.trace.push({ kind: 'tool', text: `\u2713 ${ev.toolName}` });
+  else if (ev.type === 'interaction.requested') {
+    if (ev.kind === 'approval') {
+      // Unattended sample: auto-approve for the whole session so the agent never blocks on a human.
+      work.trace.push({ kind: 'status', text: `auto-approved${approvalLabel(ev.request)}` });
+      void work.session?.respondToInteraction({ interactionId: ev.interactionId, decision: 'approved', scope: 'session' });
+    }
+  }
   else if (ev.type === 'assistant.delta') {
     const last = work.trace[work.trace.length - 1];
     if (last?.kind === 'assistant') last.text += ev.text; else work.trace.push({ kind: 'assistant', text: ev.text });
@@ -219,6 +226,18 @@ function renderBody(body: string): string {
 
 function traceRow(l: TraceLine): string {
   return `<li class="tr ${l.kind}">${esc(l.text)}</li>`;
+}
+
+function approvalLabel(request: unknown): string {
+  if (request && typeof request === 'object') {
+    const record = request as Record<string, unknown>;
+    for (const key of ['action', 'toolName', 'command']) {
+      if (typeof record[key] === 'string') {
+        return ` (${record[key] as string})`;
+      }
+    }
+  }
+  return '';
 }
 
 let scheduled = false;

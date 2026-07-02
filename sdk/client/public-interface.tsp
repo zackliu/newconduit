@@ -79,6 +79,10 @@ union SdkRuntimeEventType {
   "session.pause.requested",
   "session.resume.requested",
   "session.cancel.requested",
+  "interaction.requested",
+  "interaction.responded",
+  "interaction.respond.requested",
+  "interaction.responded.ack",
   "session.created",
   "session.assign",
   "session.paused",
@@ -130,6 +134,20 @@ model AgentSpecRef {
 /** A single user message delivered to a session. */
 model SessionInput {
   message: string;
+}
+
+/** App-facing answer to an open interaction (`SessionHandleOperations.respondToInteraction`). */
+model InteractionResponseInput {
+  interactionId: string;
+
+  /** Approval decision. */
+  decision?: "approved" | "denied";
+
+  /** Approval scope; `session` establishes a standing approval rule for later matching actions. */
+  scope?: "once" | "session";
+
+  /** Client tool-call result. */
+  result?: unknown;
 }
 
 /** App-facing input for `SessionClient.start`. */
@@ -292,13 +310,6 @@ model ToolCompletedEvent {
   outputSummary?: unknown;
 }
 
-model ApprovalRequestedEvent {
-  type: "approval.requested";
-  sessionId: string;
-  turnSeq: safeint;
-  approval: unknown;
-}
-
 model TurnCompletedEvent {
   type: "turn.completed";
   sessionId: string;
@@ -313,6 +324,32 @@ model TurnFailedEvent {
   error: AgentTurnError;
 }
 
+/** Kind of durable, turn-suspending interaction the agent surfaced. */
+union InteractionKind {
+  "approval",
+  "tool_call",
+}
+
+/** A durable off-agent request that suspends the turn until answered via `respondToInteraction`. */
+model InteractionRequestedEvent {
+  type: "interaction.requested";
+  sessionId: string;
+  turnSeq: safeint;
+  interactionId: string;
+  kind: InteractionKind;
+  request: unknown;
+}
+
+/** Central-owned fact that an open interaction was resolved. */
+model InteractionRespondedEvent {
+  type: "interaction.responded";
+  sessionId: string;
+  turnSeq: safeint;
+  interactionId: string;
+  kind: InteractionKind;
+  response: unknown;
+}
+
 /** Typed event covering one agent turn, discriminated by `type`. */
 union AgentTurnEvent {
   turnStarted: TurnStartedEvent,
@@ -321,7 +358,6 @@ union AgentTurnEvent {
   agentProgress: AgentProgressEvent,
   toolStarted: ToolStartedEvent,
   toolCompleted: ToolCompletedEvent,
-  approvalRequested: ApprovalRequestedEvent,
   turnCompleted: TurnCompletedEvent,
   turnFailed: TurnFailedEvent,
 }
@@ -343,11 +379,14 @@ model SessionStatusEvent {
 /**
  * The single typed model for everything in a session across all turns; the only
  * stream a UI needs (`SessionHandleOperations.observe`). Every variant carries a
- * `type` discriminator: `user.message`, `status`, or any `AgentTurnEvent`.
+ * `type` discriminator: `user.message`, `status`, `interaction.requested`,
+ * `interaction.responded`, or any `AgentTurnEvent`.
  */
 union SessionEvent {
   UserMessageEvent,
   SessionStatusEvent,
+  InteractionRequestedEvent,
+  InteractionRespondedEvent,
   AgentTurnEvent,
 }
 
@@ -357,7 +396,6 @@ union SessionEvent {
 
 model SessionObserveOptions {
   signal?: AbortSignal;
-
   /** Replay persisted history before live events (default true). */
   includeHistory?: boolean;
 }
@@ -480,6 +518,13 @@ interface SessionHandleOperations {
 
   /** Request cancellation of the session. */
   cancel(reason?: string): void;
+
+  /**
+   * Answer an open interaction surfaced by an `interaction.requested` session event.
+   * For an approval, pass `decision` (and optional `scope`, where `session` establishes a
+   * standing approval rule). For a client tool call, pass `result`.
+   */
+  respondToInteraction(input: InteractionResponseInput): void;
 }
 
 /** Methods of a live `AgentTurn`. */

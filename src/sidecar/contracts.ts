@@ -1,4 +1,4 @@
-import type { AgentOutputPayload, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPart } from '../shared';
+import type { AgentOutputPayload, InteractionKind, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPart } from '../shared';
 
 export interface SidecarRuntimeTransport {
   connect(accessUrl: string): Promise<void>;
@@ -42,12 +42,24 @@ export interface SidecarAgentProcessInput {
   message: string;
 }
 
-export interface SidecarAgentProcessEvent {
-  type: 'output';
-  payload: AgentOutputPayload;
+export interface SidecarInteractionRequest {
+  interactionId: string;
+  kind: InteractionKind;
+  request: unknown;
 }
 
+export type SidecarAgentProcessEvent =
+  | { type: 'output'; payload: AgentOutputPayload }
+  | { type: 'interaction'; payload: SidecarInteractionRequest };
+
 export type SidecarAgentProcessEventHandler = (event: SidecarAgentProcessEvent) => Promise<void> | void;
+
+export interface SidecarInteractionResponseInput {
+  sessionId: string;
+  interactionId: string;
+  kind: InteractionKind;
+  response: unknown;
+}
 
 export interface SidecarAgentTurnResult {
   message?: string;
@@ -57,6 +69,7 @@ export interface SidecarAgentTurnResult {
 export interface SidecarAgentProcessAdapter {
   start(input: SidecarAgentProcessStartInput): Promise<void>;
   send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult>;
+  respondToInteraction?(input: SidecarInteractionResponseInput): Promise<void>;
   pauseAtTurnBoundary?(input: { sessionId: string }): Promise<void>;
   stop?(input: { sessionId: string }): Promise<void>;
 }

@@ -120,6 +120,17 @@ export class TenantRuntime {
     await this.tenantInboxController.reconcileSessions();
   }
 
+  async stop(): Promise<void> {
+    if (this.workerExpiryTimer) {
+      clearInterval(this.workerExpiryTimer);
+      this.workerExpiryTimer = undefined;
+    }
+    if (this.sessionReconcileTimer) {
+      clearInterval(this.sessionReconcileTimer);
+      this.sessionReconcileTimer = undefined;
+    }
+  }
+
   async describeWorkerPools(): Promise<WorkerPoolManagerStatus> {
     const base = await (this.workerPoolManager?.describe() ?? Promise.resolve({
       workerPools: [],

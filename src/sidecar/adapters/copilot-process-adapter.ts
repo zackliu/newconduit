@@ -1,6 +1,9 @@
 import { mkdirSync } from 'node:fs';
 import { DefaultAzureCredential, type AccessToken, type TokenCredential } from '@azure/identity';
-import type { SidecarAgentProcessAdapter, SidecarAgentProcessEvent, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult } from '../contracts';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEvent, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarInteractionResponseInput } from '../contracts';
+
+/** A suspended interaction turn can wait indefinitely for an off-agent responder; do not abort agent work. */
+const INTERACTION_TURN_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 interface CopilotSdkClient {
   stop(): Promise<unknown>;
@@ -21,10 +24,17 @@ interface CopilotSdkSessionConfig {
   gitHubToken?: string;
   model?: string;
   provider?: CopilotSdkProviderConfig;
-  onPermissionRequest: unknown;
+  onPermissionRequest?: unknown;
+  tools?: Array<{ name: string; description?: string; parameters?: unknown }>;
+}
+
+interface CopilotSdkPendingRpc {
+  permissions: { handlePendingPermissionRequest(input: { requestId: string; result: unknown }): Promise<unknown> };
+  tools: { handlePendingToolCall(input: { requestId: string; result: unknown }): Promise<unknown> };
 }
 
 interface CopilotSdkSession {
+  rpc: CopilotSdkPendingRpc;
   sendAndWait(input: { prompt: string }, timeout?: number): Promise<{ data: { content: string } } | undefined>;
   on(handler: (event: CopilotSdkSessionEvent) => void): () => void;
   disconnect(): Promise<void>;
@@ -46,7 +56,6 @@ interface CopilotSdkModule {
     forStdio(input: { path: string }): unknown;
     forTcp(input?: { path?: string; port?: number; connectionToken?: string }): unknown;
   };
-  approveAll: unknown;
 }
 
 type CopilotSdkLoader = () => Promise<CopilotSdkModule>;
@@ -79,7 +88,7 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     const cliPath = process.env.COPILOT_CLI_PATH?.trim();
     const gitHubToken = this.resolveGitHubToken();
 
-    const { CopilotClient, RuntimeConnection, approveAll } = await this.loadCopilotSdk();
+    const { CopilotClient, RuntimeConnection } = await this.loadCopilotSdk();
     const client = new CopilotClient({
       connection: RuntimeConnection.forTcp(cliPath ? { path: cliPath } : {}),
       ...(gitHubToken ? { gitHubToken } : {}),
@@ -88,7 +97,7 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       logLevel: 'error'
     });
     await client.start();
-    const sessionConfig = await this.createCopilotSessionConfig({ gitHubToken, onPermissionRequest: approveAll });
+    const sessionConfig = await this.createCopilotSessionConfig({ gitHubToken });
     const restoredSessionId = await client.getLastSessionId();
     const session = restoredSessionId
       ? await client.resumeSession(restoredSessionId, sessionConfig)
@@ -115,14 +124,14 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       if (!mapped) {
         return;
       }
-      if (typeof mapped.payload.message === 'string' && mapped.payload.message.length > 0) {
+      if (mapped.type === 'output' && typeof mapped.payload.message === 'string' && mapped.payload.message.length > 0) {
         lastStreamedMessage = mapped.payload.message;
         lastStreamedOutput = mapped.payload.output;
       }
       publishChain = publishChain.then(() => emit(mapped));
     });
     try {
-      const result = await active.session.sendAndWait({ prompt: input.message }, 120_000);
+      const result = await active.session.sendAndWait({ prompt: input.message }, INTERACTION_TURN_TIMEOUT_MS);
       const completionContent = typeof result?.data.content === 'string' && result.data.content.length > 0 ? result.data.content : undefined;
       const message = completionContent ?? lastStreamedMessage;
       const output = result?.data ?? lastStreamedOutput;
@@ -144,6 +153,41 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     await active.session.disconnect();
     await active.client.stop();
     this.sessions.delete(input.sessionId);
+  }
+
+  async respondToInteraction(input: SidecarInteractionResponseInput): Promise<void> {
+    const active = this.sessions.get(input.sessionId);
+    if (!active) {
+      throw new Error(`agent session ${input.sessionId} is not running`);
+    }
+    if (input.kind === 'approval') {
+      await active.session.rpc.permissions.handlePendingPermissionRequest({
+        requestId: input.interactionId,
+        result: this.toPermissionDecision(input.response)
+      });
+      return;
+    }
+    await active.session.rpc.tools.handlePendingToolCall({
+      requestId: input.interactionId,
+      result: this.toToolResult(input.response)
+    });
+  }
+
+  private toPermissionDecision(response: unknown): unknown {
+    const record = this.isRecord(response) ? response : {};
+    if (record.decision === 'denied') {
+      return { kind: 'reject' };
+    }
+    return record.scope === 'session' ? { kind: 'approve-for-session' } : { kind: 'approve-once' };
+  }
+
+  private toToolResult(response: unknown): unknown {
+    const record = this.isRecord(response) ? response : {};
+    return 'result' in record ? record.result : response;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 
   async pauseAtTurnBoundary(_input: { sessionId: string }): Promise<void> {
@@ -195,10 +239,24 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
         };
       case 'permission.requested':
         return {
-          type: 'output',
+          type: 'interaction',
           payload: {
-            approvalRequested: event.data,
-            internalEvent: { type: event.type, data: event.data }
+            interactionId: typeof event.data.requestId === 'string' ? event.data.requestId : crypto.randomUUID(),
+            kind: 'approval',
+            request: 'permissionRequest' in event.data ? event.data.permissionRequest : event.data
+          }
+        };
+      case 'external_tool.requested':
+        return {
+          type: 'interaction',
+          payload: {
+            interactionId: typeof event.data.requestId === 'string' ? event.data.requestId : crypto.randomUUID(),
+            kind: 'tool_call',
+            request: {
+              toolName: event.data.toolName,
+              arguments: event.data.arguments,
+              toolCallId: event.data.toolCallId
+            }
           }
         };
       case 'session.error':
@@ -225,12 +283,13 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       || undefined;
   }
 
-  private async createCopilotSessionConfig(input: { gitHubToken?: string; onPermissionRequest: unknown }): Promise<CopilotSdkSessionConfig> {
+  private async createCopilotSessionConfig(input: { gitHubToken?: string }): Promise<CopilotSdkSessionConfig> {
     return {
       streaming: true,
       ...(input.gitHubToken ? { gitHubToken: input.gitHubToken } : {}),
-      ...await this.resolveProviderSessionConfig(),
-      onPermissionRequest: input.onPermissionRequest
+      ...await this.resolveProviderSessionConfig()
+      // onPermissionRequest intentionally omitted: permissions are left pending and surfaced as
+      // interaction.requested; the sidecar resolves them via rpc.permissions.handlePendingPermissionRequest.
     };
   }
 

@@ -1,4 +1,4 @@
-import type { CreateSessionRequest, RequestContext, RuntimeEvent, RuntimeEventTransport, SessionInputRequest } from '../../shared';
+import type { CreateSessionRequest, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeEventTransport, SessionInputRequest } from '../../shared';
 import { SessionManager } from '../managers';
 
 /**
@@ -64,6 +64,17 @@ export class ClientRuntimeEventController {
         }
         return true;
       }
+      case 'interaction.respond.requested': {
+        const sessionId = this.parseSessionCommandSessionId(event.sessionId, event.type);
+        const payload = this.parseInteractionRespondPayload(event.payload);
+        const outcome = await this.sessionManager.respondInteraction(context, sessionId, event.ackId, payload);
+        await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.interactionRespondedEvent);
+        await this.eventTransport.publish({ kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) }, this.toClientAckEvent(outcome.interactionRespondedEvent, 'interaction.responded.ack', { interactionId: payload.interactionId, status: 'accepted' }));
+        if (outcome.workerCommand) {
+          await this.eventTransport.publish({ kind: 'worker-commands', workerId: outcome.workerCommand.workerId }, outcome.workerCommand.event);
+        }
+        return true;
+      }
       default:
         return false;
     }
@@ -113,6 +124,28 @@ export class ClientRuntimeEventController {
       throw new Error('invalid input.received payload');
     }
     return payload;
+  }
+
+  private parseInteractionRespondPayload(payload: unknown): InteractionRespondRequestPayload {
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('invalid interaction.respond.requested payload');
+    }
+    const candidate = payload as Partial<InteractionRespondRequestPayload>;
+    if (typeof candidate.interactionId !== 'string' || !candidate.interactionId) {
+      throw new Error('invalid interaction.respond.requested payload');
+    }
+    if (candidate.decision !== undefined && candidate.decision !== 'approved' && candidate.decision !== 'denied') {
+      throw new Error('invalid interaction.respond.requested decision');
+    }
+    if (candidate.scope !== undefined && candidate.scope !== 'once' && candidate.scope !== 'session') {
+      throw new Error('invalid interaction.respond.requested scope');
+    }
+    return {
+      interactionId: candidate.interactionId,
+      decision: candidate.decision,
+      scope: candidate.scope,
+      result: candidate.result
+    };
   }
 
   private parseSessionEventsRequestedPayload(payload: unknown): { afterSequence: number } {

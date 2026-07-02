@@ -164,6 +164,10 @@ type SdkRuntimeEventType =
   | 'session.pause.requested'
   | 'session.resume.requested'
   | 'session.cancel.requested'
+  | 'interaction.requested'
+  | 'interaction.responded'
+  | 'interaction.respond.requested'
+  | 'interaction.responded.ack'
   | 'session.assign'
   | 'session.paused'
   | 'session.resumed'
@@ -375,9 +379,52 @@ Central acknowledgement：
 }
 ```
 
+### Respond To Interaction
+
+Agent 通过 sidecar publish `interaction.requested` 到 tenant inbox（central append 为 durable session event 并计入 session 的 open interactions）。它挂起当前 turn，直到被响应；不依赖 client 是否在线。`interactionId` 复用 agent runtime 的 pending request id，供回包精确关联。
+
+```json
+{
+  "eventId": "<uuid>",
+  "sessionId": "<session-id>",
+  "sequence": 0,
+  "type": "interaction.requested",
+  "timestamp": "<iso timestamp>",
+  "actor": "sidecar",
+  "sessionLeaseId": "<lease-id>",
+  "turnSeq": 2,
+  "payload": {
+    "interactionId": "<agent-runtime request id>",
+    "kind": "approval",
+    "request": {}
+  }
+}
+```
+
+`session.respondToInteraction()` publish `interaction.respond.requested` 到 tenant inbox。`approval` 带 `decision` 和 `scope`（`scope: session` 建立常驻放行规则）；`tool_call` 带 `result`。
+
+```json
+{
+  "eventId": "<uuid>",
+  "sessionId": "<session-id>",
+  "sequence": 0,
+  "type": "interaction.respond.requested",
+  "timestamp": "<iso timestamp>",
+  "actor": "client",
+  "ackId": "<ack-id>",
+  "payload": {
+    "interactionId": "<same interaction id>",
+    "decision": "approved",
+    "scope": "once"
+  }
+}
+```
+
+Central 授权 principal、append `interaction.responded`、从 open interactions 移除，并把 `session.interaction.response` worker command route 到当前 lease 的 Worker；ack `interaction.responded.ack` 回 client private inbox。Agent-executed built-in/MCP tool 仍走 `tool.started`/`tool.completed` observation，不产生 interaction。
+
 ## 9. Turn Events And Result
 
-Agent-facing sidecar/runtime events stay persisted as runtime events. SDK maps the subset that belongs to a turn into app-facing `AgentTurnEvent` values. `agent.output` carries streaming deltas, tool/progress/approval events, and adapter diagnostics. Terminal turn state is not inferred from `agent.output`; sidecar must publish explicit `turn.completed` or `turn.failed` events with event envelope `turnSeq` matching the turn sequence, and central must persist and fan out those terminal events.
+Agent-facing sidecar/runtime events stay persisted as runtime events. SDK maps the subset that belongs to a turn into app-facing `AgentTurnEvent` values. `agent.output` carries streaming deltas, tool/progress events, and adapter diagnostics. Off-agent requests are not carried on `agent.output`: they are first-class `interaction.requested`/`interaction.responded` session events (see §8). Terminal turn state is not inferred from `agent.output`; sidecar must publish explicit `turn.completed` or `turn.failed` events with event envelope `turnSeq` matching the turn sequence, and central must persist and fan out those terminal events.
 
 ```ts
 interface AgentOutputPayload {
@@ -385,7 +432,6 @@ interface AgentOutputPayload {
   progress?: string;
   toolStarted?: { toolCallId: string; toolName: string; inputSummary?: unknown };
   toolCompleted?: { toolCallId: string; toolName: string; outputSummary?: unknown };
-  approvalRequested?: unknown;
   internalEvent?: { type: string; data?: unknown };
   message?: string;
   output?: unknown;
@@ -414,7 +460,6 @@ type AgentTurnEvent =
   | { type: 'agent.progress'; sessionId: string; turnSeq: number; message: string }
   | { type: 'tool.started'; sessionId: string; turnSeq: number; toolCallId: string; toolName: string; inputSummary?: unknown }
   | { type: 'tool.completed'; sessionId: string; turnSeq: number; toolCallId: string; toolName: string; outputSummary?: unknown }
-  | { type: 'approval.requested'; sessionId: string; turnSeq: number; approval: unknown }
   | { type: 'turn.completed'; sessionId: string; turnSeq: number; result: AgentTurnResult }
   | { type: 'turn.failed'; sessionId: string; turnSeq: number; error: AgentTurnError };
 
