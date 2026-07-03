@@ -16,14 +16,14 @@ export interface WorkerPoolBinding {
 
 /**
  * A host-pool-controller config document declares which host pool adapter kind provisions a worker for a given
- * `hostPoolControllerClass` and with what deployment inputs. `adapterKind` matches a host pool adapter's
- * self-declared classId in code, so the lookup stays generic.
+ * `hostPoolControllerClass`, which pre-built image to run, and which worker type it hosts. `adapterKind` matches a
+ * host pool adapter's self-declared classId in code, so the lookup stays generic. Building the image is out of
+ * band (not a runtime concern), so no build inputs live here.
  */
 export interface HostPoolControllerConfig {
   id: string;
   adapterKind: string;
   imageName: string;
-  dockerfilePath: string;
   workerType: string;
 }
 

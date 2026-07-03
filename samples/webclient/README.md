@@ -64,7 +64,7 @@ pnpm start:central
 ```
 
 Central listens on `http://localhost:3000` and owns session truth, event logs, worker registry, and routing.
-It also owns the POC Docker WorkerPool. When the sample creates a queued session and no matching ready Worker exists, central calls the Docker hostPoolAdapter, starts a sidecar container from `containers/sidecar/Dockerfile`, and the sidecar registers through `/sidecar/negotiate` like any other Worker.
+It also owns the POC Docker WorkerPool. When the sample creates a queued session and no matching ready Worker exists, central calls the Docker hostPoolAdapter, runs a container from the pre-built sidecar image (built out of band via `pnpm build:sidecar-image`), and the sidecar registers through `/sidecar/negotiate` like any other Worker.
 
 ## Start The Web Client
 

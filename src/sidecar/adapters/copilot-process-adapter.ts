@@ -24,7 +24,7 @@ interface CopilotSdkSessionConfig {
   gitHubToken?: string;
   model?: string;
   provider?: CopilotSdkProviderConfig;
-  onPermissionRequest?: unknown;
+  onPermissionRequest?: () => { kind: 'no-result' };
   tools?: Array<{ name: string; description?: string; parameters?: unknown }>;
 }
 
@@ -288,9 +288,14 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     return {
       streaming: true,
       ...(input.gitHubToken ? { gitHubToken: input.gitHubToken } : {}),
-      ...await this.resolveProviderSessionConfig()
-      // onPermissionRequest intentionally omitted: permissions are left pending and surfaced as
-      // interaction.requested; the sidecar resolves them via rpc.permissions.handlePendingPermissionRequest.
+      ...await this.resolveProviderSessionConfig(),
+      // Register a deferring handler instead of omitting it. Providing any handler makes the Copilot CLI
+      // route permission requests to us (requestPermission: true on both createSession and resumeSession);
+      // returning `no-result` leaves each request pending so it surfaces as `permission.requested`, is
+      // mapped to an interaction, and is resolved via rpc.permissions.handlePendingPermissionRequest.
+      // Omitting the handler sets requestPermission: false on createSession, which makes the CLI auto-deny
+      // every tool for fresh sessions ("Permission denied and could not request permission from user").
+      onPermissionRequest: () => ({ kind: 'no-result' })
     };
   }
 

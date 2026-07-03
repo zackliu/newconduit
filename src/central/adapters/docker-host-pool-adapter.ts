@@ -9,8 +9,6 @@ const execFileAsync = promisify(execFile);
 
 export interface DockerHostPoolAdapterOptions {
   imageName?: string;
-  dockerfilePath?: string;
-  contextPath?: string;
   azureConfigDir?: string;
   sidecarWorkRoot?: string;
   snapshotRoot?: string;
@@ -18,22 +16,22 @@ export interface DockerHostPoolAdapterOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Provisions Docker sidecar workers by running a pre-built image. Building the image is a build/deploy-time
+ * concern (see `pnpm build:sidecar-image`), not part of scale-out: the adapter only `docker run`s `imageName`
+ * and lets `docker run` fail loudly if the image is missing.
+ */
 export class DockerHostPoolAdapter implements HostPoolAdapter {
   static readonly classId = 'docker';
   private readonly imageName: string;
-  private readonly dockerfilePath: string;
-  private readonly contextPath: string;
   private readonly azureConfigDir: string;
   private readonly sidecarWorkRoot: string;
   private readonly snapshotRoot: string;
   private readonly workerType: string | undefined;
   private readonly env: NodeJS.ProcessEnv;
-  private buildPromise: Promise<void> | undefined;
 
   constructor(options: DockerHostPoolAdapterOptions = {}) {
     this.imageName = options.imageName ?? 'agent-runtime-sidecar-poc:latest';
-    this.dockerfilePath = options.dockerfilePath ?? 'containers/sidecar/Dockerfile';
-    this.contextPath = options.contextPath ?? '.';
     this.azureConfigDir = resolve(options.azureConfigDir ?? join(homedir(), '.azure'));
     this.sidecarWorkRoot = resolve(options.sidecarWorkRoot ?? '.runtime-poc/docker-sidecars');
     this.snapshotRoot = resolve(options.snapshotRoot ?? '.runtime-poc/snapshots');
@@ -42,7 +40,6 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
   }
 
   async scaleOut(input: HostPoolScaleOutInput): Promise<HostPoolScaleOutResult> {
-    await this.buildImage();
     const hostRuntimeRoot = join(this.sidecarWorkRoot, input.instance.instanceId);
     await mkdir(hostRuntimeRoot, { recursive: true });
     await mkdir(this.snapshotRoot, { recursive: true });
@@ -76,37 +73,6 @@ export class DockerHostPoolAdapter implements HostPoolAdapter {
   async scaleIn(input: HostPoolScaleInInput): Promise<void> {
     const container = input.instance.containerId || this.toContainerName(input.pool.poolId, input.instance.instanceId);
     await execFileAsync('docker', ['stop', container]);
-  }
-
-  private async buildImage(): Promise<void> {
-    if (!this.buildPromise) {
-      this.buildPromise = this.buildImageOnce();
-      this.buildPromise.catch(() => {
-        this.buildPromise = undefined;
-      });
-    }
-    await this.buildPromise;
-  }
-
-  private async buildImageOnce(): Promise<void> {
-    try {
-      await execFileAsync('docker', ['build', '-f', this.dockerfilePath, '-t', this.imageName, this.contextPath], { maxBuffer: 20 * 1024 * 1024 });
-    } catch (error) {
-      if (await this.imageExists()) {
-        console.warn(`docker build failed; reusing existing image ${this.imageName}: ${error instanceof Error ? error.message : String(error)}`);
-        return;
-      }
-      throw error;
-    }
-  }
-
-  private async imageExists(): Promise<boolean> {
-    try {
-      await execFileAsync('docker', ['image', 'inspect', this.imageName]);
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   private forwardEnv(...names: string[]): string[] {

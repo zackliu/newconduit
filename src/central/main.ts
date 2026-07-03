@@ -9,7 +9,7 @@ import type { TenantContext } from '../shared';
 
 // Generic registry of host-pool adapter implementations keyed by each adapter's self-declared classId. Config
 // names an adapterKind; this map resolves it without enumerating any specific controller-class literal.
-const HOST_POOL_ADAPTER_FACTORIES: Record<string, (options: { imageName: string; dockerfilePath: string; workerType: string; snapshotRoot: string }) => HostPoolAdapter> = {
+const HOST_POOL_ADAPTER_FACTORIES: Record<string, (options: { imageName: string; workerType: string; snapshotRoot: string }) => HostPoolAdapter> = {
   [DockerHostPoolAdapter.classId]: (options) => new DockerHostPoolAdapter(options)
 };
 
@@ -62,7 +62,6 @@ function buildHostPoolAdapters(controllers: HostPoolControllerConfig[], snapshot
     }
     adapters[controller.id] = factory({
       imageName: controller.imageName,
-      dockerfilePath: controller.dockerfilePath,
       workerType: controller.workerType,
       snapshotRoot
     });

@@ -8,7 +8,7 @@ This repository is a working TypeScript POC of that runtime. A single **central*
 
 - A client requests a durable session through central-owned runtime events; central owns the session catalog, event log, worker registry, and snapshot metadata.
 - A **WorkerPool** scales Docker worker capacity when a session needs it; the sidecar inside each container registers as a Worker and runs the Copilot agent.
-- Worker selection uses `sidecarClass`, Worker labels, capacity, and conditions — never a hard-coded machine address.
+- Worker selection uses Worker labels (including a `storage` capability label), capacity, and conditions — never a hard-coded machine address.
 - **Pause** captures the workspace and the agent's session files into a session-addressed snapshot, then releases (and recycles) the worker.
 - **Resume** scales out a fresh worker, restores the snapshot, and the Copilot process reattaches to its prior session, so the conversation continues on new compute.
 - Web PubSub is only the transport; it is not the source of truth and does not use upstream callbacks.
@@ -49,7 +49,7 @@ The central runtime keeps two role-based boundaries: **controllers** translate a
 ## Prerequisites
 
 - Node.js >= 20 and pnpm >= 9.
-- Docker Desktop running (the WorkerPool builds and runs sidecar containers).
+- Docker Desktop running (the WorkerPool runs pre-built sidecar containers).
 - An Azure Web PubSub resource.
 - A Copilot-compatible model provider endpoint (Azure AI Foundry / Azure OpenAI / OpenAI-compatible).
 - `az login` completed locally. Auth uses `DefaultAzureCredential` for both Web PubSub and the model provider; the WorkerPool mounts your host `~/.azure` profile into each sidecar container so the same login works inside Docker. No connection strings or committed tokens are used.
@@ -64,7 +64,7 @@ pnpm --dir sdk/client build
 
 ## Run the Central Server (with a Docker WorkerPool)
 
-`pnpm start:central` runs the composition root in [src/central/main.ts](src/central/main.ts). It starts the HTTP server on port `3000` and **automatically configures one Docker WorkerPool** (`poc-docker-copilot`, labels `agent=copilot`, capacity 1) bound to the Docker host pool adapter. No separate worker process is needed — central scales workers itself.
+`pnpm start:central` runs the composition root in [src/central/main.ts](src/central/main.ts). It starts the HTTP server on port `3000` and **automatically configures one Docker WorkerPool** (`poc-docker-copilot`, labels `agent=copilot`, capacity 1) bound to the Docker host pool adapter. No separate worker process is needed — central scales workers itself. Because building an image is not a runtime step, build the sidecar image once first with `pnpm build:sidecar-image` (Docker required); the WorkerPool only runs that pre-built image.
 
 ```powershell
 $env:WEBPUBSUB_ENDPOINT     = "https://<your-web-pubsub>.webpubsub.azure.com"
@@ -88,24 +88,26 @@ On startup you should see `central service listening on http://localhost:3000`.
 | `CENTRAL_PORT` | no | `3000` | HTTP port. |
 | `RUNTIME_STORAGE_ROOT` | no | `.runtime-poc/tenants/<tenantId>` | Local storage root for sessions, events, workers, and snapshots. |
 | `CENTRAL_URL_FOR_WORKERS` | no | `http://host.docker.internal:<port>` | URL the containerized sidecar calls back to reach central. |
-| `CONFIG_DIR` | no | `config` | Directory of AgentSpec, WorkerPool, WorkerType, and host-pool-controller config documents read at startup. |
+| `CONFIG_DIR` | no | `config` | Directory of AgentSpec, WorkerPool, and host-pool-controller config documents read at startup. |
 
 Optional provider knobs: `COPILOT_PROVIDER_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`.
 
-The demo AgentSpecs, WorkerPools, WorkerTypes, and host-pool controllers are declarative JSON documents under `config/` (not hardcoded in `src/`). Central reads `config/agent-specs/`, `config/worker-pools/`, and `config/host-pool-controllers/` at startup; a sidecar resolves `config/worker-types/<WORKER_TYPE>.json`. Each pool sets its own `scalePolicy.scaleInIdleMs`. A config document references adapters and persistence classes by a `*Class` id string that maps to an adapter/class's self-declared `classId` in code, so `src/` holds only generic lookup — no per-config-value branching.
+The demo AgentSpecs, WorkerPools, and host-pool controllers are declarative JSON documents under `config/` (not hardcoded in `src/`). Central reads `config/agent-specs/`, `config/worker-pools/`, and `config/host-pool-controllers/` at startup. Worker types are image-declared code build profiles ([src/sidecar/worker-types.ts](src/sidecar/worker-types.ts)), not config — they only name the adapter combination the image ships. Matching is pure labels: an AgentSpec's `workerSelector.matchLabels` (including a `storage` capability label) is matched against worker labels; a worker reports its concrete `storageClass` driver at registration, and snapshots are opaque handle envelopes. Each pool sets its own `scalePolicy.scaleInIdleMs`.
 
 ## Run a Local Worker (no Docker)
 
-A **worker type** names which `sidecarClass`, labels, capacity, and adapter classes a worker runs with; a worker startup only references a type. The `copilot-local` type runs Copilot directly on the worker host, lets Copilot manage its own workspace and session files, and exposes capacity 99 (many local sessions). With central running, start one in another shell:
+A **worker type** is an image-declared build profile that names the adapter combination a worker runs with (storage data-half + agent process); worker startup references a type by id. The `copilot-local` type runs Copilot directly on the worker host, lets Copilot manage its own workspace and session files, and (with capacity 99) hosts many local sessions. Matching is by labels, so a standalone worker passes its labels and capacity explicitly. With central running, start one in another shell:
 
 ```powershell
 $env:CENTRAL_URL = "http://localhost:3000"
 $env:TENANT_ID   = "poc"
 $env:WORKER_TYPE = "copilot-local"
+$env:SIDECAR_LABELS_JSON = '{"agent":"local","storage":"host-managed"}'
+$env:SIDECAR_CAPACITY = "99"
 pnpm start:sidecar
 ```
 
-This registers a worker with `sidecarClass=copilot-local-process`, `labels.agent=local`. Create a session against the `copilot-local` AgentSpec and central assigns it to this local worker without scaling a Docker pool. Pause stops that Copilot session and frees a capacity slot; resume reattaches Copilot to its prior session — there is no central snapshot, because the `copilot-managed-local` persistence class leaves continuity to Copilot.
+This registers a worker with `labels.agent=local`, `storage=host-managed`, backed by the `host-managed` storage driver. Create a session against the `copilot-local` AgentSpec and central assigns it to this local worker (pure-label match) without scaling a Docker pool. Pause stops that Copilot session and frees a capacity slot; resume reattaches Copilot to its prior session — there is no central snapshot, because the host-managed storage driver leaves continuity to Copilot.
 
 ## Run the Web Client and Drive a Durable Session
 
@@ -119,7 +121,7 @@ Then, in the browser:
 
 1. Set **Central URL** to `http://localhost:3000` and **Tenant** to `poc`, and click **Connect**. The right rail shows the `poc-docker-copilot` WorkerPool.
 2. Click **Sessions +**, choose the `copilot-poc` AgentSpec, and click **Create Session**.
-3. Central queues the session and the WorkerPool scales out a Docker worker: it builds [containers/sidecar/Dockerfile](containers/sidecar/Dockerfile), runs a container, the sidecar registers through `/sidecar/negotiate`, central assigns the session, and the Copilot agent starts. The session moves `queued → starting → running`.
+3. Central queues the session and the WorkerPool scales out a Docker worker: it runs a container from the pre-built sidecar image ([containers/sidecar/Dockerfile](containers/sidecar/Dockerfile), built via `pnpm build:sidecar-image`), the sidecar registers through `/sidecar/negotiate`, central assigns the session, and the Copilot agent starts. The session moves `queued → starting → running`.
 4. Chat with the agent in the composer. Streamed output appears in the thread and runtime events appear in the grey rail.
 5. Click **Pause**. The sidecar reaches a turn boundary, flushes the Copilot session files, and the workspace plus agent state are captured to a session-addressed snapshot under `<RUNTIME_STORAGE_ROOT>/snapshots/<sessionId>/<snapshotId>/`. Central records the snapshot, releases the lease, and the idle worker is scaled in (recycled).
 6. Click **Resume**. Central re-queues the session, the WorkerPool scales out a **new** worker, the sidecar restores the snapshot before starting Copilot, and Copilot reattaches to its prior session. The agent can read files it created earlier and recall the conversation — on different compute.

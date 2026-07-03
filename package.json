@@ -12,6 +12,8 @@
     "test:sdk": "pnpm --dir sdk/client test",
     "start:central": "node dist/central/main.js",
     "start:sidecar": "node dist/sidecar/main.js",
+    "build:sidecar-image": "docker build -f containers/sidecar/Dockerfile -t agent-runtime-sidecar-poc:latest .",
+    "build:sidecar-image:dotnet": "docker build -f containers/sidecar-dotnet/Dockerfile -t agent-runtime-sidecar-dotnet-poc:latest .",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "devDependencies": {

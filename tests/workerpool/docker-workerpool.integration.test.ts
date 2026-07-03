@@ -18,6 +18,11 @@ import { isCredentialUnavailable, loadTestEnv } from '../support/test-env';
 const execFileAsync = promisify(execFile);
 const IMAGE_NAME = 'agent-runtime-sidecar-poc:test';
 
+// The runtime adapter only runs a pre-built image, so the e2e builds it out of band here (build is not runtime).
+async function buildSidecarImage(): Promise<void> {
+  await execFileAsync('docker', ['build', '-f', 'containers/sidecar/Dockerfile', '-t', IMAGE_NAME, '.'], { maxBuffer: 30 * 1024 * 1024 });
+}
+
 test('scenario: docker worker pool scales out sidecar capacity for SDK session and scales in after pause', async (context) => {
   if (process.env.RUN_DOCKER_WORKERPOOL_E2E !== '1') {
     context.skip('set RUN_DOCKER_WORKERPOOL_E2E=1 to run Docker WorkerPool end-to-end validation');
@@ -38,6 +43,7 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
     return;
   }
 
+  await buildSidecarImage();
   const root = await mkdtemp(join(tmpdir(), 'ars-docker-workerpool-'));
   const tenantId = `poc-${crypto.randomUUID()}`;
   const poolId = `pool-${crypto.randomUUID()}`;
@@ -154,6 +160,7 @@ test('scenario: docker worker pool restores session memory across worker recycle
     return;
   }
 
+  await buildSidecarImage();
   const marker = 'RESUME-OK-7f3a';
   const root = await mkdtemp(join(tmpdir(), 'ars-docker-memory-'));
   const tenantId = `poc-${crypto.randomUUID()}`;

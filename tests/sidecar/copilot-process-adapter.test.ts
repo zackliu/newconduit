@@ -118,7 +118,9 @@ test('scenario: Copilot provider env is passed to SDK with Azure Identity bearer
     assert.deepEqual(client.options.connection, { kind: 'tcp' });
     assert.equal(client.options.workingDirectory, 'workspace-path');
     assert.equal(client.options.baseDirectory, 'copilot-state-path');
-    assert.equal(client.createSessionOptions?.onPermissionRequest, undefined);
+    const permissionHandler = client.createSessionOptions?.onPermissionRequest as (() => unknown) | undefined;
+    assert.equal(typeof permissionHandler, 'function');
+    assert.deepEqual(permissionHandler?.(), { kind: 'no-result' });
     assert.deepEqual(requestedScopes, ['https://cognitiveservices.azure.com/.default']);
     assert.deepEqual({ ...client.createSessionOptions, onPermissionRequest: undefined }, {
       streaming: true,
