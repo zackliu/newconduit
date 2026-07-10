@@ -1,3 +1,30 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
 
 name: agent-runtime-sidecar
+services:
+    agent-runtime-sidecar:
+        project: src/agent-runtime-sidecar
+        host: azure.ai.agent
+        language: docker
+        image: pmagent.azurecr.io/agent-runtime-sidecar-foundry:latest
+        docker:
+            remoteBuild: true
+        uses:
+            - proj-default
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        description: Hosted container agent using pre-built image pmagent.azurecr.io/agent-runtime-sidecar-foundry:latest
+        kind: hosted
+        name: agent-runtime-sidecar
+        protocols:
+            - protocol: invocations
+              version: 2.0.0
+    proj-default:
+        project: ""
+        host: azure.ai.project
+        language: ""
+        endpoint: https://pmagent2.services.ai.azure.com/api/projects/proj-default
+infra:
+    provider: microsoft.foundry
