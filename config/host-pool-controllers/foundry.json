@@ -1,0 +1,8 @@
+{
+  "id": "foundry",
+  "adapterKind": "foundry",
+  "projectEndpoint": "https://pmagent2.services.ai.azure.com/api/projects/proj-default",
+  "agentName": "agent-runtime-sidecar",
+  "workerType": "copilot-local",
+  "centralUrlForWorkers": "https://953jsbfr-3000.aue.devtunnels.ms"
+}

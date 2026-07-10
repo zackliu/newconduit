@@ -37,6 +37,9 @@ export class SessionAssignmentManager {
       allocatable: Math.max(0, worker.allocatable - 1),
       conditions: worker.allocatable - 1 > 0 ? worker.conditions : ['busy'],
       currentSessionCount: worker.currentSessionCount + 1,
+      // A no-reuse worker binds to the first session placed on it; central then never selects a different session
+      // onto it (the binding survives pause so the same session resumes back while the worker is still alive).
+      boundSessionId: worker.reuse === false ? (worker.boundSessionId ?? session.sessionId) : worker.boundSessionId,
       updatedAt: this.clock.now()
     });
     const restore = await this.snapshotManager.planRestore(assignedSession);

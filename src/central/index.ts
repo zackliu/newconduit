@@ -1,5 +1,5 @@
-export { DockerHostPoolAdapter, InMemoryRuntimeTransportAdapter, WebPubSubTransportAdapter } from './adapters';
-export type { DockerHostPoolAdapterOptions, WebPubSubTransportAdapterOptions } from './adapters';
+export { DockerHostPoolAdapter, FoundryHostPoolAdapter, InMemoryRuntimeTransportAdapter, WebPubSubTransportAdapter } from './adapters';
+export type { DockerHostPoolAdapterOptions, FoundryHostPoolAdapterOptions, WebPubSubTransportAdapterOptions } from './adapters';
 export { CentralService } from './central-service';
 export { CentralHttpServer } from './http/central-http-server';
 export { registerPocCentralRoutes } from './http/poc-routes';

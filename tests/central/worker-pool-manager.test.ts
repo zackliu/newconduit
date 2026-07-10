@@ -118,7 +118,56 @@ test('scenario: queued session causes worker pool to scale out, assign provision
   });
 });
 
-async function withRuntime(testBody: (input: { root: string; storage: LocalFileStorage; transport: InMemoryRuntimeTransportAdapter; central: CentralService; clock: FixedClock; adapter: DeterministicHostPoolAdapter }) => Promise<void>): Promise<void> {
+test('scenario: a no-reuse pool pins each instance to its session and retains the durable workspace across an idle pause', async () => {
+  await withRuntime(async ({ central, storage, transport, clock, adapter }) => {
+    const created = await createQueuedSession(transport);
+    await waitFor(() => adapter.scaleOutInputs.length === 1, 'worker pool scale out');
+    const [scaleOut] = adapter.scaleOutInputs;
+
+    const session = await storage.readSession(created.sessionId!);
+    assert.ok(session);
+    // no-reuse: the instance is pinned to the session and carries its stable workspaceRef, so a session-keyed host
+    // (a Foundry sandbox) can key its durable store on the session and reach it again after a resume.
+    assert.equal(scaleOut.instance.boundSessionId, session.sessionId);
+    assert.equal(scaleOut.instance.workspaceRef, session.workspaceRef);
+
+    const worker = await registerWorkerFromInstance(central, scaleOut.instance);
+    clock.set('2026-06-25T00:00:05.000Z');
+    await publishReadyHeartbeat(transport, worker.workerId, clock.now());
+
+    // correlate pre-binds the worker to exactly this session so WorkerSelector can never place another session on it
+    const boundWorker = await storage.readWorker(worker.workerId);
+    assert.equal(boundWorker?.reuse, false);
+    assert.equal(boundWorker?.boundSessionId, session.sessionId);
+
+    const assigned = await storage.readSession(session.sessionId);
+    assert.equal(assigned?.status, 'starting');
+    assert.equal(assigned?.currentWorkerId, worker.workerId);
+
+    await publishStatusChanged(transport, session.sessionId, worker.workerId, assigned!.sessionLeaseId!, 'running', clock.now());
+    await transport.publish({ kind: 'tenant-inbox' }, {
+      eventId: 'event-pause-request', sessionId: session.sessionId, ackId: 'ack-pause', sequence: 0,
+      type: 'session.pause.requested', timestamp: clock.now(), actor: 'client', payload: {}
+    }, demoContext());
+    await transport.publish({ kind: 'tenant-inbox' }, {
+      eventId: 'event-session-paused', sessionId: session.sessionId, workerId: worker.workerId,
+      sessionLeaseId: assigned!.sessionLeaseId, sequence: 0, type: 'session.paused',
+      timestamp: clock.now(), actor: 'sidecar', payload: { reason: 'client_requested' }
+    });
+    const paused = await storage.readSession(session.sessionId);
+    assert.equal(paused?.status, 'paused');
+
+    clock.set('2026-06-25T00:00:10.001Z');
+    await central.reconcileSessionsForTenant('poc');
+
+    // the worker recycles, but because the bound session is still alive (paused) the host must RETAIN the durable
+    // workspace so the session can resume onto a fresh instance and find its files intact.
+    assert.equal(adapter.scaleInInputs.length, 1);
+    assert.equal(adapter.scaleInInputs[0].durableAction, 'retain');
+  }, { reuse: false });
+});
+
+async function withRuntime(testBody: (input: { root: string; storage: LocalFileStorage; transport: InMemoryRuntimeTransportAdapter; central: CentralService; clock: FixedClock; adapter: DeterministicHostPoolAdapter }) => Promise<void>, poolOverride: Partial<WorkerPoolRecord> = {}): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'ars-worker-pool-'));
   try {
     const clock = new FixedClock('2026-06-25T00:00:00.000Z');
@@ -134,7 +183,8 @@ async function withRuntime(testBody: (input: { root: string; storage: LocalFileS
         scaleOutMaxPendingPerTick: 1,
         scaleInIdleMs: 5000
       },
-      centralUrlForWorkers: 'http://host.docker.internal:3000'
+      centralUrlForWorkers: 'http://host.docker.internal:3000',
+      ...poolOverride
     };
     const central = new CentralService({
       storage,

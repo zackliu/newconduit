@@ -284,6 +284,104 @@ test('scenario: final assistant message from the stream becomes the turn result 
   }
 });
 
+test('scenario: a session-scoped approval maps to an approve-for-session Copilot decision that carries the request approval descriptor', async () => {
+  const originalModel = process.env.COPILOT_MODEL;
+  const originalType = process.env.COPILOT_PROVIDER_TYPE;
+  const originalBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  delete process.env.COPILOT_MODEL;
+  delete process.env.COPILOT_PROVIDER_TYPE;
+  delete process.env.COPILOT_PROVIDER_BASE_URL;
+
+  const permissionDecisions = new Map<string, unknown>();
+
+  class PermissionSession {
+    private handler: ((event: { type: string; data: Record<string, unknown> }) => void) | undefined;
+
+    readonly rpc = {
+      permissions: {
+        handlePendingPermissionRequest: async (input: { requestId: string; result: unknown }): Promise<void> => {
+          permissionDecisions.set(input.requestId, input.result);
+        }
+      },
+      tools: { handlePendingToolCall: async (): Promise<void> => undefined }
+    };
+
+    on(handler: (event: { type: string; data: Record<string, unknown> }) => void): () => void {
+      this.handler = handler;
+      return () => {
+        this.handler = undefined;
+      };
+    }
+
+    async sendAndWait(): Promise<{ data: { content: string } }> {
+      this.handler?.({ type: 'permission.requested', data: { requestId: 'perm-write', permissionRequest: { kind: 'write', fileName: 'a.txt' } } });
+      this.handler?.({ type: 'permission.requested', data: { requestId: 'perm-shell', permissionRequest: { kind: 'shell', commands: [{ identifier: 'ls', readOnly: true }] } } });
+      this.handler?.({ type: 'permission.requested', data: { requestId: 'perm-read', permissionRequest: { kind: 'read', path: 'a.txt' } } });
+      this.handler?.({ type: 'permission.requested', data: { requestId: 'perm-deny', permissionRequest: { kind: 'write', fileName: 'b.txt' } } });
+      return { data: { content: 'ok' } };
+    }
+
+    async disconnect(): Promise<void> {
+      return;
+    }
+  }
+
+  class PermissionClient {
+    readonly session = new PermissionSession();
+
+    constructor(readonly options: Record<string, unknown>) {}
+
+    async start(): Promise<void> {
+      return;
+    }
+
+    async getLastSessionId(): Promise<string | undefined> {
+      return undefined;
+    }
+
+    async createSession(): Promise<PermissionSession> {
+      return this.session;
+    }
+
+    async resumeSession(): Promise<PermissionSession> {
+      return this.session;
+    }
+
+    async stop(): Promise<void> {
+      return;
+    }
+  }
+
+  const adapter = new CopilotProcessAdapter(async () => ({
+    CopilotClient: PermissionClient,
+    RuntimeConnection: {
+      forStdio: (input: { path: string }) => ({ kind: 'stdio', ...input }),
+      forTcp: (input?: { path?: string }) => ({ kind: 'tcp', ...input })
+    },
+    approveAll: async () => true
+  }), async () => ({ token: 'test-msi-token', expiresOnTimestamp: Date.now() + 3600_000 }));
+
+  try {
+    await adapter.start(startInput());
+    await adapter.send({ sessionId: 'session-1', turnSeq: 1, message: 'edit some files' }, async () => undefined);
+
+    await adapter.respondToInteraction({ sessionId: 'session-1', interactionId: 'perm-write', kind: 'approval', response: { decision: 'approved', scope: 'session' } });
+    await adapter.respondToInteraction({ sessionId: 'session-1', interactionId: 'perm-shell', kind: 'approval', response: { decision: 'approved', scope: 'session' } });
+    await adapter.respondToInteraction({ sessionId: 'session-1', interactionId: 'perm-read', kind: 'approval', response: { decision: 'approved', scope: 'once' } });
+    await adapter.respondToInteraction({ sessionId: 'session-1', interactionId: 'perm-deny', kind: 'approval', response: { decision: 'denied' } });
+
+    assert.deepEqual(permissionDecisions.get('perm-write'), { kind: 'approve-for-session', approval: { kind: 'write' } });
+    assert.deepEqual(permissionDecisions.get('perm-shell'), { kind: 'approve-for-session', approval: { kind: 'commands', commandIdentifiers: ['ls'] } });
+    assert.deepEqual(permissionDecisions.get('perm-read'), { kind: 'approve-once' });
+    assert.deepEqual(permissionDecisions.get('perm-deny'), { kind: 'reject' });
+  } finally {
+    await adapter.stop({ sessionId: 'session-1' });
+    restoreEnv('COPILOT_MODEL', originalModel);
+    restoreEnv('COPILOT_PROVIDER_TYPE', originalType);
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalBaseUrl);
+  }
+});
+
 test('scenario: real Copilot SDK agent uses provider env from tests env file', async (context) => {
   const env = loadTestEnv();
   const runRealCopilotAgent = process.env.RUN_REAL_COPILOT_AGENT_E2E ?? env.RUN_REAL_COPILOT_AGENT_E2E;

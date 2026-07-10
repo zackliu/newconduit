@@ -87,7 +87,7 @@ On startup you should see `central service listening on http://localhost:3000`.
 | `TENANT_ID` | no | `poc` | Tenant runtime id. |
 | `CENTRAL_PORT` | no | `3000` | HTTP port. |
 | `RUNTIME_STORAGE_ROOT` | no | `.runtime-poc/tenants/<tenantId>` | Local storage root for sessions, events, workers, and snapshots. |
-| `CENTRAL_URL_FOR_WORKERS` | no | `http://host.docker.internal:<port>` | URL the containerized sidecar calls back to reach central. |
+| `CENTRAL_URL_FOR_WORKERS` | no | `http://host.docker.internal:<port>` | Default URL a worker's sidecar calls back to reach central. A host-pool-controller can override it per backend with its own `centralUrlForWorkers` (e.g. a public URL for cloud workers). |
 | `CONFIG_DIR` | no | `config` | Directory of AgentSpec, WorkerPool, and host-pool-controller config documents read at startup. |
 
 Optional provider knobs: `COPILOT_PROVIDER_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`.
@@ -127,6 +127,49 @@ Then, in the browser:
 6. Click **Resume**. Central re-queues the session, the WorkerPool scales out a **new** worker, the sidecar restores the snapshot before starting Copilot, and Copilot reattaches to its prior session. The agent can read files it created earlier and recall the conversation — on different compute.
 
 > The first scale-out builds the sidecar image (a few minutes). Subsequent scale-outs reuse the cached image and start in seconds. Editing any file under `src/` invalidates the image's build layers, so the next scale-out rebuilds it.
+
+## Run on Azure AI Foundry Hosted Agents (alternate WorkerPool backend)
+
+The WorkerPool backend is chosen by config, not code: an **Azure AI Foundry hosted agent** is a peer host-pool adapter of Docker. In this mode each Worker runs **the same sidecar image** on a Foundry hosted agent instead of a local Docker container, and session commands still flow over Web PubSub exactly as in the Docker path. Foundry owns the container lifecycle (request-driven, ~15 min idle scale-to-zero); central keeps a worker warm by holding one long liveness `/invocations` request open per worker. Because a Foundry sandbox is host-managed durable storage, the Foundry session **is** our session's durable workspace: it is keyed on the session's stable `workspaceRef`, so pausing releases compute but keeps the sandbox, a resume re-invokes the same sandbox with the workspace intact, and the Foundry session is deleted only when our session ends. The full walkthrough and the confirmed Foundry data-plane contract are in [foundry/README.md](foundry/README.md).
+
+### 1. Build and push the Foundry sidecar image
+
+The Foundry image variant ([containers/sidecar-foundry/Dockerfile](containers/sidecar-foundry/Dockerfile)) only adds `ENV SIDECAR_HOST_CLASS=foundry` on top of the base sidecar image, which switches the outer host wrapper to serve the Foundry hosted-agent HTTP contract (`GET /readiness`, `POST /invocations`) and boot the same daemon. Build both to a registry Foundry can pull from (ACR remote build works even when a corporate proxy blocks `registry.npmjs.org` from a local `docker build`):
+
+```powershell
+az acr build -r <acr> -t agent-runtime-sidecar-poc:latest --platform linux/amd64 -f containers/sidecar/Dockerfile .
+az acr build -r <acr> -t agent-runtime-sidecar-foundry:latest --platform linux/amd64 `
+  --build-arg BASE_IMAGE=<acr>.azurecr.io/agent-runtime-sidecar-poc:latest `
+  -f containers/sidecar-foundry/Dockerfile .
+```
+
+### 2. Deploy the image as a Foundry hosted agent (bring-your-own image)
+
+Requires Azure Developer CLI 1.27+ with the `microsoft.foundry` extension and `az login` with access to the project. Grant the standard managed-identity roles: the Foundry **project** managed identity needs **AcrPull** on the registry (image pull), and the platform-created **agent identity** needs the model-provider role — for Azure OpenAI, **Cognitive Services OpenAI User** on the account.
+
+```powershell
+azd ai agent init --no-prompt --force `
+  --project-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>/projects/<project>" `
+  --agent-name agent-runtime-sidecar `
+  --image <acr>.azurecr.io/agent-runtime-sidecar-foundry:latest `
+  --protocol invocations
+azd deploy --no-prompt
+```
+
+Set the in-container copilot provider config as agent environment variables (`COPILOT_MODEL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_BASE_URL`); provider auth is the agent's managed identity via `DefaultAzureCredential`, so no token is baked into the image.
+
+### 3. Point central at the deployed agent and run it
+
+The Foundry pool lives in the same default [config/](config/) profile as the Docker pools ([config/host-pool-controllers/foundry.json](config/host-pool-controllers/foundry.json), [config/worker-pools/foundry-copilot.json](config/worker-pools/foundry-copilot.json), [config/agent-specs/copilot-foundry.json](config/agent-specs/copilot-foundry.json)), so one central serves Docker and Foundry sessions side by side — a session is routed to a pool purely by its `storage` capability label (`volume-snapshot` → Docker, `host-managed` → Foundry). Edit `config/host-pool-controllers/foundry.json` so `projectEndpoint` and `agentName` match the agent you deployed, and set its `centralUrlForWorkers` to the URL the Foundry worker uses to reach central (public / tunnel URL — see the note below). Then start central normally:
+
+```powershell
+$env:WEBPUBSUB_ENDPOINT = "https://<your-web-pubsub>.webpubsub.azure.com"
+pnpm start:central
+```
+
+In the web client, choose the **`copilot-foundry`** AgentSpec (it now appears alongside the Docker `copilot-poc` spec). Central scales the `foundry-copilot` pool out onto a Foundry hosted-agent worker — a cold start boots the container, which reverse-registers over Web PubSub — runs the turn, and pauses by scaling in. The Docker pools stay available in the same central for `copilot-poc` sessions.
+
+> **Local-test topology only:** when central runs on your machine while the worker runs in Foundry, the container must reach central's `/sidecar/negotiate`. Expose central with a tunnel (for example `devtunnel host -p 3000 --allow-anonymous`) and put that public https URL in the Foundry controller's `centralUrlForWorkers` (in `config/host-pool-controllers/foundry.json`). Because that URL is resolved per host-pool-controller, the Foundry pool uses the tunnel while the Docker pools keep `host.docker.internal` — one central drives both. This is a convenience for local testing, not a production topology.
 
 ## How Scaling and Recovery Work
 

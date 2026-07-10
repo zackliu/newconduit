@@ -1,17 +1,39 @@
 import { join } from 'node:path';
 import { CentralService } from './central-service';
-import { DockerHostPoolAdapter, WebPubSubTransportAdapter } from './adapters';
+import { DockerHostPoolAdapter, FoundryHostPoolAdapter, WebPubSubTransportAdapter } from './adapters';
 import { FileConfigStore, type HostPoolControllerConfig } from './config/file-config-store';
 import { CentralHttpServer } from './http/central-http-server';
 import { registerPocCentralRoutes } from './http/poc-routes';
 import type { HostPoolAdapter } from './managers';
 import type { TenantContext } from '../shared';
 
+interface HostPoolAdapterContext {
+  snapshotRoot: string;
+}
+
 // Generic registry of host-pool adapter implementations keyed by each adapter's self-declared classId. Config
-// names an adapterKind; this map resolves it without enumerating any specific controller-class literal.
-const HOST_POOL_ADAPTER_FACTORIES: Record<string, (options: { imageName: string; workerType: string; snapshotRoot: string }) => HostPoolAdapter> = {
-  [DockerHostPoolAdapter.classId]: (options) => new DockerHostPoolAdapter(options)
+// names an adapterKind; this map resolves it without enumerating any specific controller-class literal. Each
+// factory reads its own adapter-specific fields off the controller config, so central never branches on kind.
+const HOST_POOL_ADAPTER_FACTORIES: Record<string, (controller: HostPoolControllerConfig, context: HostPoolAdapterContext) => HostPoolAdapter> = {
+  [DockerHostPoolAdapter.classId]: (controller, context) => new DockerHostPoolAdapter({
+    imageName: requireConfigString(controller, 'imageName'),
+    workerType: requireConfigString(controller, 'workerType'),
+    snapshotRoot: context.snapshotRoot
+  }),
+  [FoundryHostPoolAdapter.classId]: (controller) => new FoundryHostPoolAdapter({
+    projectEndpoint: requireConfigString(controller, 'projectEndpoint'),
+    agentName: requireConfigString(controller, 'agentName'),
+    workerType: requireConfigString(controller, 'workerType')
+  })
 };
+
+function requireConfigString(controller: HostPoolControllerConfig, key: string): string {
+  const value = controller[key];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`host-pool-controller '${controller.id}' (adapterKind '${controller.adapterKind}') requires string field '${key}'`);
+  }
+  return value;
+}
 
 async function main(): Promise<void> {
   const webPubSubEndpoint = process.env.WEBPUBSUB_ENDPOINT;
@@ -54,17 +76,14 @@ async function main(): Promise<void> {
 }
 
 function buildHostPoolAdapters(controllers: HostPoolControllerConfig[], snapshotRoot: string): Record<string, HostPoolAdapter> {
+  const context: HostPoolAdapterContext = { snapshotRoot };
   const adapters: Record<string, HostPoolAdapter> = {};
   for (const controller of controllers) {
     const factory = HOST_POOL_ADAPTER_FACTORIES[controller.adapterKind];
     if (!factory) {
       throw new Error(`unknown host pool adapterKind: ${controller.adapterKind}`);
     }
-    adapters[controller.id] = factory({
-      imageName: controller.imageName,
-      workerType: controller.workerType,
-      snapshotRoot
-    });
+    adapters[controller.id] = factory(controller, context);
   }
   return adapters;
 }

@@ -13,18 +13,18 @@ import type { SidecarAgentProcessAdapter, SidecarWorkspaceAdapter } from './cont
 export interface WorkerBuildProfile {
   workerTypeId: string;
   storageClass: string;
-  createWorkspaceAdapter(): SidecarWorkspaceAdapter;
+  createWorkspaceAdapter(options?: { workRoot?: string }): SidecarWorkspaceAdapter;
   createAgentProcessAdapter(): SidecarAgentProcessAdapter;
 }
 
-type WorkspaceAdapterClass = (new () => SidecarWorkspaceAdapter) & { classId: string };
+type WorkspaceAdapterClass = (new (options?: { workRoot?: string }) => SidecarWorkspaceAdapter) & { classId: string };
 type AgentProcessAdapterClass = new () => SidecarAgentProcessAdapter;
 
 function buildProfile(workerTypeId: string, Workspace: WorkspaceAdapterClass, AgentProcess: AgentProcessAdapterClass): WorkerBuildProfile {
   return {
     workerTypeId,
     storageClass: Workspace.classId,
-    createWorkspaceAdapter: () => new Workspace(),
+    createWorkspaceAdapter: (options) => new Workspace(options),
     createAgentProcessAdapter: () => new AgentProcess()
   };
 }

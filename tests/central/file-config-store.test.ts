@@ -10,7 +10,7 @@ import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 
 test('scenario: central loads agent specs from the default config directory', async () => {
   const specs = new FileConfigStore().loadAgentSpecs();
-  assert.deepEqual(specs.map((spec) => spec.agentSpecId).sort(), ['copilot-local', 'copilot-poc', 'dotnet-poc']);
+  assert.deepEqual(specs.map((spec) => spec.agentSpecId).sort(), ['copilot-foundry', 'copilot-local', 'copilot-poc', 'dotnet-poc']);
   const copilotPoc = specs.find((spec) => spec.agentSpecId === 'copilot-poc');
   assert.ok(copilotPoc);
   assert.deepEqual(copilotPoc.workerSelector.matchLabels, { agent: 'copilot', storage: 'volume-snapshot' });
@@ -20,7 +20,7 @@ test('scenario: central loads agent specs from the default config directory', as
     const transport = new InMemoryRuntimeTransportAdapter();
     const central = new CentralService({ storage: new LocalFileStorage(root), eventTransport: transport, connectionIssuer: transport });
     const status = await central.describeWorkerPoolsForTenant('poc');
-    assert.deepEqual(status.agentSpecs.map((spec) => spec.agentSpecId).sort(), ['copilot-local', 'copilot-poc', 'dotnet-poc']);
+    assert.deepEqual(status.agentSpecs.map((spec) => spec.agentSpecId).sort(), ['copilot-foundry', 'copilot-local', 'copilot-poc', 'dotnet-poc']);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -33,5 +33,6 @@ test('scenario: worker pool config binds tenant and deployment wiring at load', 
   assert.equal(copilotPool.tenantId, 'tenant-x');
   assert.equal(copilotPool.centralUrlForWorkers, 'http://central.example:3000');
   assert.equal(copilotPool.hostPoolControllerClass, 'docker');
+  assert.equal(copilotPool.reuse, false);
   assert.deepEqual(copilotPool.template.labels, { agent: 'copilot', storage: 'volume-snapshot' });
 });

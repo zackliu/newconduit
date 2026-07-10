@@ -79,3 +79,49 @@ test('scenario: expired ready worker is not selected for queued session', () => 
 
   assert.equal(selected, undefined);
 });
+
+test('scenario: no-reuse worker only accepts its bound session, never a different one', () => {
+  const now = new Date().toISOString();
+  const resolvedAgentSpec = new AgentSpecAdmissionManager(new SystemClock()).resolve(POC_AGENT_SPEC);
+  const sessionFor = (sessionId: string): SessionRecord => ({
+    sessionId,
+    tenantId: 'tenant-1',
+    owner: 'owner-1',
+    resolvedAgentSpec,
+    status: 'queued',
+    sessionLeaseId: undefined,
+    eventCursor: 0,
+    nextTurnSeq: 1,
+    workspaceRef: `workspace-${sessionId}`,
+    lastEventUpdatedAt: now,
+    createdAt: now,
+    updatedAt: now
+  });
+  const workerWith = (overrides: Partial<WorkerRecord>): WorkerRecord => ({
+    workerId: 'worker-1',
+    tenantId: 'tenant-1',
+    capacityScope: 'tenant-1',
+    labels: COPILOT_WORKER_LABELS,
+    storageClass: COPILOT_STORAGE_CLASS,
+    capacity: 1,
+    allocatable: 1,
+    conditions: ['ready'],
+    lifecycleState: 'active',
+    heartbeatAt: now,
+    expiresAt: new Date(Date.parse(now) + 30_000).toISOString(),
+    currentSessionCount: 0,
+    updatedAt: now,
+    ...overrides
+  });
+
+  const selector = new WorkerSelector();
+
+  // Bound to a different session: excluded even though it has free capacity and matches labels.
+  assert.equal(selector.select(sessionFor('session-A'), [workerWith({ reuse: false, boundSessionId: 'session-B' })]), undefined);
+  // Bound to the same session (e.g. resume onto its still-alive worker): selected.
+  assert.equal(selector.select(sessionFor('session-A'), [workerWith({ reuse: false, boundSessionId: 'session-A' })])?.workerId, 'worker-1');
+  // Fresh no-reuse worker (unbound): selectable, and becomes bound once assigned.
+  assert.equal(selector.select(sessionFor('session-A'), [workerWith({ reuse: false })])?.workerId, 'worker-1');
+  // Reuse (shared) worker: any matching session may be placed even if another session already used it.
+  assert.equal(selector.select(sessionFor('session-A'), [workerWith({ reuse: true, boundSessionId: 'session-B' })])?.workerId, 'worker-1');
+});

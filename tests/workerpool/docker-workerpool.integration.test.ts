@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
-import { AgentRuntimeClient, type AgentTurnEvent } from '../../sdk/client/src';
+import { AgentRuntimeClient, type AgentTurnEvent, type SessionHandle } from '../../sdk/client/src';
 import { DockerHostPoolAdapter, WebPubSubTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { CentralHttpServer } from '../../src/central/http/central-http-server';
@@ -56,12 +56,14 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
       scaleOutMaxPendingPerTick: 1,
       scaleInIdleMs: 5000
     },
-    centralUrlForWorkers: 'http://host.docker.internal:0'
+    centralUrlForWorkers: 'http://host.docker.internal:0',
+    reuse: false
   };
   const transport = new WebPubSubTransportAdapter({ tenantId, endpoint, hubName });
   const storage = new LocalFileStorage(root);
   const adapter = new DockerHostPoolAdapter({
     imageName: IMAGE_NAME,
+    workerType: 'copilot-process-wrapper',
     sidecarWorkRoot: join(root, 'docker-runtime'),
     snapshotRoot: join(root, 'snapshots'),
     env: {
@@ -162,6 +164,8 @@ test('scenario: docker worker pool restores session memory across worker recycle
 
   await buildSidecarImage();
   const marker = 'RESUME-OK-7f3a';
+  const interactionApprovals = new AbortController();
+  let approver: Promise<void> | undefined;
   const root = await mkdtemp(join(tmpdir(), 'ars-docker-memory-'));
   const tenantId = `poc-${crypto.randomUUID()}`;
   const poolId = `pool-${crypto.randomUUID()}`;
@@ -174,12 +178,14 @@ test('scenario: docker worker pool restores session memory across worker recycle
       scaleOutMaxPendingPerTick: 1,
       scaleInIdleMs: 5000
     },
-    centralUrlForWorkers: 'http://host.docker.internal:0'
+    centralUrlForWorkers: 'http://host.docker.internal:0',
+    reuse: false
   };
   const transport = new WebPubSubTransportAdapter({ tenantId, endpoint, hubName });
   const storage = new LocalFileStorage(root);
   const adapter = new DockerHostPoolAdapter({
     imageName: IMAGE_NAME,
+    workerType: 'copilot-process-wrapper',
     sidecarWorkRoot: join(root, 'docker-runtime'),
     snapshotRoot: join(root, 'snapshots'),
     env: {
@@ -218,6 +224,7 @@ test('scenario: docker worker pool restores session memory across worker recycle
       workspace: { source: 'empty' },
       displayName: 'Docker WorkerPool continuity'
     });
+    approver = autoApproveInteractions(session, interactionApprovals.signal);
 
     const runningOnA = await waitForSession(storage, session.id, (candidate) => candidate.status === 'running' && Boolean(candidate.currentWorkerId), 180_000);
     const workerAId = runningOnA.currentWorkerId!;
@@ -255,6 +262,8 @@ test('scenario: docker worker pool restores session memory across worker recycle
     }
     throw error;
   } finally {
+    interactionApprovals.abort();
+    await approver?.catch(() => undefined);
     await sdk?.close();
     await cleanupDockerPool(poolId);
     await transport.stop();
@@ -262,6 +271,18 @@ test('scenario: docker worker pool restores session memory across worker recycle
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function autoApproveInteractions(session: SessionHandle, signal: AbortSignal): Promise<void> {
+  try {
+    for await (const event of session.observe({ signal, includeHistory: false })) {
+      if (event.type === 'interaction.requested' && event.kind === 'approval') {
+        await session.respondToInteraction({ interactionId: event.interactionId, decision: 'approved', scope: 'session' });
+      }
+    }
+  } catch {
+    // the approver is aborted during test cleanup; ending the observation loop is expected
+  }
+}
 
 async function collectTurnEvents(events: AsyncIterable<AgentTurnEvent>, timeoutMs: number): Promise<AgentTurnEvent[]> {
   return await Promise.race([

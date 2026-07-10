@@ -11,5 +11,6 @@
   "scalePolicy": {
     "scaleOutMaxPendingPerTick": 1,
     "scaleInIdleMs": 5000
-  }
+  },
+  "reuse": false
 }

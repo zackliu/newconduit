@@ -1,0 +1,22 @@
+{
+  "agentSpecId": "copilot-foundry",
+  "labels": {
+    "agent": "copilot",
+    "tier": "foundry"
+  },
+  "launch": {
+    "command": "copilot",
+    "args": []
+  },
+  "toolProfile": "copilot-poc-tools",
+  "workerSelector": {
+    "matchLabels": {
+      "agent": "copilot",
+      "storage": "host-managed"
+    }
+  },
+  "pausePolicy": "stop-on-pause",
+  "recoveryPolicy": "restart-with-context",
+  "idlePauseTimeoutMs": 120000,
+  "version": "poc-v1"
+}

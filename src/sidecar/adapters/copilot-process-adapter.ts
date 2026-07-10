@@ -64,6 +64,9 @@ type ProviderTokenResolver = (scope: string) => Promise<AccessToken | null>;
 interface ActiveGitHubCopilotSession {
   client: CopilotSdkClient;
   session: CopilotSdkSession;
+  /** Pending Copilot permission requests keyed by requestId. Retained so a session-scoped grant can
+   *  rebuild the per-request approval descriptor the Copilot permission rule engine remembers. */
+  pendingPermissionRequests: Map<string, Record<string, unknown>>;
 }
 
 export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
@@ -105,7 +108,8 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       : await client.createSession(sessionConfig);
     this.sessions.set(input.sessionId, {
       client: client as unknown as CopilotSdkClient,
-      session: session as unknown as CopilotSdkSession
+      session: session as unknown as CopilotSdkSession,
+      pendingPermissionRequests: new Map()
     });
   }
 
@@ -121,6 +125,7 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     let lastStreamedOutput: unknown;
     let publishChain: Promise<void> = Promise.resolve();
     const unsubscribe = active.session.on((event) => {
+      this.capturePendingPermissionRequest(active, event);
       const mapped = this.mapSessionEvent(event);
       if (!mapped) {
         return;
@@ -162,9 +167,11 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       throw new Error(`agent session ${input.sessionId} is not running`);
     }
     if (input.kind === 'approval') {
+      const pendingRequest = active.pendingPermissionRequests.get(input.interactionId);
+      active.pendingPermissionRequests.delete(input.interactionId);
       await active.session.rpc.permissions.handlePendingPermissionRequest({
         requestId: input.interactionId,
-        result: this.toPermissionDecision(input.response)
+        result: this.toPermissionDecision(input.response, pendingRequest)
       });
       return;
     }
@@ -174,12 +181,85 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     });
   }
 
-  private toPermissionDecision(response: unknown): unknown {
+  private capturePendingPermissionRequest(active: ActiveGitHubCopilotSession, event: CopilotSdkSessionEvent): void {
+    if (event.type !== 'permission.requested') {
+      return;
+    }
+    const requestId = typeof event.data.requestId === 'string' ? event.data.requestId : undefined;
+    const request = this.isRecord(event.data.permissionRequest) ? event.data.permissionRequest : undefined;
+    if (requestId && request) {
+      active.pendingPermissionRequests.set(requestId, request);
+    }
+  }
+
+  private toPermissionDecision(response: unknown, pendingRequest?: Record<string, unknown>): unknown {
     const record = this.isRecord(response) ? response : {};
     if (record.decision === 'denied') {
       return { kind: 'reject' };
     }
-    return record.scope === 'session' ? { kind: 'approve-for-session' } : { kind: 'approve-once' };
+    // A `session`-scoped client grant must become an `approve-for-session` decision so the Copilot
+    // permission rule engine records a standing rule and auto-approves later matching requests
+    // ("always approve"). `approve-for-session` carries what to remember as an `approval` descriptor
+    // (tool prompts) or a `domain` (url prompts); that descriptor is derived from the original request
+    // kind, which is why the pending request is retained and passed in rather than read from the
+    // client response. A `once` grant approves this single request only.
+    if (record.scope === 'session') {
+      return this.toApproveForSessionDecision(pendingRequest);
+    }
+    return { kind: 'approve-once' };
+  }
+
+  private toApproveForSessionDecision(pendingRequest?: Record<string, unknown>): unknown {
+    const approval = this.toSessionApprovalDescriptor(pendingRequest);
+    if (approval) {
+      return { kind: 'approve-for-session', approval };
+    }
+    if (pendingRequest?.kind === 'url' && typeof pendingRequest.url === 'string') {
+      try {
+        return { kind: 'approve-for-session', domain: new URL(pendingRequest.url).hostname };
+      } catch {
+        // A url that cannot be parsed cannot scope a domain rule; fall through to a bare session grant.
+      }
+    }
+    return { kind: 'approve-for-session' };
+  }
+
+  private toSessionApprovalDescriptor(request?: Record<string, unknown>): Record<string, unknown> | undefined {
+    if (!request || typeof request.kind !== 'string') {
+      return undefined;
+    }
+    switch (request.kind) {
+      case 'shell': {
+        const commandIdentifiers = Array.isArray(request.commands)
+          ? request.commands
+              .map((command) => (this.isRecord(command) && typeof command.identifier === 'string' ? command.identifier : undefined))
+              .filter((identifier): identifier is string => identifier !== undefined)
+          : [];
+        return { kind: 'commands', commandIdentifiers };
+      }
+      case 'read':
+        return { kind: 'read' };
+      case 'write':
+        return { kind: 'write' };
+      case 'mcp':
+        return {
+          kind: 'mcp',
+          serverName: typeof request.serverName === 'string' ? request.serverName : '',
+          toolName: typeof request.toolName === 'string' ? request.toolName : null
+        };
+      case 'memory':
+        return { kind: 'memory' };
+      case 'custom-tool':
+        return { kind: 'custom-tool', toolName: typeof request.toolName === 'string' ? request.toolName : '' };
+      case 'extension-management':
+        return typeof request.operation === 'string'
+          ? { kind: 'extension-management', operation: request.operation }
+          : { kind: 'extension-management' };
+      case 'extension-permission-access':
+        return { kind: 'extension-permission-access', extensionName: typeof request.extensionName === 'string' ? request.extensionName : '' };
+      default:
+        return undefined;
+    }
   }
 
   private toToolResult(response: unknown): unknown {

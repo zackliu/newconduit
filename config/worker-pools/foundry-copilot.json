@@ -1,13 +1,13 @@
 {
-  "poolId": "poc-docker-dotnet",
+  "poolId": "foundry-copilot",
   "template": {
     "labels": {
-      "agent": "dotnet",
-      "storage": "volume-snapshot"
+      "agent": "copilot",
+      "storage": "host-managed"
     },
     "capacity": 1
   },
-  "hostPoolControllerClass": "docker-dotnet",
+  "hostPoolControllerClass": "foundry",
   "scalePolicy": {
     "scaleOutMaxPendingPerTick": 1,
     "scaleInIdleMs": 5000

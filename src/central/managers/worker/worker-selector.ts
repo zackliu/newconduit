@@ -13,7 +13,17 @@ export class WorkerSelector {
       && worker.allocatable > 0
       && worker.conditions.includes('ready')
       && this.matchesSelector(worker.labels, session.resolvedAgentSpec.workerSelector)
+      && this.reuseAllows(worker, session)
     );
+  }
+
+  /**
+   * A no-reuse worker is bound to a single session identity: only that session may be (re)placed on it, so
+   * another session is never selected onto it even when it has free capacity. A reuse (shared) worker accepts
+   * any matching session.
+   */
+  private reuseAllows(worker: WorkerRecord, session: SessionRecord): boolean {
+    return worker.reuse !== false || !worker.boundSessionId || worker.boundSessionId === session.sessionId;
   }
 
   private matchesSelector(labels: Record<string, string>, selector: LabelSelector): boolean {

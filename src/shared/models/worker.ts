@@ -7,6 +7,9 @@ export interface WorkerRecord {
   capacityScope: string;
   labels: Record<string, string>;
   storageClass: string;
+  // Resolved from the owning WorkerPool at correlation. `false` = no-reuse: central binds the worker to the first
+  // session placed on it (`boundSessionId`) and never places a different session on it. Absent/`true` = shared.
+  reuse?: boolean;
   description?: Record<string, string>;
   capacity: number;
   allocatable: number;
@@ -15,6 +18,8 @@ export interface WorkerRecord {
   heartbeatAt: string;
   expiresAt: string;
   currentSessionCount: number;
+  // Set on a no-reuse worker when its first session is assigned. Only this session id may be (re)placed here.
+  boundSessionId?: string;
   terminalReason?: string;
   updatedAt: string;
 }
