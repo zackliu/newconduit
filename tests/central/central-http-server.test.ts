@@ -60,9 +60,23 @@ test('scenario: central starts server with health and negotiate endpoints', asyn
     });
     assert.equal(sidecarNegotiateResponse.status, 200);
     const sidecarToken = await sidecarNegotiateResponse.json() as { url: string; worker: { workerId: string } };
-    assert.match(sidecarToken.url, /principal=demo-sidecar/);
+    assert.match(sidecarToken.url, new RegExp(`principal=${sidecarToken.worker.workerId}`));
+    assert.match(sidecarToken.url, new RegExp(`connection=${sidecarToken.worker.workerId}`));
     assert.match(sidecarToken.url, /tenant-inbox/);
     assert.equal(typeof sidecarToken.worker.workerId, 'string');
+
+    const invalidInstanceClaimResponse = await fetch(`http://localhost:${port}${POC_RUNTIME_HTTP_PATHS.sidecarNegotiate}?${POC_RUNTIME_HTTP_QUERY.tenantId}=poc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        hostPoolInstanceId: 42,
+        labels: { agent: 'copilot', storage: 'volume-snapshot' },
+        storageClass: 'volume-snapshot',
+        capacity: 1,
+        allocatable: 1
+      })
+    });
+    assert.equal(invalidInstanceClaimResponse.status, 400);
 
     const localSidecarNegotiateResponse = await fetch(`http://localhost:${port}${POC_RUNTIME_HTTP_PATHS.sidecarNegotiate}?${POC_RUNTIME_HTTP_QUERY.tenantId}=poc`, {
       method: 'POST',

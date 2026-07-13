@@ -174,6 +174,7 @@ test('scenario: sidecar negotiates real Web PubSub connection and registers work
     throw error;
   } finally {
     await sidecar.stop();
+    await central.stop();
     await transport.stop();
     await server.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
@@ -288,6 +289,7 @@ test('scenario: client SDK creates session and assignment reaches registered wor
     await sdk?.stop();
     await stopWebPubSubClient(commandClient);
     await sidecar.stop();
+    await central.stop();
     await transport.stop();
     await server.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });

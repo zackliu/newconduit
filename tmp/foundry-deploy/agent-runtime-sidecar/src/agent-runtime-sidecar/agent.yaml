@@ -1,8 +1,0 @@
-name: agent-runtime-sidecar
-template:
-    description: Hosted container agent using pre-built image pmagent.azurecr.io/agent-runtime-sidecar-foundry:latest
-    kind: hosted
-    name: agent-runtime-sidecar
-    protocols:
-        - protocol: invocations
-          version: 2.0.0

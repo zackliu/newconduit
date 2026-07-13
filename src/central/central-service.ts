@@ -14,6 +14,7 @@ export interface CentralServiceOptions {
   agentSpecRegistry?: AgentSpecRegistry;
   workerPools?: WorkerPoolRecord[];
   hostPoolAdapters?: Record<string, HostPoolAdapter>;
+  controllerEpoch?: string;
 }
 
 export class CentralService {
@@ -35,7 +36,8 @@ export class CentralService {
       clock,
       agentSpecRegistry: options.agentSpecRegistry ?? new StaticAgentSpecRegistry(new FileConfigStore().loadAgentSpecs()),
       workerPools: options.workerPools,
-      hostPoolAdapters: options.hostPoolAdapters
+      hostPoolAdapters: options.hostPoolAdapters,
+      controllerEpoch: options.controllerEpoch
     });
     this.tenantRuntimes.set(tenant.tenantId, tenantRuntime);
   }

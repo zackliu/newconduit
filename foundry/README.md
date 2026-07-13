@@ -44,27 +44,31 @@ flowchart LR
   FA -- POST /invocations (boot + held liveness) --> HOST
   HOST -- boot once --> DAEMON
   DAEMON <-- Web PubSub commands --> central
-  FA -- scaleIn: abort+stop (retain) / DELETE (release) --> foundry
+  FA -- ensureStopped: stop (retain) / DELETE (release) --> foundry
 ```
 
-## How scale-out / scale-in map to Foundry
+## How runtime state maps to Foundry
 
 - Foundry pools are **no-reuse**, so central scales one **session-pinned** instance per queued session (carrying the
   session's stable `workspaceRef`). Because a Foundry sandbox is host-managed durable storage, the Foundry session
   **is** that session's durable workspace.
-- `scaleOut` uses `agent_session_id = the instance's workspaceRef`. It first `POST /stop`s that session to
+- A new Instance's `ensureRunning` uses `agent_session_id = workspaceRef`. It first `POST /stop`s that session to
   normalize any prior state (not-exist / `idle` / stale-`active`) to "no live compute", then opens a held
-  `POST /invocations` with the boot payload and returns `{ containerId: sessionId }`. Normalizing first guarantees
+  `POST /invocations` with the boot payload and returns `hostHandle = workspaceRef`. Normalizing first guarantees
   the invocation cold-boots a **fresh** container whose boot-once sidecar registers under this instance id (a still-
   warm container would keep its old sidecar under the previous instance id and the new instance would never
   correlate). Holding the request suppresses the idle reap; the loop reconnects with the same session id if the
   stream drops. (An unpinned/shared instance falls back to a per-instance `w-<instanceId>` id.)
-- `scaleIn` aborts the held request, then honors a `durableAction`: `retain` (the bound session is still alive,
+- `ensureStopped` aborts the held request, then honors a `durableAction`: `retain` (the bound session is still alive,
   e.g. paused) **stops** the Foundry session (`POST /stop` → `idle`) so compute is released while the sandbox +
   `$HOME` survive - a resume (a fresh instance carrying the same `workspaceRef`) re-invokes the stopped session
   into a fresh container generation with the workspace intact; `release` (the bound session ended) `DELETE`s it
   (`→ deleted`). Aborting alone is not enough: the container would stay warm ~15 min and a resume would re-invoke
   the orphaned sidecar; the explicit stop is what leaves the session cleanly reusable.
+- On central restart, the persisted Instance is re-armed under a new controller epoch. `ensureRunning` reopens its
+  persisted `hostHandle` without first stopping a surviving process, and central waits for a fresh Worker heartbeat.
+  No report by `workerReportTimeoutMs`, or multiple fresh Workers claiming one Instance, follows the same fencing
+  and cleanup path as a runtime heartbeat loss.
 
 ## Prerequisites
 
@@ -85,10 +89,13 @@ even when a corporate proxy blocks `registry.npmjs.org` from a local `docker bui
 
 ```powershell
 # base image
-az acr build -r <acr> -t agent-runtime-sidecar-poc:latest --platform linux/amd64 -f containers/sidecar/Dockerfile .
-# Foundry variant (FROM the base + ENV SIDECAR_HOST_CLASS=foundry)
-az acr build -r <acr> -t agent-runtime-sidecar-foundry:latest --platform linux/amd64 `
-  --build-arg BASE_IMAGE=<acr>.azurecr.io/agent-runtime-sidecar-poc:latest `
+az acr build -r <acr> -t agent-runtime-sidecar-poc:<tag> --platform linux/amd64 -f containers/sidecar/Dockerfile .
+# Foundry variant: host contract + deployment-stable, non-secret Copilot provider config
+az acr build -r <acr> -t agent-runtime-sidecar-foundry:<tag> --platform linux/amd64 `
+  --build-arg BASE_IMAGE=<acr>.azurecr.io/agent-runtime-sidecar-poc:<tag> `
+  --build-arg COPILOT_MODEL=<model-name> `
+  --build-arg COPILOT_PROVIDER_TYPE=openai `
+  --build-arg COPILOT_PROVIDER_BASE_URL=https://<account>.services.ai.azure.com/openai/v1 `
   -f containers/sidecar-foundry/Dockerfile .
 ```
 
@@ -102,13 +109,18 @@ log-streaming encoding crash (the remote build still completes; check `az acr ta
 
 ```powershell
 pnpm build:sidecar-image   # -> agent-runtime-sidecar-poc:latest (base image)
-docker build -f containers/sidecar-foundry/Dockerfile -t <acr>.azurecr.io/agent-runtime-sidecar-foundry:v1 .
+docker build --pull=false -f containers/sidecar-foundry/Dockerfile `
+  --build-arg COPILOT_MODEL=<model-name> `
+  --build-arg COPILOT_PROVIDER_TYPE=openai `
+  --build-arg COPILOT_PROVIDER_BASE_URL=https://<account>.services.ai.azure.com/openai/v1 `
+  -t <acr>.azurecr.io/agent-runtime-sidecar-foundry:<tag> .
 az acr login --name <acr>
-docker push <acr>.azurecr.io/agent-runtime-sidecar-foundry:v1
+docker push <acr>.azurecr.io/agent-runtime-sidecar-foundry:<tag>
 ```
 
-The variant only adds `ENV SIDECAR_HOST_CLASS=foundry` on top of the base image, via the `BASE_IMAGE` build arg
-(which defaults to the local `agent-runtime-sidecar-poc:latest` tag).
+The three provider values are non-secret and immutable for this image/version; provider authentication remains
+Azure Identity/MSI at runtime. The Dockerfile fails the build if any value is missing. Use a new immutable tag for
+each deployment; do not deploy this agent from mutable `latest`.
 
 ### 2. Deploy the image as a Foundry hosted agent (bring-your-own image)
 
@@ -116,14 +128,27 @@ The variant only adds `ENV SIDECAR_HOST_CLASS=foundry` on top of the base image,
 azd ai agent init --no-prompt --force `
   --project-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>/projects/<project>" `
   --agent-name agent-runtime-sidecar `
-  --image <acr>.azurecr.io/agent-runtime-sidecar-foundry:v1 `
+  --image <acr>.azurecr.io/agent-runtime-sidecar-foundry:<tag> `
   --protocol invocations
-azd deploy --no-prompt
 ```
 
 `--image` takes the pre-built image (no template/Dockerfile/ACR scaffolding), and `--protocol invocations`
-declares the hosted-agent protocol our host adapter serves. Reusing `--agent-name` deploys a **new version** of
-the same agent.
+is the correct azd flag. With azd 1.27.0 + `microsoft.foundry` beta, `init` has been observed to generate
+`protocol: responses` despite that flag. Before deploying, inspect both generated manifests:
+
+```powershell
+Get-ChildItem -Recurse -Include azure.yaml,agent.yaml | Select-String "protocol:"
+```
+
+Every generated protocol entry for this agent must be `protocol: invocations`; change any generated `responses`
+entry to `invocations`, then deploy:
+
+```powershell
+azd deploy --no-prompt
+```
+
+Successful output must name the `/endpoint/protocols/invocations` endpoint. Reusing `--agent-name` deploys a new
+version of the same agent.
 
 **Managed-identity RBAC.** Foundry pulls the image with the **project** managed identity (the project resource's
 system-assigned identity, not the account's) — grant it **AcrPull** on the registry, or the deploy fails while
@@ -132,19 +157,15 @@ the platform-created **agent identity** (`azd ai agent show` lists its instance 
 Azure OpenAI it needs **Cognitive Services OpenAI User** on the account. Both are standard role assignments via
 `az role assignment create`; do not fall back to registry admin keys or tokens.
 
-### 3. Agent runtime configuration
+### 3. Point central at the deployed agent
 
-The image already selects the Foundry host (`SIDECAR_HOST_CLASS=foundry`) and listens on `PORT` (default 8088;
-set it to whatever the platform assigns). The in-container copilot process still needs its model-provider
-configuration — set the same non-secret provider env used elsewhere on the agent (`COPILOT_MODEL`,
-`COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_BASE_URL`; provider auth is Azure Identity/MSI), and provision any
-GitHub credential as a Foundry project connection rather than a plaintext env value.
-
-### 4. Point central at the deployed agent
+The image already contains the non-secret provider config supplied in step 1; provider authentication uses the
+agent managed identity at runtime. Provision any GitHub credential as a Foundry project connection, never as a
+plaintext image build arg or environment variable.
 
 Edit [../config/host-pool-controllers/foundry.json](../config/host-pool-controllers/foundry.json) so
 `projectEndpoint` and `agentName` match the agent you just deployed, and set `centralUrlForWorkers` to the URL
-the Foundry worker uses to reach central (public / tunnel URL — see step 5):
+the Foundry worker uses to reach central (public / tunnel URL — see step 4):
 
 ```json
 {
@@ -161,7 +182,7 @@ the Foundry worker uses to reach central (public / tunnel URL — see step 5):
 the right fit for a Foundry sandbox (no Docker volumes). It matches the `storage: host-managed` label on the
 `foundry-copilot` pool and the `copilot-foundry` AgentSpec selector.
 
-### 5. Run central
+### 4. Run central
 
 The Foundry pool is part of the default `config/` profile, so central picks it up with no extra `CONFIG_DIR`:
 
@@ -197,6 +218,6 @@ The public tunnel is a local-test convenience only, not a production topology.
 
 `tests/workerpool/foundry-workerpool.integration.test.ts` is skipped unless `RUN_FOUNDRY_WORKERPOOL_E2E=1` and
 `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_AGENT_NAME` are set (read from `tests/.env`), with `az login`. It drives the
-real data plane through the adapter's `scaleOut`/`scaleIn` over the full boot → pause → resume → release cycle:
-boot leaves the session `active`, `retain` scale-in stops it to `idle` (reusable, not deleted), a fresh instance
-re-invokes the same `workspaceRef` back to `active`, and `release` scale-in deletes it.
+real data plane through `ensureRunning`/`ensureStopped` over the full boot → pause → resume → release cycle:
+boot leaves the session `active`, retain stops it to `idle` (reusable, not deleted), a fresh Instance re-invokes
+the same `workspaceRef` back to `active`, and release deletes it.

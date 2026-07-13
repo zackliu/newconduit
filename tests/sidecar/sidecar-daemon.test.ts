@@ -25,7 +25,7 @@ class SidecarInMemoryTransport implements SidecarRuntimeTransport {
     this.publishedEvents.push(event);
     await this.transport.publish(channel, event, {
       principal: {
-        principalId: 'test-sidecar',
+        principalId: event.workerId ?? 'test-sidecar',
         type: 'service'
       }
     });
@@ -141,7 +141,7 @@ test('scenario: same session supports multi-turn Copilot exchange', async () => 
     const grant = await central.negotiateSidecarConnectionForTenant('poc', sidecarContext(), workerRegistration());
     const worker = grant.worker;
     assert.ok(worker);
-    await runtimeTransport.publish({ kind: 'tenant-inbox' }, workerHeartbeatEvent(worker.workerId), sidecarContext());
+    await runtimeTransport.publish({ kind: 'tenant-inbox' }, workerHeartbeatEvent(worker.workerId), sidecarContext(worker.workerId));
 
     const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
     const agentProcessAdapter = new DeterministicAgentProcessAdapter();
@@ -514,10 +514,10 @@ function userContext(principalId: string) {
   };
 }
 
-function sidecarContext() {
+function sidecarContext(principalId = 'slice5-sidecar') {
   return {
     principal: {
-      principalId: 'slice5-sidecar',
+      principalId,
       type: 'service' as const
     }
   };

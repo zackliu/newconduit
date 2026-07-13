@@ -16,7 +16,7 @@ function makePool(): WorkerPoolRecord {
     tenantId: 'tenant-x',
     template: { labels: { agent: 'copilot', storage: 'host-managed' }, capacity: 1 },
     hostPoolControllerClass: 'foundry',
-    scalePolicy: { scaleOutMaxPendingPerTick: 1, scaleInIdleMs: 5_000 },
+    scalePolicy: { scaleOutMaxPendingPerTick: 1, scaleInIdleMs: 5_000, workerReportTimeoutMs: 120_000 },
     centralUrlForWorkers: 'http://central.example:3000'
   };
 }
@@ -97,7 +97,7 @@ function makeFakeFetch(): FakeFetch {
   return { fetchImpl, calls, invocationOpened };
 }
 
-test('scenario: foundry scaleOut opens a held liveness invocation using a client-controlled agent_session_id', async () => {
+test('scenario: foundry ensureRunning opens a held liveness invocation using a client-controlled agent_session_id', async () => {
   const { fetchImpl, calls, invocationOpened } = makeFakeFetch();
   const adapter = new FoundryHostPoolAdapter({
     projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj/',
@@ -109,18 +109,18 @@ test('scenario: foundry scaleOut opens a held liveness invocation using a client
   const pool = makePool();
   const instance = makeInstance();
 
-  const result = await adapter.scaleOut({ pool, instance });
+  const result = await adapter.ensureRunning({ pool, instance });
   // an unpinned (shared) instance has no session workspaceRef, so it falls back to a per-instance client id
-  assert.equal(result.containerId, 'w-inst-1');
+  assert.equal(result.hostHandle, 'w-inst-1');
 
   await invocationOpened;
   const post = calls.find((call) => call.url.includes('/invocations'));
   assert.ok(post, 'expected a POST to /invocations');
-  // scaleOut normalizes any prior session state to a clean boot: it stops stale compute BEFORE invoking, so the
+  // A new Instance normalizes prior session state to a clean boot: it stops stale compute BEFORE invoking, so the
   // invocation always cold-boots a fresh container whose sidecar registers under this instance id.
   const stopBeforeInvoke = calls.findIndex((call) => call.method === 'POST' && call.url.includes('/stop'));
   const invokeIndex = calls.findIndex((call) => call.url.includes('/invocations'));
-  assert.ok(stopBeforeInvoke >= 0, 'scaleOut should stop any stale compute before invoking');
+  assert.ok(stopBeforeInvoke >= 0, 'a new Instance should stop any stale compute before invoking');
   assert.ok(stopBeforeInvoke < invokeIndex, 'the stop must precede the invocation so the boot is always fresh');
   assert.equal(post.method, 'POST');
   // the client session id is carried in the agent_session_id query parameter (a request header is ignored)
@@ -138,15 +138,15 @@ test('scenario: foundry scaleOut opens a held liveness invocation using a client
   assert.equal(payload.tenantId, 'tenant-x');
   assert.equal(payload.workerTypeId, 'copilot-local');
   assert.equal(payload.workerPoolId, 'foundry-copilot');
-  assert.equal(payload.workerPoolInstanceId, 'inst-1');
+  assert.equal(payload.hostPoolInstanceId, 'inst-1');
   assert.deepEqual(payload.labels, { agent: 'copilot', storage: 'host-managed' });
   assert.equal(payload.capacity, 1);
 
   // release the held connection so the test does not leak a pending stream
-  await adapter.scaleIn({ pool, instance: { ...instance, containerId: result.containerId } });
+  await adapter.ensureStopped({ pool, instance: { ...instance, hostHandle: result.hostHandle } });
 });
 
-test('scenario: foundry scaleIn aborts the liveness request and deletes the session', async () => {
+test('scenario: foundry ensureStopped aborts the liveness request and deletes the session', async () => {
   const { fetchImpl, calls, invocationOpened } = makeFakeFetch();
   const adapter = new FoundryHostPoolAdapter({
     projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
@@ -158,9 +158,9 @@ test('scenario: foundry scaleIn aborts the liveness request and deletes the sess
   const pool = makePool();
   const instance = makeInstance();
 
-  const result = await adapter.scaleOut({ pool, instance });
+  const result = await adapter.ensureRunning({ pool, instance });
   await invocationOpened;
-  await adapter.scaleIn({ pool, instance: { ...instance, containerId: result.containerId } });
+  await adapter.ensureStopped({ pool, instance: { ...instance, hostHandle: result.hostHandle } });
 
   const del = calls.find((call) => call.method === 'DELETE');
   assert.ok(del, 'expected a DELETE session call');
@@ -171,7 +171,7 @@ test('scenario: foundry scaleIn aborts the liveness request and deletes the sess
   assert.equal(del.headers.authorization, 'Bearer fake-token');
 });
 
-test('scenario: foundry scaleIn deletes by recorded container id when central has no in-memory handle', async () => {
+test('scenario: foundry ensureStopped deletes by recorded host handle when central has no in-memory liveness handle', async () => {
   const { fetchImpl, calls } = makeFakeFetch();
   const adapter = new FoundryHostPoolAdapter({
     projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
@@ -182,16 +182,85 @@ test('scenario: foundry scaleIn deletes by recorded container id when central ha
   });
   const pool = makePool();
 
-  // no prior scaleOut on this adapter instance (e.g. central restarted); scaleIn still deletes by the recorded
-  // client session id stored as containerId
-  await adapter.scaleIn({ pool, instance: makeInstance({ containerId: 'w-inst-9' }) });
+  // No prior ensureRunning on this adapter object (for example after central restart): the persisted host handle
+  // still identifies the Foundry session that must be deleted.
+  await adapter.ensureStopped({ pool, instance: makeInstance({ hostHandle: 'w-inst-9' }) });
 
   const del = calls.find((call) => call.method === 'DELETE');
   assert.ok(del);
   assert.ok(del.url.includes('/endpoint/sessions/w-inst-9?api-version=v1'));
 });
 
-test('scenario: foundry scaleOut keys the durable session on the pinned session workspaceRef so a resume reaches the same sandbox', async () => {
+test('scenario: foundry restart reopens a persisted host without stopping it and repeated ensureRunning is idempotent', async () => {
+  const { fetchImpl, calls, invocationOpened } = makeFakeFetch();
+  const adapter = new FoundryHostPoolAdapter({
+    projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
+    agentName: 'ars',
+    workerType: 'copilot-local',
+    credential: fakeCredential,
+    fetchImpl
+  });
+  const pool = makePool();
+  const instance = makeInstance({
+    boundSessionId: 'sess-1',
+    workspaceRef: 'ws-persisted',
+    hostHandle: 'ws-persisted'
+  });
+
+  const first = await adapter.ensureRunning({ pool, instance });
+  const second = await adapter.ensureRunning({ pool, instance });
+  await invocationOpened;
+
+  assert.equal(first.hostHandle, 'ws-persisted');
+  assert.equal(second.hostHandle, 'ws-persisted');
+  assert.equal(calls.filter((call) => call.url.includes('/invocations')).length, 1);
+  assert.equal(calls.filter((call) => call.url.includes('/stop')).length, 0);
+
+  await adapter.ensureStopped({ pool, instance, durableAction: 'retain' });
+});
+
+test('scenario: releasing controller ownership closes liveness without stopping or deleting the Foundry session', async () => {
+  const { fetchImpl, calls, invocationOpened } = makeFakeFetch();
+  const adapter = new FoundryHostPoolAdapter({
+    projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
+    agentName: 'ars',
+    workerType: 'copilot-local',
+    credential: fakeCredential,
+    fetchImpl
+  });
+  const instance = makeInstance({ workspaceRef: 'ws-live', hostHandle: 'ws-live' });
+
+  await adapter.ensureRunning({ pool: makePool(), instance });
+  await invocationOpened;
+  const callsBeforeRelease = calls.length;
+  await adapter.releaseControl();
+
+  const releaseCalls = calls.slice(callsBeforeRelease);
+  assert.equal(releaseCalls.some((call) => call.url.includes('/stop')), false);
+  assert.equal(releaseCalls.some((call) => call.method === 'DELETE'), false);
+});
+
+test('scenario: foundry rejects a persisted host handle that does not identify the instance workspace', async () => {
+  const { fetchImpl, calls } = makeFakeFetch();
+  const adapter = new FoundryHostPoolAdapter({
+    projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
+    agentName: 'ars',
+    workerType: 'copilot-local',
+    credential: fakeCredential,
+    fetchImpl
+  });
+
+  await assert.rejects(
+    adapter.ensureRunning({
+      pool: makePool(),
+      instance: makeInstance({ workspaceRef: 'ws-expected', hostHandle: 'ws-other' })
+    }),
+    /does not match durable session/
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('scenario: foundry ensureRunning keys the durable session on the pinned workspaceRef so resume reaches the same sandbox', async () => {
   const { fetchImpl, calls, invocationOpened } = makeFakeFetch();
   const adapter = new FoundryHostPoolAdapter({
     projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
@@ -205,18 +274,18 @@ test('scenario: foundry scaleOut keys the durable session on the pinned session 
   // workspaceRef (not the ephemeral instanceId), so a fresh instance on resume re-invokes the same sandbox.
   const instance = makeInstance({ boundSessionId: 'sess-1', workspaceRef: 'ws-abc-123' });
 
-  const result = await adapter.scaleOut({ pool, instance });
-  assert.equal(result.containerId, 'ws-abc-123');
+  const result = await adapter.ensureRunning({ pool, instance });
+  assert.equal(result.hostHandle, 'ws-abc-123');
 
   await invocationOpened;
   const post = calls.find((call) => call.url.includes('/invocations'));
   assert.ok(post);
   assert.ok(post.url.endsWith('agent_session_id=ws-abc-123'), post.url);
 
-  await adapter.scaleIn({ pool, instance: { ...instance, containerId: result.containerId }, durableAction: 'release' });
+  await adapter.ensureStopped({ pool, instance: { ...instance, hostHandle: result.hostHandle }, durableAction: 'release' });
 });
 
-test('scenario: foundry scaleIn stops (not deletes) the durable session on pause and deletes it only on release', async () => {
+test('scenario: foundry ensureStopped retains the durable session on pause and deletes it only on release', async () => {
   const { fetchImpl, calls, invocationOpened } = makeFakeFetch();
   const adapter = new FoundryHostPoolAdapter({
     projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
@@ -228,14 +297,14 @@ test('scenario: foundry scaleIn stops (not deletes) the durable session on pause
   const pool = makePool();
   const instance = makeInstance({ boundSessionId: 'sess-1', workspaceRef: 'ws-abc-123' });
 
-  const result = await adapter.scaleOut({ pool, instance });
+  const result = await adapter.ensureRunning({ pool, instance });
   await invocationOpened;
   const callsBeforePause = calls.length;
 
   // pause: stop compute (abort the held request + stop the container) but keep the session record + $HOME, so a
   // resume re-invokes the same sandbox. Stopping - not merely aborting - is what leaves the session cleanly
   // inactive; a still-warm container would keep its boot-once sidecar and the resume would never correlate.
-  await adapter.scaleIn({ pool, instance: { ...instance, containerId: result.containerId }, durableAction: 'retain' });
+  await adapter.ensureStopped({ pool, instance: { ...instance, hostHandle: result.hostHandle }, durableAction: 'retain' });
   const pauseCalls = calls.slice(callsBeforePause);
   const stopCall = pauseCalls.find((call) => call.method === 'POST' && call.url.includes('/stop'));
   assert.ok(stopCall, 'retain must stop the Foundry compute so a resume cold-boots a fresh container');
@@ -243,8 +312,47 @@ test('scenario: foundry scaleIn stops (not deletes) the durable session on pause
   assert.equal(pauseCalls.find((call) => call.method === 'DELETE'), undefined, 'retain must not delete the Foundry session');
 
   // session ended: release deletes the durable session by its workspaceRef
-  await adapter.scaleIn({ pool, instance: { ...instance, containerId: result.containerId }, durableAction: 'release' });
+  await adapter.ensureStopped({ pool, instance: { ...instance, hostHandle: result.hostHandle }, durableAction: 'release' });
   const del = calls.find((call) => call.method === 'DELETE');
   assert.ok(del, 'release must delete the Foundry session');
   assert.ok(del.url.includes('/endpoint/sessions/ws-abc-123?api-version=v1'), del.url);
+});
+
+test('scenario: foundry stop treats an already-stopped session as idempotent success', async () => {
+  const adapter = new FoundryHostPoolAdapter({
+    projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
+    agentName: 'ars',
+    workerType: 'copilot-local',
+    credential: fakeCredential,
+    fetchImpl: (async () => new Response(JSON.stringify({
+      error: { code: 'session_already_stopped', message: 'Session is already stopped.' }
+    }), { status: 409, headers: { 'content-type': 'application/json' } })) as typeof fetch
+  });
+
+  await adapter.ensureStopped({
+    pool: makePool(),
+    instance: makeInstance({ workspaceRef: 'ws-idle', hostHandle: 'ws-idle' }),
+    durableAction: 'retain'
+  });
+});
+
+test('scenario: foundry stop rejects an unrelated conflict instead of hiding it', async () => {
+  const adapter = new FoundryHostPoolAdapter({
+    projectEndpoint: 'https://acct.services.ai.azure.com/api/projects/proj',
+    agentName: 'ars',
+    workerType: 'copilot-local',
+    credential: fakeCredential,
+    fetchImpl: (async () => new Response(JSON.stringify({
+      error: { code: 'session_operation_conflict', message: 'Another operation is in progress.' }
+    }), { status: 409, headers: { 'content-type': 'application/json' } })) as typeof fetch
+  });
+
+  await assert.rejects(
+    adapter.ensureStopped({
+      pool: makePool(),
+      instance: makeInstance({ workspaceRef: 'ws-conflict', hostHandle: 'ws-conflict' }),
+      durableAction: 'retain'
+    }),
+    /stop failed with HTTP 409/
+  );
 });

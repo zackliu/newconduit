@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
-import type { HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult } from '../../src/central/managers';
+import type { HostPoolAdapter, HostPoolEnsureRunningInput, HostPoolEnsureRunningResult, HostPoolEnsureStoppedInput } from '../../src/central/managers';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { DockerWorkspaceAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
@@ -27,7 +27,7 @@ test('scenario: a recycled session restores its workspace and memory before the 
     tenantId,
     template: { labels: COPILOT_WORKER_LABELS, capacity: 1 },
     hostPoolControllerClass: 'inproc',
-    scalePolicy: { scaleOutMaxPendingPerTick: 1, scaleInIdleMs: 0 },
+    scalePolicy: { scaleOutMaxPendingPerTick: 1, scaleInIdleMs: 0, workerReportTimeoutMs: 60_000 },
     centralUrlForWorkers: 'inproc://central'
   };
   const adapter = new InProcessHostPoolAdapter({
@@ -230,16 +230,20 @@ class InProcessHostPoolAdapter implements HostPoolAdapter {
 
   constructor(private readonly options: InProcessHostPoolAdapterOptions) {}
 
-  async scaleOut(input: HostPoolScaleOutInput): Promise<HostPoolScaleOutResult> {
+  async ensureRunning(input: HostPoolEnsureRunningInput): Promise<HostPoolEnsureRunningResult> {
     const instanceId = input.instance.instanceId;
+    if (this.daemons.has(instanceId)) {
+      return { hostHandle: instanceId };
+    }
     const grant = await this.options.negotiate({
       principalId: `sidecar-${instanceId}`,
       payload: {
+        hostPoolInstanceId: instanceId,
         labels: input.pool.template.labels,
         storageClass: COPILOT_STORAGE_CLASS,
         capacity: input.pool.template.capacity,
         allocatable: input.pool.template.capacity,
-        description: { workerPoolInstanceId: instanceId }
+        description: { workerPoolId: input.pool.poolId }
       }
     });
     const worker = grant.worker;
@@ -253,11 +257,11 @@ class InProcessHostPoolAdapter implements HostPoolAdapter {
     });
     await daemon.subscribeWorkerCommands(worker.workerId);
     this.daemons.set(instanceId, { daemon, workerId: worker.workerId });
-    await this.publishHeartbeat(worker.workerId, instanceId);
-    return { containerId: instanceId };
+    await this.publishHeartbeat(worker.workerId);
+    return { hostHandle: instanceId };
   }
 
-  async scaleIn(input: HostPoolScaleInInput): Promise<void> {
+  async ensureStopped(input: HostPoolEnsureStoppedInput): Promise<void> {
     const entry = this.daemons.get(input.instance.instanceId);
     if (!entry) {
       return;
@@ -266,9 +270,13 @@ class InProcessHostPoolAdapter implements HostPoolAdapter {
     await entry.daemon.stop();
   }
 
+  async releaseControl(): Promise<void> {
+    return;
+  }
+
   async heartbeatLiveWorkers(): Promise<void> {
-    for (const [instanceId, entry] of this.daemons) {
-      await this.publishHeartbeat(entry.workerId, instanceId);
+    for (const entry of this.daemons.values()) {
+      await this.publishHeartbeat(entry.workerId);
     }
   }
 
@@ -291,7 +299,7 @@ class InProcessHostPoolAdapter implements HostPoolAdapter {
     await Promise.all(daemons.map((entry) => entry.daemon.stop()));
   }
 
-  private async publishHeartbeat(workerId: string, instanceId: string): Promise<void> {
+  private async publishHeartbeat(workerId: string): Promise<void> {
     const worker = await this.options.storage.readWorker(workerId);
     if (!worker || (worker.lifecycleState !== 'active' && worker.lifecycleState !== 'registered')) {
       return;
@@ -305,7 +313,7 @@ class InProcessHostPoolAdapter implements HostPoolAdapter {
       timestamp: new Date().toISOString(),
       actor: 'sidecar',
       payload: { workerId, capacity: worker.capacity, allocatable, conditions: allocatable > 0 ? ['ready'] : ['busy'] }
-    }, serviceContext(`sidecar-${instanceId}`));
+    }, serviceContext(workerId));
   }
 }
 
@@ -317,7 +325,7 @@ class SidecarInMemoryTransport implements SidecarRuntimeTransport {
   }
 
   async publish(channel: RuntimeChannel, event: RuntimeEvent): Promise<void> {
-    await this.transport.publish(channel, event, serviceContext(this.principalId));
+    await this.transport.publish(channel, event, serviceContext(event.workerId ?? this.principalId));
   }
 
   async subscribe(channel: RuntimeChannel, handler: RuntimeEventHandler): Promise<RuntimeSubscription> {

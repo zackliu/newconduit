@@ -1,5 +1,5 @@
 import { DefaultAzureCredential, type AccessToken, type TokenCredential } from '@azure/identity';
-import type { HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult } from '../managers';
+import type { HostPoolAdapter, HostPoolEnsureRunningInput, HostPoolEnsureRunningResult, HostPoolEnsureStoppedInput } from '../managers';
 
 const TOKEN_SCOPE = 'https://ai.azure.com/.default';
 const API_VERSION = 'v1';
@@ -38,12 +38,12 @@ interface LivenessHandle {
  *
  * Worker lifecycle (is the sidecar running) and the durable Foundry session (the sandbox) are separate concerns.
  * Aborting the held request only closes central's connection; the Foundry container stays warm (idle-reaped ~15 min
- * later) with the now-orphaned sidecar still registered under the old worker. So both `scaleOut` and `scaleIn`
+ * later) with the now-orphaned sidecar still registered under the old worker. So both `ensureRunning` and `ensureStopped`
  * drive the session's compute deterministically via the platform stop/delete APIs rather than relying on Foundry's
  * idle reap: reap stops the compute so the next boot is clean, and boot normalizes any prior state to a fresh
  * container whose sidecar registers under the current instance id.
  *
- * `scaleOut`/`scaleIn` are the generic HostPoolAdapter contract; all Foundry specifics stay inside here, so
+ * `ensureRunning`/`ensureStopped` are the generic HostPoolAdapter contract; all Foundry specifics stay inside here, so
  * central never branches on the adapter kind. The command channel is Web PubSub inside the daemon; this HTTP
  * surface only carries boot + keepalive (see the confirmed data-plane API in the spec appendix).
  */
@@ -66,29 +66,34 @@ export class FoundryHostPoolAdapter implements HostPoolAdapter {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async scaleOut(input: HostPoolScaleOutInput): Promise<HostPoolScaleOutResult> {
+  async ensureRunning(input: HostPoolEnsureRunningInput): Promise<HostPoolEnsureRunningResult> {
     const sessionId = this.sessionIdFor(input.instance);
-    // Normalize the durable session to a clean boot state before invoking. The session may be not-exist (first
-    // scale-out), inactive (stopped by a prior reap — the normal resume case), or still-active with a stale
-    // container from an earlier generation (e.g. central restarted and lost its liveness handle). Stopping first
-    // collapses all three to "no live compute", so the invocation always cold-boots a fresh container whose sidecar
-    // reads THIS instance's boot payload and registers under the new instance id (a warm container would keep its
-    // boot-once sidecar registered under the previous instance id and the new instance would never correlate).
-    // Best-effort: a stop on a not-exist/already-stopped session is a harmless no-op.
-    await this.stopSession(sessionId);
+    if (input.instance.hostHandle && input.instance.hostHandle !== sessionId) {
+      throw new Error(`foundry host handle ${input.instance.hostHandle} does not match durable session ${sessionId}`);
+    }
+    const existing = this.liveness.get(input.instance.instanceId);
+    if (existing && !existing.closed) {
+      return { hostHandle: existing.sessionId };
+    }
+    // A new instance must cold-boot so its boot-once sidecar registers with this instance id. A persisted instance
+    // already has a host handle: after central restarts, reopening the invocation adopts a still-warm container or
+    // cold-boots its idle session without destroying the existing Worker lifetime first.
+    if (!input.instance.hostHandle) {
+      await this.stopSession(sessionId);
+    }
     const handle: LivenessHandle = { sessionId, abort: new AbortController(), closed: false };
     this.liveness.set(input.instance.instanceId, handle);
     const bootPayload = this.buildBootPayload(input);
-    // Fire-and-forget: the held liveness request is what boots and keeps the sandbox alive; scaleOut returns the
+    // Fire-and-forget: the held liveness request is what boots and keeps the sandbox alive; ensureRunning returns the
     // client-chosen session id immediately so the WorkerPool reconcile keeps the instance pending until the
     // sidecar reverse-registers.
     handle.loop = this.runLivenessLoop(handle, bootPayload);
-    return { containerId: sessionId };
+    return { hostHandle: sessionId };
   }
 
-  async scaleIn(input: HostPoolScaleInInput): Promise<void> {
+  async ensureStopped(input: HostPoolEnsureStoppedInput): Promise<void> {
     const handle = this.liveness.get(input.instance.instanceId);
-    const sessionId = handle?.sessionId ?? input.instance.containerId ?? this.sessionIdFor(input.instance);
+    const sessionId = handle?.sessionId ?? input.instance.hostHandle ?? this.sessionIdFor(input.instance);
     if (handle) {
       handle.closed = true;
       handle.abort.abort();
@@ -105,6 +110,16 @@ export class FoundryHostPoolAdapter implements HostPoolAdapter {
       return;
     }
     await this.deleteSession(sessionId);
+  }
+
+  async releaseControl(): Promise<void> {
+    const handles = [...this.liveness.values()];
+    this.liveness.clear();
+    for (const handle of handles) {
+      handle.closed = true;
+      handle.abort.abort();
+    }
+    await Promise.all(handles.map((handle) => handle.loop));
   }
 
   private async runLivenessLoop(handle: LivenessHandle, bootPayload: Record<string, unknown>): Promise<void> {
@@ -160,42 +175,53 @@ export class FoundryHostPoolAdapter implements HostPoolAdapter {
     }
   }
 
-  /**
-   * Stops the session's compute while keeping the session record and its `$HOME` sandbox, so the session becomes
-   * cleanly inactive and a later invocation cold-boots a fresh container. Best-effort: a stop on a
-   * not-exist/already-stopped session is a harmless no-op, so a failure is logged but never blocks scale-out/in.
-   */
+  /** Stops compute while keeping the durable session and `$HOME`; absent or already-stopped is success. */
   private async stopSession(sessionId: string): Promise<void> {
     const url = `${this.base()}/endpoint/sessions/${encodeURIComponent(sessionId)}/stop?api-version=${API_VERSION}`;
-    try {
-      await this.fetchImpl(url, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${await this.token()}`,
-          'foundry-features': FOUNDRY_FEATURES
-        }
-      });
-    } catch (error) {
-      console.error(`foundry session ${sessionId} stop failed`, error);
+    const response = await this.fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${await this.token()}`,
+        'foundry-features': FOUNDRY_FEATURES
+      }
+    });
+    if (response.ok || response.status === 404) {
+      return;
     }
+    if (response.status === 409 && await this.hasErrorCode(response, 'session_already_stopped')) {
+      return;
+    }
+    throw new Error(`foundry session ${sessionId} stop failed with HTTP ${response.status}`);
   }
 
   private async deleteSession(sessionId: string): Promise<void> {
     const url = `${this.base()}/endpoint/sessions/${encodeURIComponent(sessionId)}?api-version=${API_VERSION}`;
-    try {
-      await this.fetchImpl(url, {
-        method: 'DELETE',
-        headers: {
-          authorization: `Bearer ${await this.token()}`,
-          'foundry-features': FOUNDRY_FEATURES
-        }
-      });
-    } catch (error) {
-      console.error(`foundry session ${sessionId} delete failed`, error);
+    const response = await this.fetchImpl(url, {
+      method: 'DELETE',
+      headers: {
+        authorization: `Bearer ${await this.token()}`,
+        'foundry-features': FOUNDRY_FEATURES
+      }
+    });
+    if (!response.ok && response.status !== 404) {
+      throw new Error(`foundry session ${sessionId} delete failed with HTTP ${response.status}`);
     }
   }
 
-  private buildBootPayload(input: HostPoolScaleOutInput): Record<string, unknown> {
+  private async hasErrorCode(response: Response, expectedCode: string): Promise<boolean> {
+    try {
+      const payload: unknown = await response.json();
+      if (typeof payload !== 'object' || payload === null || !('error' in payload)) {
+        return false;
+      }
+      const error = payload.error;
+      return typeof error === 'object' && error !== null && 'code' in error && error.code === expectedCode;
+    } catch {
+      return false;
+    }
+  }
+
+  private buildBootPayload(input: HostPoolEnsureRunningInput): Record<string, unknown> {
     return {
       op: 'boot',
       centralUrl: input.pool.centralUrlForWorkers,
@@ -204,7 +230,7 @@ export class FoundryHostPoolAdapter implements HostPoolAdapter {
       labels: input.pool.template.labels,
       capacity: input.pool.template.capacity,
       workerPoolId: input.pool.poolId,
-      workerPoolInstanceId: input.instance.instanceId
+      hostPoolInstanceId: input.instance.instanceId
     };
   }
 

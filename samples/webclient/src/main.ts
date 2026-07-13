@@ -56,6 +56,7 @@ interface WorkerPoolSummary {
   scalePolicy: {
     scaleOutMaxPendingPerTick: number;
     scaleInIdleMs: number;
+    workerReportTimeoutMs: number;
   };
 }
 
@@ -63,14 +64,16 @@ interface HostPoolInstanceSummary {
   instanceId: string;
   poolId: string;
   state: string;
-  containerId?: string;
-  workerId?: string;
+  hostHandle?: string;
+  currentWorkerId?: string;
+  reportDeadline?: string;
   idleSince?: string;
   updatedAt: string;
 }
 
 interface WorkerSummary {
   workerId: string;
+  hostPoolInstanceId?: string;
   labels: Record<string, string>;
   storageClass: string;
   description?: Record<string, string>;
@@ -940,10 +943,10 @@ function renderWorkerPools(): string {
 
 function renderHostPoolInstance(instance: HostPoolInstanceSummary): string {
   return `
-    <div class="capRow" title="${escapeHtml(instance.containerId ?? instance.instanceId)}">
+    <div class="capRow" title="${escapeHtml(instance.hostHandle ?? instance.instanceId)}">
       <span class="capState"><i class="dot ${escapeHtml(instance.state)}"></i><span>${escapeHtml(instance.state)}</span></span>
       <span class="capId">${escapeHtml(shortId(instance.instanceId))}</span>
-      <span class="capNote">${instance.workerId ? `&rarr; worker ${escapeHtml(shortId(instance.workerId))}` : 'worker pending'}</span>
+      <span class="capNote">${instance.currentWorkerId ? `&rarr; worker ${escapeHtml(shortId(instance.currentWorkerId))}` : 'worker pending'}</span>
     </div>
   `;
 }

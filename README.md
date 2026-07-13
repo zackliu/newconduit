@@ -92,7 +92,7 @@ On startup you should see `central service listening on http://localhost:3000`.
 
 Optional provider knobs: `COPILOT_PROVIDER_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`), `COPILOT_PROVIDER_WIRE_API` (`completions` or `responses`), and `COPILOT_PROVIDER_AZURE_API_VERSION`.
 
-The demo AgentSpecs, WorkerPools, and host-pool controllers are declarative JSON documents under `config/` (not hardcoded in `src/`). Central reads `config/agent-specs/`, `config/worker-pools/`, and `config/host-pool-controllers/` at startup. Worker types are image-declared code build profiles ([src/sidecar/worker-types.ts](src/sidecar/worker-types.ts)), not config — they only name the adapter combination the image ships. Matching is pure labels: an AgentSpec's `workerSelector.matchLabels` (including a `storage` capability label) is matched against worker labels; a worker reports its concrete `storageClass` driver at registration, and snapshots are opaque handle envelopes. Each pool sets its own `scalePolicy.scaleInIdleMs`.
+The demo AgentSpecs, WorkerPools, and host-pool controllers are declarative JSON documents under `config/` (not hardcoded in `src/`). Central reads `config/agent-specs/`, `config/worker-pools/`, and `config/host-pool-controllers/` at startup. Worker types are image-declared code build profiles ([src/sidecar/worker-types.ts](src/sidecar/worker-types.ts)), not config — they only name the adapter combination the image ships. Matching is pure labels: an AgentSpec's `workerSelector.matchLabels` (including a `storage` capability label) is matched against worker labels; a worker reports its concrete `storageClass` driver at registration, and snapshots are opaque handle envelopes. Each pool sets `scalePolicy.scaleInIdleMs` and `scalePolicy.workerReportTimeoutMs`.
 
 ## Run a Local Worker (no Docker)
 
@@ -130,16 +130,19 @@ Then, in the browser:
 
 ## Run on Azure AI Foundry Hosted Agents (alternate WorkerPool backend)
 
-The WorkerPool backend is chosen by config, not code: an **Azure AI Foundry hosted agent** is a peer host-pool adapter of Docker. In this mode each Worker runs **the same sidecar image** on a Foundry hosted agent instead of a local Docker container, and session commands still flow over Web PubSub exactly as in the Docker path. Foundry owns the container lifecycle (request-driven, ~15 min idle scale-to-zero); central keeps a worker warm by holding one long liveness `/invocations` request open per worker. Because a Foundry sandbox is host-managed durable storage, the Foundry session **is** our session's durable workspace: it is keyed on the session's stable `workspaceRef`, so pausing releases compute but keeps the sandbox, a resume re-invokes the same sandbox with the workspace intact, and the Foundry session is deleted only when our session ends. The full walkthrough and the confirmed Foundry data-plane contract are in [foundry/README.md](foundry/README.md).
+The WorkerPool backend is chosen by config, not code: an **Azure AI Foundry hosted agent** is a peer host-pool adapter of Docker. In this mode each Worker runs the same sidecar image on Foundry, while commands still flow over Web PubSub. Foundry owns the request-driven container lifecycle; central holds a long `/invocations` request as host control. The stable `workspaceRef` identifies the durable Foundry sandbox. A HostPoolInstance is one durable host-control attempt, while its current Worker is one heartbeat-proven sidecar process lifetime. After central restart, a new controller epoch reopens the persisted host handle and waits for a fresh Worker report; stale `ready` is never trusted as current fact. The full walkthrough is in [foundry/README.md](foundry/README.md).
 
 ### 1. Build and push the Foundry sidecar image
 
-The Foundry image variant ([containers/sidecar-foundry/Dockerfile](containers/sidecar-foundry/Dockerfile)) only adds `ENV SIDECAR_HOST_CLASS=foundry` on top of the base sidecar image, which switches the outer host wrapper to serve the Foundry hosted-agent HTTP contract (`GET /readiness`, `POST /invocations`) and boot the same daemon. Build both to a registry Foundry can pull from (ACR remote build works even when a corporate proxy blocks `registry.npmjs.org` from a local `docker build`):
+The Foundry image variant ([containers/sidecar-foundry/Dockerfile](containers/sidecar-foundry/Dockerfile)) selects the Foundry host wrapper, runs with the user required for the persistent `$HOME` mount, and requires deployment-stable non-secret Copilot provider build args. Build it with an immutable tag in a registry Foundry can pull from:
 
 ```powershell
-az acr build -r <acr> -t agent-runtime-sidecar-poc:latest --platform linux/amd64 -f containers/sidecar/Dockerfile .
-az acr build -r <acr> -t agent-runtime-sidecar-foundry:latest --platform linux/amd64 `
-  --build-arg BASE_IMAGE=<acr>.azurecr.io/agent-runtime-sidecar-poc:latest `
+az acr build -r <acr> -t agent-runtime-sidecar-poc:<tag> --platform linux/amd64 -f containers/sidecar/Dockerfile .
+az acr build -r <acr> -t agent-runtime-sidecar-foundry:<tag> --platform linux/amd64 `
+  --build-arg BASE_IMAGE=<acr>.azurecr.io/agent-runtime-sidecar-poc:<tag> `
+  --build-arg COPILOT_MODEL=<model-name> `
+  --build-arg COPILOT_PROVIDER_TYPE=openai `
+  --build-arg COPILOT_PROVIDER_BASE_URL=https://<account>.services.ai.azure.com/openai/v1 `
   -f containers/sidecar-foundry/Dockerfile .
 ```
 
@@ -151,12 +154,11 @@ Requires Azure Developer CLI 1.27+ with the `microsoft.foundry` extension and `a
 azd ai agent init --no-prompt --force `
   --project-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>/projects/<project>" `
   --agent-name agent-runtime-sidecar `
-  --image <acr>.azurecr.io/agent-runtime-sidecar-foundry:latest `
+  --image <acr>.azurecr.io/agent-runtime-sidecar-foundry:<tag> `
   --protocol invocations
-azd deploy --no-prompt
 ```
 
-Set the in-container copilot provider config as agent environment variables (`COPILOT_MODEL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_BASE_URL`); provider auth is the agent's managed identity via `DefaultAzureCredential`, so no token is baked into the image.
+Before deploy, verify generated `azure.yaml` and `agent.yaml` both say `protocol: invocations`; current azd beta can write `responses` despite the flag. Correct those generated entries, then run `azd deploy --no-prompt`. Provider values are non-secret build args; provider authentication remains the agent managed identity. Use immutable tags, not `latest`.
 
 ### 3. Point central at the deployed agent and run it
 

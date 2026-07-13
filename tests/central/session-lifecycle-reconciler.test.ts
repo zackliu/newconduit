@@ -33,6 +33,7 @@ test('scenario: queued session is assigned when matching worker becomes ready', 
     clock.set('2026-06-25T00:00:10.000Z');
 
     await publishReadyHeartbeat(transport, worker.workerId);
+    await central.reconcileSessionsForTenant('poc');
 
     const session = await storage.readSession(created.sessionId!);
     assert.equal(session?.status, 'starting');
@@ -54,6 +55,7 @@ test('scenario: idle queued session pauses and is not auto-assigned', async () =
     clock.set('2026-06-25T00:02:01.000Z');
 
     await publishReadyHeartbeat(transport, worker.workerId);
+    await central.reconcileSessionsForTenant('poc');
 
     const session = await storage.readSession(created.sessionId!);
     assert.equal(session?.status, 'paused');
@@ -76,6 +78,7 @@ test('scenario: idle running session pauses and releases worker lease', async ()
       workerCommands.push(envelope.event);
     });
     clock.set('2026-06-25T00:02:01.000Z');
+    await writeActiveWorker(storage, worker.workerId, clock.now(), { allocatable: 0, currentSessionCount: 1, conditions: ['busy'] });
 
     await central.reconcileSessionsForTenant('poc');
 
@@ -145,6 +148,7 @@ test('scenario: client pause releases worker and assigns next queued session', a
       actor: 'sidecar',
       payload: { reason: 'client_requested' }
     });
+    await central.reconcileSessionsForTenant('poc');
 
     const paused = await storage.readSession(running.sessionId);
     const assigned = await storage.readSession(queued.sessionId);
@@ -229,7 +233,11 @@ async function withRuntime(testBody: (input: { root: string; storage: LocalFileS
     const storage = new LocalFileStorage(root);
     const central = new CentralService({ storage, eventTransport: transport, connectionIssuer: transport, clock });
     await central.start();
-    await testBody({ root, storage, transport, central, clock });
+    try {
+      await testBody({ root, storage, transport, central, clock });
+    } finally {
+      await central.stop();
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

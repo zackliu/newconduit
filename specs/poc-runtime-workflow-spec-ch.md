@@ -113,9 +113,13 @@ POC 使用单 central 进程串行写，暂不处理多 central 并发。
 
 ## 6. Worker 和 Sidecar
 
-POC 的 Worker 就是 sidecar 运行实体通过 `/sidecar/negotiate` 注册进 central 后形成的 runtime capacity。`workerId` 是这个运行实体在 runtime 内的唯一 identity。hostname、pod name、container id、machine name 只作为 labels 或 diagnostic metadata，不参与 runtime identity。Standalone sidecar 可以直接注册，Docker WorkerPool provision 出的 sidecar 也必须通过同一个 `/sidecar/negotiate` registration contract 注册。
+POC 的 Worker 是 sidecar process 通过 `/sidecar/negotiate` 注册后形成的**一次 process lifetime**。`workerId` 唯一标识这一代 sidecar；同一 host 重启进程会注册成新的 Worker。hostname、pod name、container name、machine name 只属于 diagnostic metadata，不参与 Worker identity。Standalone sidecar 可以直接注册，WorkerPool provision 出的 sidecar 也必须通过同一个 registration contract 注册。
 
-Sidecar negotiate 只创建 registered worker fact。Worker 必须随后发送首个 `worker.heartbeat`，central 收到首个 heartbeat 后才把它放入 active ready selection path。注册后如果没有持续 heartbeat，central 的周期性 Worker lifecycle reconciler 根据 `expiresAt` 执行 evacuation，并把该 Worker 从 active registry 移除。Central restart 后不会从本地 worker 文件自动恢复 active Worker；仍然活着的 sidecar/worker 必须重新调用 `/sidecar/negotiate` 形成新的 Worker lifetime，并重新 heartbeat。
+`HostPoolInstance` 与 Worker 不是同一个对象。Instance 是 tenant-owned、可跨 central restart 持久化的 **host capacity/control attempt**，保存 adapter 返回的 opaque `hostHandle`、当前确认的 `currentWorkerId` 和 report expectation；Worker 是该 Instance 内可替换、靠 heartbeat lease 证明存活的一次 sidecar process lifetime。一个 Instance 同一时刻最多确认一个当前 Worker，但在 host recycle 后可以先后产生多个 Worker lifetime。Session 只 lease Worker，不 lease Instance；Instance 只负责把 host 收敛到 desired state。
+
+Sidecar negotiate 只创建 registered Worker fact。Worker 必须随后发送首个 `worker.heartbeat`，central 收到首个 heartbeat 后才把它放入 active selection path。注册后如果没有持续 heartbeat，统一 lifecycle reconciler 根据 `expiresAt` 使 Worker terminal，并让实际持有该 Worker lease 的 Session 进入 `failed(worker_lost)`。
+
+Central restart 不恢复上一次内存里的结论，而是恢复每个非终态 Instance 的 report expectation。新 central 生成新的 `controllerEpoch`，把旧 `ready` Instance 重新置为 `pending`，持久化 `reportExpectedAfter`/`reportDeadline`，调用 adapter 的幂等 `ensureRunning` 重新取得 host control，并等待该窗口内的 Worker heartbeat。同一 `workerId` 若代表仍存活的同一 sidecar process，可以用 fresh heartbeat 重新证明自己；host 内若已启动新进程，则它必须 register 成新的 Worker lifetime 后再 heartbeat。窗口内恰好一个匹配 Worker report 才确认 Instance `ready`；无 report 或多个 fresh Worker report 都进入同一 fail-closed 流程：fence Worker、处理 session lease loss、`ensureStopped` 回收 host、Instance 终结。运行期间 report 丢失与 restart 后 report 未恢复走同一个 reconciler。
 
 Active worker registry 和 historical worker record 是两个视图。Closed、expired、evacuated、drained 的 Worker 必须从 active registry 消失，selection 永远不能返回它们；storage 可以保留 terminal record 和 worker events 作为 debug/audit history。Terminal Worker 不能被迟到 heartbeat 复活。Worker 再次出现时必须重新 register 成新的 Worker lifetime。
 
@@ -124,15 +128,16 @@ Worker 最小 registration payload：
 | 字段 | POC 含义 |
 | --- | --- |
 | `workerId` | Worker runtime identity。POC 可以由 central 在 register 时分配；一旦 Worker terminal，后续重连必须获得新的 `workerId`。 |
-| `sidecarClass` | POC 预定义 `process-wrapper`。 |
+| `hostPoolInstanceId` | 可选；WorkerPool provisioned Worker 必须显式声明所属 Instance。Standalone Worker 不填。它是 correlation contract，不放在 diagnostic description 中。 |
 | `labels` | 任意 key/value，用于 `workerSelector`。 |
-| `capacity` / `allocatable` | 固定为 1。 |
+| `storageClass` | Worker 实际使用的 storage driver class。 |
+| `capacity` / `allocatable` | Worker 总容量与当前可分配容量。 |
 | `conditions` | ready、busy、draining、disconnected。 |
 | `heartbeatAt` | sidecar 定期上报。 |
 | `expiresAt` | central 根据 keepalive TTL 计算。 |
-| `description` | 可选 diagnostic metadata，例如 hostname、pod name、container id。 |
+| `description` | 可选 diagnostic metadata，不承担 Instance correlation。 |
 
-Worker selection 只使用 active registry 中 ready、未过期、allocatable 大于 0、`sidecarClass` 匹配、labels 匹配的 Worker。POC 不增加新的 selector 字段，不增加复杂匹配模型。
+Worker selection 只使用 active registry 中 ready、未过期、allocatable 大于 0、labels 匹配且符合 pool reuse/binding policy 的 Worker。
 
 Worker lifecycle 和 Session lifecycle 是两条独立状态机。Worker 只表示可替换 compute；Session 是 durable workload identity。二者之间的桥是 session lease。Central 给 session 分配 Worker 时写入当前 `workerId` 和 `sessionLeaseId`。Sidecar 对该 session 写 output/status/snapshot/turn terminal event 时必须带当前 `sessionLeaseId`；central 只接受当前 lease，拒绝旧 lease 或未知 lease 的写入。
 
@@ -141,7 +146,7 @@ Drain 和 evacuate 是两个不同流程：
 | 流程 | 触发 | Central 行为 | Worker 交互 |
 | --- | --- | --- | --- |
 | Drain | Worker 仍可通信，operator 或 sidecar 主动请求退出。 | Worker 进入 `draining`，不再接新 session；central 尝试把该 Worker 上的 session lease 迁移到其他 active 且 label 匹配的 Worker。POC 若不能恢复该 session，则按 session policy 默认 failed。所有 session 离开后 central 发送 `worker.close.requested`。 | Worker 收到 close 后 graceful 停止 agent/sidecar 进程并停止 heartbeat。 |
-| Evacuate | Worker heartbeat timeout、central restart 后旧 Worker 未重新注册、或 worker connection loss。 | Central 不能假设还能与该 Worker 通信；它使相关 session lease lost，并按 session policy 默认 failed。Worker 从 active registry 移除。 | 不要求 dead worker ack；迟到 heartbeat rejected。 |
+| Evacuate | Worker heartbeat timeout、Instance report expectation timeout、split-brain Worker reports 或 worker connection loss。 | Central 不能假设还能与该 Worker 通信；它使相关 session lease lost，并按 session policy 默认 failed。Worker 从 active registry 移除，所属 Instance 通过 adapter 收敛到 stopped/failed。 | 不要求 dead worker ack；terminal Worker 的迟到 heartbeat rejected。 |
 
 Close 是 terminal：central 已经决定关闭的 Worker 不再 active，不再可选，后续 heartbeat rejected。Close 可以保留 terminal record/history，但 active registry 里不存在该 Worker。
 
@@ -185,7 +190,7 @@ Create session 的语义是 client 请求当前 tenant runtime 创建 durable se
 
 ### 7.3 Register Worker
 
-Sidecar container 调用 `/sidecar/negotiate`，在 HTTP body 中提交 sidecarClass、labels、capacity、allocatable 和可选 description。Central 写 registered Worker record，并在 negotiate response 中返回 central 分配的 `workerId` 和 Web PubSub access URL。Sidecar 连接 Web PubSub 后订阅 `worker-commands:{workerId}`，随后开始周期性发送 `worker.heartbeat`。Central 收到首个 heartbeat 后才把该 Worker 放入 active ready selection path，并立即运行一次 session lifecycle reconciler。Reconciler 找到 eligible queued session 后，Session lease controller 写入 `currentWorkerId` 和新的 `sessionLeaseId`，并把 session 推进到 `starting`。
+Sidecar container 调用 `/sidecar/negotiate`，在 HTTP body 中提交可选 `hostPoolInstanceId`、`storageClass`、labels、capacity、allocatable 和可选 description。Central 写 registered Worker record，并在 negotiate response 中返回 central 分配的 `workerId` 和 Web PubSub access URL；该 runtime connection grant 的 service principal 绑定到这个 `workerId`，后续 heartbeat/drain/close payload 的 Worker identity 必须与连接 principal 一致。Sidecar 订阅 `worker-commands:{workerId}` 并周期性发送 heartbeat。Report ingress 只持久化 heartbeat 并触发统一串行 reconciler；reconciler 先验证 Instance 当前 epoch 的 report expectation，再把唯一匹配 Worker 确认为 `currentWorkerId`/`ready`，随后才允许 assignment。Reconciler 找到 eligible queued session 后写新的 `sessionLeaseId`，把 session 推进到 `starting`，并由 reconciler自己把 `session.assign` 发到 worker commands channel，caller 不重复 dispatch。
 
 Central publish `session.assign` 到 worker commands runtime channel；Web PubSub adapter 映射为 `tenant:poc:worker:{workerId}` group。Assignment payload 包含 `sessionId`、`workerId`、`sessionLeaseId`、workspace ref、agent session state ref、resolved AgentSpec 和 runtime config。Sidecar 收到后挂载 workspace volume 和 agent session state volume，并按 AgentSpec launch 启动 Copilot process adapter。POC 的 sidecar 通过 GitHub Copilot SDK 启动 agent session；如果配置了 `COPILOT_PROVIDER_*`，sidecar 只把这些值原样映射为 Copilot SDK provider config，不直接获取 provider token 或调用 provider HTTP API。
 
@@ -229,15 +234,15 @@ Resume 成功后，sidecar 报 `status.changed running`，central 把 session �
 | --- | --- |
 | AgentSpec admission controller | 读取静态 AgentSpec，解析 POC 预定义 class/profile。 |
 | Session lifecycle controller | create、queued、starting、running、pausing、paused、failed；resume command 先把 paused session 放回 queued。 |
-| Session lifecycle reconciler | 周期性扫描 queued/running session；eligible queued session 进入 assignment workflow，idle queued session 进入 paused，idle running session 进入 pause boundary 并释放 worker lease。Worker ready heartbeat 后立即运行同一个 reconciler 一次。 |
-| Worker registry controller | 接收 worker registration 和 heartbeat，维护 active worker registry 与 historical worker record。 |
-| Worker lifecycle reconciler | 周期性检查 heartbeat expiry；对失联 Worker 执行 evacuation，从 active registry 移除 Worker，并让受影响 session lease lost。 |
+| Session lifecycle reconciler | tenant 内唯一串行 convergence loop：恢复 Instance report expectation、执行幂等 host convergence、过期 Worker reports、处理 session lease loss、扫描 queued/running session、生成并 dispatch assignment/pause commands，再处理 idle scale-in。Timer 与 report ingress 都只触发这同一流程。 |
+| Worker registry manager | 接收 registration/heartbeat，维护 Worker process lifetime、heartbeat lease 与 historical terminal record；不决定 Instance 或 Session 状态。 |
+| WorkerPool manager | 唯一写 HostPoolInstance 状态：按 controller epoch 建立 report expectation，调用 adapter `ensureRunning`/`ensureStopped`，确认唯一 fresh Worker report，处理 timeout/split-brain，并按 policy scale capacity。 |
 | Worker drain controller | 对仍可通信的 Worker 执行 drain：停止新分配、迁移/失败当前 session lease、发送 close command，并在完成后从 active registry 移除 Worker。 |
 | Worker selection controller | 只从 active registry 中选择 ready、未过期、allocatable、label 匹配的 Worker。 |
 | Session lease controller | 写 `currentWorkerId`、`sessionLeaseId`，并用 `sessionLeaseId` 拒绝旧 sidecar 写入。 |
 | Event log controller | append/replay 本地 `events.jsonl`。 |
 | Snapshot manager | 分配 snapshot id 与 session-addressed location，在 pause command 上附带 capture ref，在 assign 上附带 restore ref，并在收到 `session.paused` 后写 `WorkspaceSnapshot` record、append `snapshot.created` marker、更新 `latestSnapshotRef`。不读 Worker 活动卷字节。 |
-| Worker capacity scaler | POC 中直接调用 Docker adapter 启动一个 container。 |
+| HostPool adapter | 幂等执行 `ensureRunning`/`ensureStopped`；`releaseControl` 只释放当前 central process 的 adapter control，不改变 durable Instance desired state。 |
 | Web PubSub transport adapter | 统一处理 central/client/sidecar client connection、negotiate、runtime channel 到 tenant-prefixed Web PubSub group 的映射，以及 group publish。 |
 | Docker WorkerPool controller/adaptor | provision sidecar container；container 内 sidecar 仍走同一个 Worker registration contract。 |
 | Docker volume adapter | 在 Snapshot controller 调用下复制和恢复 workspace volume、agent session state volume。 |

@@ -4,6 +4,7 @@ export type HostPoolInstanceState = 'pending' | 'ready' | 'stopping' | 'stopped'
 export interface WorkerPoolScalePolicy {
   scaleOutMaxPendingPerTick: number;
   scaleInIdleMs: number;
+  workerReportTimeoutMs: number;
 }
 
 /**
@@ -37,8 +38,15 @@ export interface HostPoolInstanceRecord {
   labels: Record<string, string>;
   capacity: number;
   state: HostPoolInstanceState;
-  containerId?: string;
-  workerId?: string;
+  /** Opaque stable identity returned by the host adapter. */
+  hostHandle?: string;
+  /** The currently confirmed sidecar process lifetime for this host attempt. */
+  currentWorkerId?: string;
+  /** Central process incarnation currently responsible for converging this host attempt. */
+  controllerEpoch?: string;
+  /** A Worker heartbeat must be received in this window before the instance can become ready. */
+  reportExpectedAfter?: string;
+  reportDeadline?: string;
   // No-reuse pools scale one instance per queued session and pin it here, so a host whose durable workspace is
   // keyed by session identity (e.g. a Foundry sandbox addressed by `workspaceRef`) is stable across pause/resume:
   // `boundSessionId` is the session the instance is dedicated to and `workspaceRef` is that session's durable

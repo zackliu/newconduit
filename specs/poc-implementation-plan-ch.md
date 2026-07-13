@@ -524,12 +524,13 @@ Expect：
 实现范围：
 
 - `containers/sidecar/Dockerfile`。基础镜像使用 Ubuntu/Node 20 系列，安装 Azure CLI，启用 Node/pnpm runtime；默认 command 运行 `node dist/sidecar/main.js`，启动后自动读取环境变量并作为 sidecar 注册 Worker。
-- POC Docker WorkerPool config。配置属于 tenant runtime，包含 `poolId`、`sidecarClass=copilot-process-wrapper`、Worker 启动时使用的 `labels={ agent: 'copilot' }`、`capacityPerWorker=1`、`hostPoolControllerClass='docker'`、`scalePolicy.scaleOutMaxPendingPerTick=1`、`scalePolicy.scaleInIdleMs=5000`、以及 container 内访问 central 的 `centralUrlForWorkers`。
-- WorkerPool controller。它扫描 queued sessions、active Worker records 和 adapter-owned pending instance metadata；当存在 matching queued session、没有 matching ready Worker、也没有 matching pending instance 时，每轮最多 scale out 一个 Worker。
-- hostPoolAdapter interface。接口表达 `scaleOut` 和 `scaleIn` 两个 host 操作；真正操作 Docker 的是 Docker hostPoolAdapter，WorkerPool controller 只按配置和策略调用 adapter。
+- POC Docker WorkerPool config。配置属于 tenant runtime，包含 `poolId`、`template.labels`、`template.capacity`、`hostPoolControllerClass='docker'`、`scalePolicy.scaleOutMaxPendingPerTick=1`、`scalePolicy.scaleInIdleMs=5000`、`scalePolicy.workerReportTimeoutMs`，以及 container 内访问 central 的 `centralUrlForWorkers`。
+- WorkerPool manager。它是 HostPoolInstance 状态的唯一 owner：扫描 queued sessions、active Worker records 和非终态 Instance；先收敛已有 Instance，再为 unmet demand 创建新的 Instance，避免同一 session/workspace 的旧 host 尚未 cleanup 就启动 replacement。
+- hostPoolAdapter interface。接口表达幂等的 `ensureRunning`、`ensureStopped` 和 `releaseControl`：adapter 只收敛具体 host，返回 opaque `hostHandle`，不决定 Session/Worker 状态。真正操作 Docker 的是 Docker hostPoolAdapter，manager 只按配置和策略调用 adapter。
 - Docker hostPoolAdapter。它只 `docker run` **预构建**的 sidecar image（镜像构建在带外完成——见 `pnpm build:sidecar-image` 或 e2e setup；build 不是 scale-out 的一部分），传入 `CENTRAL_URL`、`TENANT_ID`、Worker labels、Copilot provider env、Web PubSub env、workspace root、Copilot session state root 和 `AZURE_CONFIG_DIR`；本地 Windows 开发模式下把宿主机 Azure CLI profile mount 到 container 的 `/home/sidecar/.azure`。
-- Adapter-owned instance metadata。Docker adapter 记录 `containerId`、`poolId`、`workerId?`、pending/ready/stopping/stopped 状态和 idle timestamp；container id 和 WorkerPool source 不进入 Worker selection 条件。
-- Worker registration correlation。Docker sidecar 通过 `/sidecar/negotiate` 注册后，adapter/controller 把 `workerId` 和 `containerId` 关联；注册后的 Worker record shape 与 standalone sidecar 一致。
+- HostPoolInstance metadata。Instance 记录 `instanceId`、opaque `hostHandle`、`currentWorkerId?`、pending/ready/stopping/stopped/failed 状态、`controllerEpoch`、`reportExpectedAfter`/`reportDeadline` 和 idle timestamp。Instance 是 durable host-control attempt；Worker 是其中的一次 sidecar process lifetime，二者不共用 identity。
+- Worker registration correlation。Docker sidecar 通过 `/sidecar/negotiate` 在 typed `hostPoolInstanceId` 字段声明所属 Instance；description 只做 diagnostics。注册只产生 registered Worker，当前 expectation window 内的首个 fresh heartbeat 才能把它确认为 Instance 的 `currentWorkerId`。同一旧 Worker process 可在 central restart 后以 fresh heartbeat重新证明自己；新 process 必须注册新 `workerId`。
+- Restart reconciliation。每个 central process 生成新的 `controllerEpoch`；所有非终态 Instance 重新进入 pending expectation，adapter `ensureRunning` 重新取得 control。deadline 内唯一匹配 Worker report 才恢复 ready；无 report 或多个 fresh reports 都 fence Worker、处理 session lease loss、`ensureStopped` 并终结 Instance。运行中 heartbeat 丢失与 restart 后 report 未恢复走同一流程。
 - Docker workspace volume 和 Docker Copilot session volume。Sidecar container 使用这些 volume 路径承载 workspace 和 adapter-owned Copilot session state files。
 - Scale in policy。只对 WorkerPool provisioned Worker 生效；Worker 必须是 active、ready、`currentSessionCount=0`、`allocatable=capacity` 且 idle 达到该 WorkerPool 的 `scaleInIdleMs`。Controller 先让 Worker 进入不可再分配状态，再调用 Docker hostPoolAdapter stop/remove 对应 container。
 
@@ -562,13 +563,13 @@ Given：
 Expect：
 
 - WorkerPool controller 选择 matching WorkerPool。
-- WorkerPool controller 因没有 matching ready Worker 且没有 matching pending instance，调用 Docker hostPoolAdapter scale out。
-- Docker hostPoolAdapter 启动 sidecar container，并记录 adapter-owned `containerId`。
+- WorkerPool manager 因没有 matching ready Worker 且没有 matching pending Instance，创建一个 pending Instance 并调用 Docker hostPoolAdapter `ensureRunning`。
+- Docker hostPoolAdapter 用确定性 container name 幂等创建/接管 sidecar container，并返回 opaque `hostHandle`。
 - Sidecar container 通过 `/sidecar/negotiate` 注册 Worker。
 - Central 分配 `workerId`。
-- Docker hostPoolAdapter/controller 把 `containerId` 与 `workerId` 关联。
+- Worker record 的 typed `hostPoolInstanceId` 指向该 Instance；注册本身不使 Instance ready。
+- Worker 的首个 fresh heartbeat 满足当前 `controllerEpoch` 的 report expectation，manager 把它写为 Instance 的 `currentWorkerId` 并将 Instance 置为 ready。
 - Worker record shape 与 standalone sidecar 注册出的 Worker 一致。
-- Worker record 的 `sidecarClass` 是 `copilot-process-wrapper`。
 - Worker labels 包含 `agent=copilot`。
 - Worker capacity/allocatable 是 1。
 - Worker condition 是 `ready`。
@@ -577,7 +578,7 @@ Expect：
 - Session assignment 后，sidecar 使用 Docker workspace volume 和 Copilot session volume 启动 Copilot-backed agent runtime。
 - 该 Worker 能完成至少一轮 input/output event loop。
 - Session pause/release 后，该 Worker idle 达到 WorkerPool `scaleInIdleMs=5000`。
-- WorkerPool controller 调用 Docker hostPoolAdapter scale in，并 stop/remove 对应 container。
+- WorkerPool manager 调用 Docker hostPoolAdapter `ensureStopped`，并把 Instance 收敛到 stopped。
 - Worker selection 从头到尾只看注册后的 Worker record，不使用 Docker container id，也不使用 WorkerPool source。
 - Client SDK 仍然只面向 session 通信，不知道 WorkerPool、Docker container、Worker endpoint。
 
@@ -791,7 +792,7 @@ Automated scenario test 使用实现同一 `agentProcessAdapter` contract 的 de
 - `src/` 无 class 值字面量。`src/` 不再出现 `docker-workspace-volume-snapshot`、`local-managed`、`copilot-session-volume-snapshot`、`copilot-managed-local`、`docker-dotnet`、`dotnet-process-wrapper`、`copilot-poc-tools`、`turn-boundary-durable-pause`、`stop-on-pause`、`restart-with-context`、`DOTNET_WORKER_POOL_ID` 等 config 值字面量，也不再出现按这些值分支的 map。AgentSpec 的 `workspaceClass`/`toolProfile`/`pausePolicy`/`recoveryPolicy`/`agentStatePolicy`、`sidecarClass`、`hostPoolControllerClass` 在 model 里是 generic `string`；`WorkerCondition`、`SessionStatus` 等固定运行时状态枚举保持 union，不受影响。
 - 自声明 classId + generic 解析。每个 sidecar adapter（runtime transport/workspace/agent-process）、persistence class、host-pool adapter 都用 `classId` 自声明自己的 id；worker-type、persistence、host-pool 的解析都是按 `classId` 索引的 registry 做 `registry.get(configValue)` 的 generic 查找，未知 id 报错。config 文档只用 `*Class`/`adapterKind` 字段按 id 引用这些 class。
 - WorkerType 数据外置 + adapter registry。`resolveWorkerType(id)` 从 `config/worker-types/<id>.json` 读 `workerTypeId`、`sidecarClass`、labels、capacity 和 `runtimeTransportClass`/`workspaceClass`/`agentProcessClass` 三个 class id，再从编译进 sidecar 的 adapter class 列表（按 `classId` 索引）解析出 adapter；`WorkerType` 接口与 `resolveWorkerType` 签名不变。sidecar 启动必须显式提供 `WORKER_TYPE`。
-- Host-pool-controller 外置。`config/host-pool-controllers/*.json` 声明 `id`（= `hostPoolControllerClass`）、`adapterKind`、`imageName`、`workerType`（镜像构建在带外，不列 build 输入）。central 按 `adapterKind` 从 host-pool adapter registry（按 `DockerHostPoolAdapter.classId` 索引）generic 构造 adapter，`docker` 与 `docker-dotnet` 两个变体都来自 config，`main.ts` 不再硬编码。WorkerPool 文档不自带 `tenantId`/`centralUrlForWorkers`，每个 pool 自带 `scalePolicy.scaleInIdleMs`，central 启动不再用 `WORKER_POOL_ID`/`DOTNET_WORKER_POOL_ID`/`WORKER_POOL_SCALE_IN_IDLE_MS` env 特判。
+- Host-pool-controller 外置。`config/host-pool-controllers/*.json` 声明 `id`（= `hostPoolControllerClass`）、`adapterKind`、`imageName`、`workerType`（镜像构建在带外，不列 build 输入）。central 按 `adapterKind` 从 host-pool adapter registry（按 `DockerHostPoolAdapter.classId` 索引）generic 构造 adapter，`docker` 与 `docker-dotnet` 两个变体都来自 config，`main.ts` 不再硬编码。WorkerPool 文档不自带 `tenantId`/`centralUrlForWorkers`，每个 pool 自带 `scalePolicy.scaleInIdleMs` 与 `scalePolicy.workerReportTimeoutMs`；后者决定 host 启动或 controller restart 后等待 fresh Worker report 的绝对 deadline。central 启动不再用 per-pool env 特判。
 - 容器交付。sidecar 容器镜像必须 `COPY config ./config`（`containers/sidecar/Dockerfile` 与 `containers/sidecar-dotnet/Dockerfile`），使容器内 `resolveWorkerType` 能读到 worker-type 数据。
 - Src 清理。删除 `src/` 里硬编码 AgentSpec/WorkerType 常量与 sidecar-class 值常量；scenario 测试从同一个 config 目录读取 fixture。
 
@@ -816,7 +817,7 @@ Given：
 Expect：
 
 - `loadWorkerPools({ tenantId, centralUrlForWorkers })` 返回的 pool 带上注入的 tenantId 与 centralUrlForWorkers。
-- pool 的 `scalePolicy.scaleInIdleMs` 来自 pool 文档；用户可见的 pool 文档不含 tenant 或 central endpoint。
+- pool 的 `scalePolicy.scaleInIdleMs` 与 `scalePolicy.workerReportTimeoutMs` 来自 pool 文档；用户可见的 pool 文档不含 tenant 或 central endpoint。
 
 Scenario-based test：`scenario: worker type binds adapters so startup only references the type`
 

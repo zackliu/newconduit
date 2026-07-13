@@ -10,7 +10,8 @@
   "hostPoolControllerClass": "foundry",
   "scalePolicy": {
     "scaleOutMaxPendingPerTick": 1,
-    "scaleInIdleMs": 5000
+    "scaleInIdleMs": 5000,
+    "workerReportTimeoutMs": 120000
   },
   "reuse": false
 }

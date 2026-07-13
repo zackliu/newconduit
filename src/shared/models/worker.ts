@@ -5,6 +5,8 @@ export interface WorkerRecord {
   workerId: string;
   tenantId: string;
   capacityScope: string;
+  /** Host attempt that created this sidecar process; absent for standalone workers. */
+  hostPoolInstanceId?: string;
   labels: Record<string, string>;
   storageClass: string;
   // Resolved from the owning WorkerPool at correlation. `false` = no-reuse: central binds the worker to the first
@@ -25,6 +27,7 @@ export interface WorkerRecord {
 }
 
 export interface WorkerRegisterPayload {
+  hostPoolInstanceId?: string;
   labels: Record<string, string>;
   storageClass: string;
   description?: Record<string, string>;

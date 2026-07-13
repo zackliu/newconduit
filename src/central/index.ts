@@ -24,7 +24,7 @@ export {
 	WorkerPoolManager,
 	WorkerSelector
 } from './managers';
-export type { AcceptInputOutcome, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput, WorkerPoolManagerStatus } from './managers';
+export type { AcceptInputOutcome, HostPoolAdapter, HostPoolEnsureRunningInput, HostPoolEnsureRunningResult, HostPoolEnsureStoppedInput, SessionAssignmentOutcome, StartSessionOutcome, WorkerCommandOutput, WorkerPoolManagerStatus } from './managers';
 export { HostManagedStorageClass, SnapshotManager, VolumeSnapshotStorageClass } from './persistence';
 export type { StorageAttachmentKind, StorageClass } from './persistence';
 export { StaticAgentSpecRegistry } from './registries/agent-spec-registry';

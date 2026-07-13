@@ -19,6 +19,7 @@ export class WorkerManager {
       workerId: crypto.randomUUID(),
       tenantId: input.tenantId,
       capacityScope: input.tenantId,
+      hostPoolInstanceId: input.hostPoolInstanceId,
       labels: input.labels,
       storageClass: input.storageClass,
       description: input.description,
@@ -104,6 +105,30 @@ export class WorkerManager {
       terminatedWorkers.push(await this.terminate(worker, 'expired', 'worker_keepalive_expired', 'worker.expired'));
     }
     return terminatedWorkers;
+  }
+
+  async expire(input: WorkerIdentityPayload & { reason: string }): Promise<WorkerRecord> {
+    const worker = await this.requireWorker(input.workerId);
+    if (worker.lifecycleState === 'closed' || worker.lifecycleState === 'expired') {
+      return worker;
+    }
+    return this.terminate(worker, 'expired', input.reason, 'worker.expired');
+  }
+
+  async awaitFreshReport(input: WorkerIdentityPayload & { deadline: string }): Promise<WorkerRecord> {
+    const worker = await this.requireWorker(input.workerId);
+    if (worker.lifecycleState === 'closed' || worker.lifecycleState === 'expired') {
+      return worker;
+    }
+    const next: WorkerRecord = {
+      ...worker,
+      allocatable: 0,
+      conditions: ['disconnected'],
+      expiresAt: input.deadline,
+      updatedAt: this.clock.now()
+    };
+    await this.storage.writeWorker(next);
+    return next;
   }
 
   async releaseSessionLease(workerId: string): Promise<WorkerRecord> {
@@ -198,7 +223,7 @@ export class WorkerManager {
   }
 
   private hasActiveLease(session: SessionRecord, workerId: string): boolean {
-    return session.currentWorkerId === workerId && (session.status === 'starting' || session.status === 'running');
+    return session.currentWorkerId === workerId && typeof session.sessionLeaseId === 'string';
   }
 
   private async findInFlightTurnSeq(session: SessionRecord): Promise<number | undefined> {

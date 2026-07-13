@@ -158,6 +158,7 @@ export class FoundrySidecarHostAdapter implements SidecarHostAdapter {
       centralUrl,
       tenantId: typeof payload.tenantId === 'string' ? payload.tenantId : 'poc',
       workerTypeId,
+      hostPoolInstanceId: this.requireString(payload, 'hostPoolInstanceId'),
       labels: this.toStringRecord(payload.labels),
       capacity,
       description: this.toDescription(payload),
@@ -169,13 +170,11 @@ export class FoundrySidecarHostAdapter implements SidecarHostAdapter {
 
   private toDescription(payload: Record<string, unknown>): Record<string, string> | undefined {
     const workerPoolId = typeof payload.workerPoolId === 'string' ? payload.workerPoolId : undefined;
-    const workerPoolInstanceId = typeof payload.workerPoolInstanceId === 'string' ? payload.workerPoolInstanceId : undefined;
-    if (!workerPoolId && !workerPoolInstanceId) {
+    if (!workerPoolId) {
       return undefined;
     }
     return {
-      ...(workerPoolId ? { workerPoolId } : {}),
-      ...(workerPoolInstanceId ? { workerPoolInstanceId } : {})
+      workerPoolId
     };
   }
 

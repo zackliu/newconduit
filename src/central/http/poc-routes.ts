@@ -102,7 +102,9 @@ function isWorkerRegisterPayload(payload: unknown): payload is WorkerRegisterPay
     return false;
   }
   const candidate = payload as Partial<WorkerRegisterPayload>;
-  return isStringRecord(candidate.labels)
+  return (candidate.hostPoolInstanceId === undefined
+      || (typeof candidate.hostPoolInstanceId === 'string' && candidate.hostPoolInstanceId.length > 0))
+    && isStringRecord(candidate.labels)
     && typeof candidate.storageClass === 'string'
     && candidate.storageClass.length > 0
     && typeof candidate.capacity === 'number'

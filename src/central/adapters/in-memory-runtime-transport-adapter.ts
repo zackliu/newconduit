@@ -34,9 +34,10 @@ export class InMemoryRuntimeTransportAdapter implements RuntimeEventTransport, T
   }
 
   private contextFromEvent(event: RuntimeEvent): RequestContext {
+    const isWorkerReport = event.actor === 'sidecar' && typeof event.workerId === 'string';
     return {
       principal: {
-        principalId: event.actor,
+        principalId: isWorkerReport ? event.workerId! : event.actor,
         type: event.actor === 'sidecar' ? 'service' : 'user'
       }
     };

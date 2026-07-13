@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
-import { AgentSpecAdmissionManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type HostPoolScaleInInput, type HostPoolScaleOutInput, type HostPoolScaleOutResult } from '../../src/central/managers';
+import { AgentSpecAdmissionManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type HostPoolEnsureRunningInput, type HostPoolEnsureRunningResult, type HostPoolEnsureStoppedInput } from '../../src/central/managers';
 import { SnapshotManager } from '../../src/central/persistence';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { SystemClock, type ResolvedAgentSpec, type RuntimeEvent, type SessionRecord, type WorkerPoolRecord, type WorkerRecord } from '../../src/shared';
@@ -110,7 +110,7 @@ test('scenario: worker labels and capacity are declared once on the pool templat
       tenantId: 'poc',
       template: { labels: COPILOT_WORKER_LABELS, capacity: 1 },
       hostPoolControllerClass: 'docker',
-      scalePolicy: { scaleOutMaxPendingPerTick: 1, scaleInIdleMs: 5000 },
+      scalePolicy: { scaleOutMaxPendingPerTick: 1, scaleInIdleMs: 5000, workerReportTimeoutMs: 60_000 },
       centralUrlForWorkers: 'http://central'
     };
     const adapter = new CapturingHostPoolAdapter();
@@ -123,7 +123,7 @@ test('scenario: worker labels and capacity are declared once on the pool templat
     // Single source: the scaled worker's identity is exactly the pool template, not a duplicated worker-type value.
     assert.deepEqual(instances[0].labels, COPILOT_WORKER_LABELS);
     assert.equal(instances[0].capacity, 1);
-    assert.equal(adapter.scaleOutCalls, 1);
+    assert.equal(adapter.ensureRunningCalls, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -224,12 +224,15 @@ function createSessionEvent(ackId: string): RuntimeEvent {
 }
 
 class CapturingHostPoolAdapter implements HostPoolAdapter {
-  scaleOutCalls = 0;
-  async scaleOut(_input: HostPoolScaleOutInput): Promise<HostPoolScaleOutResult> {
-    this.scaleOutCalls += 1;
-    return { containerId: 'container-1' };
+  ensureRunningCalls = 0;
+  async ensureRunning(_input: HostPoolEnsureRunningInput): Promise<HostPoolEnsureRunningResult> {
+    this.ensureRunningCalls += 1;
+    return { hostHandle: 'container-1' };
   }
-  async scaleIn(_input: HostPoolScaleInInput): Promise<void> {
+  async ensureStopped(_input: HostPoolEnsureStoppedInput): Promise<void> {
+    return;
+  }
+  async releaseControl(): Promise<void> {
     return;
   }
 }

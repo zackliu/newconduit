@@ -18,7 +18,7 @@ class SidecarInMemoryTransport implements SidecarRuntimeTransport {
   async connect(): Promise<void> {}
   async publish(channel: RuntimeChannel, event: RuntimeEvent): Promise<void> {
     this.publishedEvents.push(event);
-    await this.transport.publish(channel, event, { principal: { principalId: 'interaction-sidecar', type: 'service' } });
+    await this.transport.publish(channel, event, { principal: { principalId: event.workerId ?? 'interaction-sidecar', type: 'service' } });
   }
   async subscribe(channel: RuntimeChannel, handler: RuntimeEventHandler): Promise<RuntimeSubscription> {
     return this.transport.subscribe(channel, handler);
@@ -135,7 +135,7 @@ async function startHarness(): Promise<Harness> {
     agentProcessAdapter: agent
   });
   await sidecar.subscribeWorkerCommands(worker.workerId);
-  await transport.publish({ kind: 'tenant-inbox' }, workerHeartbeatEvent(worker.workerId), serviceContext());
+  await transport.publish({ kind: 'tenant-inbox' }, workerHeartbeatEvent(worker.workerId), serviceContext(worker.workerId));
 
   const readSession = async (): Promise<SessionRecord> => {
     const [session] = await storage.readSessions();
@@ -152,7 +152,10 @@ async function startHarness(): Promise<Harness> {
     root,
     session: readSession,
     events: async () => {
-      const session = await readSession();
+      const [session] = await storage.readSessions();
+      if (!session) {
+        return [];
+      }
       return storage.readEvents(session.sessionId, 0);
     },
     async waitUntil<T>(check: (session: SessionRecord) => T | undefined, label: string): Promise<T> {
@@ -415,6 +418,6 @@ function userContext(principalId = 'demo-user'): RequestContext {
   return { principal: { principalId, type: 'user' }, connectionId: `${principalId}-connection` };
 }
 
-function serviceContext(): RequestContext {
-  return { principal: { principalId: 'interaction-sidecar', type: 'service' } };
+function serviceContext(principalId = 'interaction-sidecar'): RequestContext {
+  return { principal: { principalId, type: 'service' } };
 }

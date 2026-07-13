@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
+import { WorkerRuntimeEventController } from '../../src/central/controllers';
 import { AgentSpecAdmissionManager, WorkerManager, WorkerSelector } from '../../src/central/managers';
 import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
@@ -52,6 +53,36 @@ test('scenario: standalone sidecar registers worker and becomes ready after firs
 
     const events = await readWorkerEvents(root, worker.workerId);
     assert.equal(events[0].type, 'worker.registered');
+  });
+});
+
+test('scenario: Worker report identity must match the authenticated sidecar connection', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const manager = new WorkerManager(storage, clock, 30_000);
+    const controller = new WorkerRuntimeEventController(manager);
+    const worker = await registerWorker(manager);
+
+    await assert.rejects(
+      controller.handleRuntimeEvent({ principal: { principalId: 'different-worker', type: 'service' } }, {
+        eventId: 'mismatched-heartbeat',
+        workerId: worker.workerId,
+        sequence: 0,
+        type: 'worker.heartbeat',
+        timestamp: clock.now(),
+        actor: 'sidecar',
+        payload: {
+          workerId: worker.workerId,
+          capacity: 1,
+          allocatable: 1,
+          conditions: ['ready']
+        }
+      }),
+      /does not match/
+    );
+
+    const unchanged = await storage.readWorker(worker.workerId);
+    assert.equal(unchanged?.lifecycleState, 'registered');
+    assert.deepEqual(unchanged?.conditions, ['disconnected']);
   });
 });
 
@@ -192,6 +223,27 @@ test('scenario: leased worker expiry marks lease lost without crash recovery', a
     const events = await storage.readEvents(session.sessionId, 0);
     assert.equal(events[0].type, 'session.lease.lost');
     assert.deepEqual(events[0].payload, { reason: 'worker_lost', workerState: 'expired' });
+  });
+});
+
+test('scenario: Worker loss fails a pausing session that still owns the Worker lease', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const manager = new WorkerManager(storage, clock, 1_000);
+    const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 0, conditions: ['busy'] });
+    const session = await writeLeasedSession(storage, worker);
+    await storage.writeSession({ ...session, status: 'pausing' });
+    clock.set('2026-06-24T00:00:01.001Z');
+
+    await manager.expireWorkers();
+
+    const failed = await storage.readSession(session.sessionId);
+    assert.equal(failed?.status, 'failed');
+    assert.equal(failed?.currentWorkerId, undefined);
+    assert.equal(failed?.sessionLeaseId, undefined);
+    assert.equal(failed?.lifecycleReason, 'worker_lost');
+    const events = await storage.readEvents(session.sessionId, 0);
+    assert.deepEqual(events.map((event) => event.type), ['session.lease.lost']);
   });
 });
 

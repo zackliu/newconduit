@@ -7,6 +7,7 @@ export interface SidecarBootstrap {
   centralUrl: string;
   tenantId: string;
   workerTypeId: string;
+  hostPoolInstanceId?: string;
   labels: Record<string, string>;
   capacity: number;
   description?: Record<string, string>;

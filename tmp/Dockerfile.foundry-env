@@ -1,7 +1,0 @@
-# Throwaway: adds the pmagent2 copilot provider env on top of the already-pushed fixed Foundry image.
-# Non-secret, deployment-stable provider config (spec §5 allows image ENV). Used only to unblock the
-# end-to-end validation because the azd microsoft.foundry extension ignores azure.yaml environment_variables.
-FROM pmagent.azurecr.io/agent-runtime-sidecar-foundry:latest
-ENV COPILOT_MODEL=gpt-5.4-mini
-ENV COPILOT_PROVIDER_TYPE=openai
-ENV COPILOT_PROVIDER_BASE_URL=https://pmagent2.services.ai.azure.com/openai/v1

@@ -10,7 +10,8 @@
   "hostPoolControllerClass": "docker",
   "scalePolicy": {
     "scaleOutMaxPendingPerTick": 1,
-    "scaleInIdleMs": 5000
+    "scaleInIdleMs": 5000,
+    "workerReportTimeoutMs": 60000
   },
   "reuse": false
 }

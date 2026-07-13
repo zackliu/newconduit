@@ -54,7 +54,8 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
     hostPoolControllerClass: 'docker',
     scalePolicy: {
       scaleOutMaxPendingPerTick: 1,
-      scaleInIdleMs: 5000
+      scaleInIdleMs: 5000,
+      workerReportTimeoutMs: 120_000
     },
     centralUrlForWorkers: 'http://host.docker.internal:0',
     reuse: false
@@ -103,10 +104,10 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
       displayName: 'Docker WorkerPool e2e'
     });
 
-    const instance = await waitForInstance(storage, (candidate) => candidate.poolId === poolId && candidate.state === 'ready' && Boolean(candidate.workerId), 120_000);
-    assert.equal(typeof instance.containerId, 'string');
-    assert.equal(typeof instance.workerId, 'string');
-    const worker = await waitForActiveWorker(storage, instance.workerId!, 30_000);
+    const instance = await waitForInstance(storage, (candidate) => candidate.poolId === poolId && candidate.state === 'ready' && Boolean(candidate.currentWorkerId), 120_000);
+    assert.equal(typeof instance.hostHandle, 'string');
+    assert.equal(typeof instance.currentWorkerId, 'string');
+    const worker = await waitForActiveWorker(storage, instance.currentWorkerId!, 30_000);
     assert.deepEqual(worker.labels, COPILOT_WORKER_LABELS);
     assert.equal(worker.storageClass, COPILOT_STORAGE_CLASS);
 
@@ -122,7 +123,7 @@ test('scenario: docker worker pool scales out sidecar capacity for SDK session a
     await wait(5500);
     await central.reconcileSessionsForTenant(tenantId);
     const stopped = await waitForInstance(storage, (candidate) => candidate.instanceId === instance.instanceId && candidate.state === 'stopped', 60_000);
-    assert.equal(stopped.workerId, worker.workerId);
+    assert.equal(stopped.currentWorkerId, worker.workerId);
   } catch (error) {
     if (isCredentialUnavailable(error)) {
       context.skip('DefaultAzureCredential is unavailable; run az login to enable this integration test');
@@ -176,7 +177,8 @@ test('scenario: docker worker pool restores session memory across worker recycle
     hostPoolControllerClass: 'docker',
     scalePolicy: {
       scaleOutMaxPendingPerTick: 1,
-      scaleInIdleMs: 5000
+      scaleInIdleMs: 5000,
+      workerReportTimeoutMs: 120_000
     },
     centralUrlForWorkers: 'http://host.docker.internal:0',
     reuse: false
@@ -358,12 +360,12 @@ async function collectDiagnostics(storage: LocalFileStorage, poolId: string): Pr
     storage.readHostPoolInstances()
   ]);
   const logs: string[] = [];
-  for (const instance of instances.filter((candidate) => candidate.poolId === poolId && candidate.containerId)) {
+  for (const instance of instances.filter((candidate) => candidate.poolId === poolId && candidate.hostHandle)) {
     try {
-      const { stdout, stderr } = await execFileAsync('docker', ['logs', instance.containerId!], { maxBuffer: 1024 * 1024 });
-      logs.push(`container ${instance.containerId} logs:\n${stdout}\n${stderr}`);
+      const { stdout, stderr } = await execFileAsync('docker', ['logs', instance.hostHandle!], { maxBuffer: 1024 * 1024 });
+      logs.push(`container ${instance.hostHandle} logs:\n${stdout}\n${stderr}`);
     } catch (error) {
-      logs.push(`container ${instance.containerId} logs unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      logs.push(`container ${instance.hostHandle} logs unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return [

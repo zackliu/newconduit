@@ -59,9 +59,6 @@ export class ClientRuntimeEventController {
         const outcome = await this.sessionManager.resumeSession(context, sessionId, event.ackId);
         await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.resumeRequestedEvent);
         await this.eventTransport.publish({ kind: 'client-inbox' }, this.toClientProjectionEvent(outcome.resumeRequestedEvent, 'session.status.updated', { sessionId: outcome.session.sessionId, status: outcome.session.status }));
-        for (const workerCommand of outcome.workerCommands) {
-          await this.eventTransport.publish({ kind: 'worker-commands', workerId: workerCommand.workerId }, workerCommand.event);
-        }
         return true;
       }
       case 'interaction.respond.requested': {

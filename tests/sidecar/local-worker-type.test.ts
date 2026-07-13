@@ -19,7 +19,7 @@ class SidecarInMemoryTransport implements SidecarRuntimeTransport {
   async connect(): Promise<void> {}
   async publish(channel: RuntimeChannel, event: RuntimeEvent): Promise<void> {
     this.publishedEvents.push(event);
-    await this.transport.publish(channel, event, { principal: { principalId: 'local-sidecar', type: 'service' } });
+    await this.transport.publish(channel, event, { principal: { principalId: event.workerId ?? 'local-sidecar', type: 'service' } });
   }
   async subscribe(channel: RuntimeChannel, handler: RuntimeEventHandler): Promise<RuntimeSubscription> {
     return this.transport.subscribe(channel, handler);
@@ -77,7 +77,7 @@ test('scenario: local agent spec assigns to local worker without docker scale-ou
     assert.ok(worker);
     assert.equal(worker.storageClass, LOCAL_STORAGE_CLASS);
     assert.equal(worker.capacity, 99);
-    await runtimeTransport.publish({ kind: 'tenant-inbox' }, workerHeartbeatEvent(worker.workerId), sidecarContext());
+    await runtimeTransport.publish({ kind: 'tenant-inbox' }, workerHeartbeatEvent(worker.workerId), sidecarContext(worker.workerId));
 
     const sidecar = new SidecarDaemon({
       runtimeTransport: new SidecarInMemoryTransport(runtimeTransport),
@@ -176,6 +176,6 @@ function userContext(principalId: string) {
   return { principal: { principalId, type: 'user' as const }, connectionId: `${principalId}-connection` };
 }
 
-function sidecarContext() {
-  return { principal: { principalId: 'local-sidecar', type: 'service' as const } };
+function sidecarContext(principalId = 'local-sidecar') {
+  return { principal: { principalId, type: 'service' as const } };
 }

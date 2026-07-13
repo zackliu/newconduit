@@ -1,4 +1,4 @@
-import { type RuntimeEvent, type RuntimeEventTransport, type WorkerCondition, type WorkerHeartbeatPayload, type WorkerIdentityPayload } from '../../shared';
+import { type RequestContext, type RuntimeEvent, type WorkerCondition, type WorkerHeartbeatPayload, type WorkerIdentityPayload } from '../../shared';
 import { SessionLifecycleReconciler, WorkerManager } from '../managers';
 
 export interface WorkerRuntimeEventOutcome {
@@ -9,23 +9,26 @@ export interface WorkerRuntimeEventOutcome {
  * Accepts worker lifecycle signals from sidecars and turns them into tenant-owned capacity state that assignment can trust.
  */
 export class WorkerRuntimeEventController {
-  constructor(private readonly workerManager: WorkerManager, private readonly sessionLifecycleReconciler?: SessionLifecycleReconciler, private readonly eventTransport?: RuntimeEventTransport) {}
+  constructor(private readonly workerManager: WorkerManager, private readonly sessionLifecycleReconciler?: SessionLifecycleReconciler) {}
 
-  async handleRuntimeEvent(tenantId: string, event: RuntimeEvent): Promise<WorkerRuntimeEventOutcome> {
+  async handleRuntimeEvent(context: RequestContext, event: RuntimeEvent): Promise<WorkerRuntimeEventOutcome> {
     switch (event.type) {
       case 'worker.heartbeat': {
         const payload = this.parseWorkerHeartbeatPayload(event.payload);
+        this.assertWorkerIdentity(context, payload.workerId);
         await this.workerManager.heartbeat(payload);
-        await this.reconcileSessions();
+        this.triggerReconcile();
         return { handled: true };
       }
       case 'worker.drain.requested': {
         const payload = this.parseWorkerIdentityPayload(event.payload);
+        this.assertWorkerIdentity(context, payload.workerId);
         await this.workerManager.drain(payload);
         return { handled: true };
       }
       case 'worker.close.requested': {
         const payload = this.parseWorkerIdentityPayload(event.payload);
+        this.assertWorkerIdentity(context, payload.workerId);
         await this.workerManager.close(payload);
         return { handled: true };
       }
@@ -35,13 +38,13 @@ export class WorkerRuntimeEventController {
   }
 
   async reconcileSessions(): Promise<void> {
-    const outcome = await this.sessionLifecycleReconciler?.reconcile();
-    if (!outcome || !this.eventTransport) {
-      return;
-    }
-    for (const command of outcome.workerCommands) {
-      await this.eventTransport.publish({ kind: 'worker-commands', workerId: command.workerId }, command.event);
-    }
+    await this.sessionLifecycleReconciler?.reconcile();
+  }
+
+  private triggerReconcile(): void {
+    void this.reconcileSessions().catch((error: unknown) => {
+      console.error('runtime reconcile after Worker report failed', error);
+    });
   }
 
   private parseWorkerHeartbeatPayload(payload: unknown): WorkerHeartbeatPayload {
@@ -80,6 +83,12 @@ export class WorkerRuntimeEventController {
 
   private isWorkerCondition(condition: unknown): condition is WorkerCondition {
     return condition === 'ready' || condition === 'busy' || condition === 'draining' || condition === 'disconnected';
+  }
+
+  private assertWorkerIdentity(context: RequestContext, workerId: string): void {
+    if (context.principal.type !== 'service' || context.principal.principalId !== workerId) {
+      throw new Error(`Worker report identity ${context.principal.principalId} does not match ${workerId}`);
+    }
   }
 
 }

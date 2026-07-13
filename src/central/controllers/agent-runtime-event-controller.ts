@@ -101,10 +101,7 @@ export class AgentRuntimeEventController {
           await this.workerManager.releaseSessionLease(session.currentWorkerId);
         }
         await this.sessionLifecycleManager.pauseAfterEvent(session, finalSequence, finalTimestamp, payload.reason, latestSnapshotRef);
-        const reconcileOutcome = await this.sessionLifecycleReconciler.reconcile();
-        for (const workerCommand of reconcileOutcome.workerCommands) {
-          await this.eventTransport.publish({ kind: 'worker-commands', workerId: workerCommand.workerId }, workerCommand.event);
-        }
+        this.triggerReconcile();
         await this.eventTransport.publish({ kind: 'client-inbox' }, {
           ...appended,
           ackId: undefined,
@@ -120,6 +117,13 @@ export class AgentRuntimeEventController {
       default:
         return false;
     }
+  }
+
+  private triggerReconcile(): void {
+    void this.sessionLifecycleReconciler.reconcile()
+      .catch((error: unknown) => {
+        console.error('runtime reconcile after agent report failed', error);
+      });
   }
 
   private async appendSessionEvent<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean } = {}): Promise<RuntimeEvent<TPayload>> {

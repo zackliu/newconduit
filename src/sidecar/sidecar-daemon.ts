@@ -131,6 +131,7 @@ export class SidecarDaemon {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        hostPoolInstanceId: input.hostPoolInstanceId,
         storageClass: input.storageClass,
         labels: input.labels,
         description: input.description,

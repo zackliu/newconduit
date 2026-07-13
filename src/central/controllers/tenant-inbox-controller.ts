@@ -17,7 +17,7 @@ export class TenantInboxController {
 
   async handleRuntimeEvent(context: RequestContext, event: RuntimeEvent): Promise<void> {
     try {
-      const workerOutcome = await this.workerRuntimeEventController.handleRuntimeEvent(this.tenantId, event);
+      const workerOutcome = await this.workerRuntimeEventController.handleRuntimeEvent(context, event);
       if (workerOutcome.handled) {
         return;
       }

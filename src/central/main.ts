@@ -73,6 +73,26 @@ async function main(): Promise<void> {
   for (const pool of workerPools) {
     console.log(`worker pool ${pool.poolId} will connect sidecars to ${pool.centralUrlForWorkers}`);
   }
+
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    console.log(`central received ${signal}; releasing runtime control`);
+    await server.close();
+    await service.stop();
+    await webPubSubTransportAdapter.stop();
+  };
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      void shutdown(signal).catch((error: unknown) => {
+        console.error('central shutdown failed', error);
+        process.exitCode = 1;
+      });
+    });
+  }
 }
 
 function buildHostPoolAdapters(controllers: HostPoolControllerConfig[], snapshotRoot: string): Record<string, HostPoolAdapter> {

@@ -16,6 +16,7 @@ async function main(): Promise<void> {
     await daemon.startStandaloneWorker({
       centralUrl: bootstrap.centralUrl,
       tenantId: bootstrap.tenantId,
+      hostPoolInstanceId: bootstrap.hostPoolInstanceId,
       storageClass: profile.storageClass,
       labels: bootstrap.labels,
       description: bootstrap.description,

@@ -31,7 +31,6 @@ export interface ReadSessionEventsOutcome {
 export interface ResumeSessionOutcome {
   session: SessionRecord;
   resumeRequestedEvent: RuntimeEvent<SessionResumeRequestedPayload>;
-  workerCommands: WorkerCommandOutput[];
 }
 
 export interface PauseSessionOutcome {
@@ -277,12 +276,11 @@ export class SessionManager {
       sessionId
     });
     const queued = await this.sessionLifecycleManager.transitionAfterEvent(session, 'queued', event.sequence, event.timestamp, 'resume_requested');
-    const reconcileOutcome = await this.sessionLifecycleReconciler?.reconcile();
+    await this.sessionLifecycleReconciler?.reconcile();
     const current = await this.storage.readSession(sessionId) ?? queued;
     return {
       session: current,
-      resumeRequestedEvent: event,
-      workerCommands: reconcileOutcome?.workerCommands.filter((command): command is WorkerCommandOutput => command.event.type === 'session.assign') ?? []
+      resumeRequestedEvent: event
     };
   }
 

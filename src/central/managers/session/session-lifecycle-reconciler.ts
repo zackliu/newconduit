@@ -4,15 +4,14 @@ import { SessionAssignmentManager, type WorkerCommandOutput } from './session-as
 import { SessionLifecycleManager } from './session-lifecycle-manager';
 import { SnapshotManager } from '../../persistence/snapshot-manager';
 import { WorkerPoolManager } from '../worker/worker-pool-manager';
-
-export interface SessionLifecycleReconcileOutcome {
-  workerCommands: Array<WorkerCommandOutput<SessionPauseCommandPayload> | WorkerCommandOutput>;
-}
+import { WorkerManager } from '../worker/worker-manager';
 
 /**
  * Reconciles durable session lifecycle facts that are independent from any client connection.
  */
 export class SessionLifecycleReconciler {
+  private reconcileTail: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly storage: RuntimeStorage,
     private readonly clock: Clock,
@@ -21,12 +20,33 @@ export class SessionLifecycleReconciler {
     private readonly sessionAssignmentManager: SessionAssignmentManager,
     private readonly snapshotManager: SnapshotManager,
     private readonly eventTransport: RuntimeEventTransport,
+    private readonly workerManager: WorkerManager,
     private readonly workerPoolManager?: WorkerPoolManager
   ) {}
 
-  async reconcile(): Promise<SessionLifecycleReconcileOutcome> {
+  reconcile(): Promise<void> {
+    const run = this.reconcileTail.then(() => this.reconcileOnce());
+    this.reconcileTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  async drain(): Promise<void> {
+    for (;;) {
+      const tail = this.reconcileTail;
+      await tail;
+      if (tail === this.reconcileTail) {
+        return;
+      }
+    }
+  }
+
+  private async reconcileOnce(): Promise<void> {
+    // Establish this controller incarnation's report expectations before applying ordinary Worker TTL expiry.
+    // A surviving sidecar gets the full instance report window to prove itself with a fresh heartbeat.
     await this.workerPoolManager?.reconcile();
-    const workerCommands: SessionLifecycleReconcileOutcome['workerCommands'] = [];
+    await this.workerManager.expireWorkers();
+    await this.workerPoolManager?.reconcile();
+    const workerCommands: Array<WorkerCommandOutput<SessionPauseCommandPayload> | WorkerCommandOutput> = [];
     const sessions = await this.storage.readSessions();
     for (const session of sessions) {
       if (session.status === 'queued') {
@@ -44,7 +64,9 @@ export class SessionLifecycleReconciler {
       }
     }
     await this.workerPoolManager?.reconcile();
-    return { workerCommands };
+    for (const command of workerCommands) {
+      await this.eventTransport.publish({ kind: 'worker-commands', workerId: command.workerId }, command.event);
+    }
   }
 
   private async reconcileQueuedSession(session: SessionRecord): Promise<WorkerCommandOutput | undefined> {

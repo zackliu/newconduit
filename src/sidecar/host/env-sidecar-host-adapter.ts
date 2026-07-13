@@ -35,6 +35,7 @@ export class EnvSidecarHostAdapter implements SidecarHostAdapter {
       centralUrl,
       tenantId: this.env.TENANT_ID ?? 'poc',
       workerTypeId,
+      hostPoolInstanceId: this.env.HOST_POOL_INSTANCE_ID,
       labels: JSON.parse(labelsJson) as Record<string, string>,
       capacity,
       description: this.readDescription()
@@ -43,13 +44,11 @@ export class EnvSidecarHostAdapter implements SidecarHostAdapter {
 
   private readDescription(): Record<string, string> | undefined {
     const workerPoolId = this.env.WORKER_POOL_ID;
-    const workerPoolInstanceId = this.env.WORKER_POOL_INSTANCE_ID;
-    if (!workerPoolId && !workerPoolInstanceId) {
+    if (!workerPoolId) {
       return undefined;
     }
     return {
-      ...(workerPoolId ? { workerPoolId } : {}),
-      ...(workerPoolInstanceId ? { workerPoolInstanceId } : {})
+      workerPoolId
     };
   }
 }

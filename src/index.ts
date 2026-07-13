@@ -25,7 +25,7 @@ export {
 	WorkerSelector
 } from './central';
 export type { CentralHttpRouteHandler, CentralHttpServerOptions, JsonResponse } from './central';
-export type { AcceptInputOutcome, DockerHostPoolAdapterOptions, HostPoolAdapter, HostPoolScaleInInput, HostPoolScaleOutInput, HostPoolScaleOutResult, SessionAssignmentOutcome, StartSessionOutcome, TenantRuntimeOptions, WorkerCommandOutput, WorkerPoolManagerStatus } from './central';
+export type { AcceptInputOutcome, DockerHostPoolAdapterOptions, HostPoolAdapter, HostPoolEnsureRunningInput, HostPoolEnsureRunningResult, HostPoolEnsureStoppedInput, SessionAssignmentOutcome, StartSessionOutcome, TenantRuntimeOptions, WorkerCommandOutput, WorkerPoolManagerStatus } from './central';
 export { SystemClock } from './shared';
 export type {
 	AgentSpec,
