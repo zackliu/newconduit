@@ -1,17 +1,12 @@
 import type { AgentSpecRegistry } from '../../registries/agent-spec-registry';
-import type { CreateSessionRequest, InteractionKind, InteractionRespondedPayload, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionInteractionResponseCommandPayload, SessionPauseCommandPayload, SessionPauseRequestedPayload, SessionRecord, SessionResumeRequestedPayload, TenantContext, TurnFailedPayload } from '../../../shared';
+import type { CreateSessionRequest, InteractionKind, InteractionRequestedPayload, InteractionRespondedPayload, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeStorage, SessionInputCommandPayload, SessionInputRequest, SessionInteractionResponseCommandPayload, SessionPauseCommandPayload, SessionPauseRequestedPayload, SessionRecord, SessionResumeRequestedPayload, TenantContext, TurnFailedPayload } from '../../../shared';
 import { AgentSpecAdmissionManager } from '../admission/agent-spec-admission-manager';
 import { EventLogManager } from './event-log-manager';
-import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
+import type { WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
 import { SessionLifecycleReconciler } from './session-lifecycle-reconciler';
+import { SessionStartManager, type StartSessionOutcome } from './session-start-manager';
 import { SnapshotManager } from '../../persistence/snapshot-manager';
-
-export interface StartSessionOutcome {
-  session: SessionRecord;
-  sessionCreatedEvent: RuntimeEvent;
-  workerCommand?: WorkerCommandOutput;
-}
 
 export interface AcceptInputOutcome {
   session: SessionRecord;
@@ -42,6 +37,7 @@ export interface PauseSessionOutcome {
 export interface RespondInteractionOutcome {
   session: SessionRecord;
   interactionRespondedEvent: RuntimeEvent<InteractionRespondedPayload>;
+  routedInteractionRespondedEvent?: RuntimeEvent<InteractionRespondedPayload>;
   workerCommand?: WorkerCommandOutput<SessionInteractionResponseCommandPayload>;
 }
 
@@ -56,7 +52,7 @@ export class SessionManager {
     private readonly agentSpecAdmissionManager: AgentSpecAdmissionManager,
     private readonly sessionLifecycleManager: SessionLifecycleManager,
     private readonly eventLogManager: EventLogManager,
-    private readonly sessionAssignmentManager: SessionAssignmentManager,
+    private readonly sessionStartManager: SessionStartManager,
     private readonly snapshotManager: SnapshotManager,
     private readonly sessionLifecycleReconciler?: SessionLifecycleReconciler
   ) {}
@@ -68,12 +64,11 @@ export class SessionManager {
       tenantId: this.tenant.tenantId,
       owner: context.principal.principalId,
       resolvedAgentSpec,
-      nextTurnSeq: 2,
       workspaceRef: crypto.randomUUID()
     });
-    const event = await this.eventLogManager.append({
-      type: 'session.created',
-      actor: 'central',
+    return this.sessionStartManager.startCreatedSession({
+      session,
+      ackId,
       payload: {
         input: request.input,
         displayName: request.displayName,
@@ -82,31 +77,21 @@ export class SessionManager {
         workspace: request.workspace,
         status: 'queued',
         requestedBy: context.principal.principalId
-      },
-      ackId,
-      turnSeq: 1,
-      sequence: 1,
-      sessionId: session.sessionId
+      }
     });
-    const queuedSession = await this.sessionLifecycleManager.transitionAfterEvent(session, 'queued', event.sequence, event.timestamp, 'waiting-for-worker');
-    const assignment = await this.sessionAssignmentManager.assignReadyWorker(queuedSession);
-    if (!assignment.workerCommand) {
+  }
+
+  reconcileStartedSession(needsReconcile: boolean): void {
+    if (needsReconcile) {
       void this.sessionLifecycleReconciler?.reconcile().catch((error: unknown) => {
         console.error('session lifecycle reconcile after create failed', error);
       });
     }
-    return {
-      session: assignment.session,
-      sessionCreatedEvent: event,
-      workerCommand: assignment.workerCommand
-    };
   }
 
   async acceptInput(context: RequestContext, sessionId: string, ackId: string | undefined, request: SessionInputRequest): Promise<AcceptInputOutcome> {
     const session = await this.storage.readSession(sessionId);
-    if (!session) {
-      throw new Error(`session ${sessionId} was not found for input.received`);
-    }
+    this.assertPublicSession(session, context, sessionId);
     const allocation = await this.sessionLifecycleManager.allocateNextTurn(session);
     const event = await this.eventLogManager.append({
       type: 'input.accepted',
@@ -185,6 +170,10 @@ export class SessionManager {
           sessions: sessions
             .filter((session) => session.owner === context.principal.principalId)
             .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+            .map((session) => ({
+              ...session,
+              ...(session.delegationBinding ? { parentSessionId: session.delegationBinding.parentSessionId } : {})
+            }))
         }
       }
     };
@@ -192,9 +181,7 @@ export class SessionManager {
 
   async readSessionEvents(context: RequestContext, sessionId: string, ackId: string | undefined, afterSequence: number): Promise<ReadSessionEventsOutcome> {
     const session = await this.storage.readSession(sessionId);
-    if (!session || session.owner !== context.principal.principalId) {
-      throw new Error(`session ${sessionId} was not found`);
-    }
+    this.assertPublicSession(session, context, sessionId);
     return {
       responseEvent: {
         eventId: crypto.randomUUID(),
@@ -213,9 +200,7 @@ export class SessionManager {
 
   async pauseSession(context: RequestContext, sessionId: string, ackId: string | undefined): Promise<PauseSessionOutcome> {
     const session = await this.storage.readSession(sessionId);
-    if (!session || session.owner !== context.principal.principalId) {
-      throw new Error(`session ${sessionId} was not found`);
-    }
+    this.assertPublicSession(session, context, sessionId);
     if (session.status !== 'running') {
       throw new Error(`session ${sessionId} is not running`);
     }
@@ -261,9 +246,7 @@ export class SessionManager {
 
   async resumeSession(context: RequestContext, sessionId: string, ackId: string | undefined): Promise<ResumeSessionOutcome> {
     const session = await this.storage.readSession(sessionId);
-    if (!session || session.owner !== context.principal.principalId) {
-      throw new Error(`session ${sessionId} was not found`);
-    }
+    this.assertPublicSession(session, context, sessionId);
     if (session.status !== 'paused') {
       throw new Error(`session ${sessionId} is not paused`);
     }
@@ -284,16 +267,92 @@ export class SessionManager {
     };
   }
 
+  async pauseDelegatedSession(sessionId: string): Promise<PauseSessionOutcome | undefined> {
+    const session = await this.requireDelegatedSession(sessionId);
+    if (session.status === 'paused' || session.status === 'pausing') {
+      return undefined;
+    }
+    if (session.status !== 'running' || !session.currentWorkerId || !session.sessionLeaseId) {
+      throw new Error(`delegated Session ${sessionId} cannot pause from ${session.status}`);
+    }
+    const event = await this.eventLogManager.append<SessionPauseRequestedPayload>({
+      type: 'session.pause.requested',
+      actor: 'central',
+      payload: { reason: 'parent_terminal' },
+      sequence: session.eventCursor + 1,
+      sessionId,
+      workerId: session.currentWorkerId,
+      sessionLeaseId: session.sessionLeaseId
+    });
+    const pausing = await this.sessionLifecycleManager.transitionAfterEvent(session, 'pausing', event.sequence, event.timestamp, 'parent_terminal');
+    return {
+      session: pausing,
+      pauseRequestedEvent: event,
+      workerCommand: {
+        workerId: session.currentWorkerId,
+        event: {
+          eventId: crypto.randomUUID(),
+          sessionId,
+          workerId: session.currentWorkerId,
+          sequence: event.sequence,
+          type: 'session.pause.requested',
+          timestamp: event.timestamp,
+          actor: 'central',
+          sessionLeaseId: session.sessionLeaseId,
+          payload: {
+            sessionId,
+            workerId: session.currentWorkerId,
+            sessionLeaseId: session.sessionLeaseId,
+            reason: 'parent_terminal',
+            capture: this.snapshotManager.planCapture(session)
+          }
+        }
+      }
+    };
+  }
+
+  async resumeDelegatedSession(sessionId: string): Promise<ResumeSessionOutcome | undefined> {
+    const session = await this.requireDelegatedSession(sessionId);
+    if (session.status === 'queued' || session.status === 'starting' || session.status === 'running' || session.status === 'resuming') {
+      return undefined;
+    }
+    if (session.status !== 'paused') {
+      throw new Error(`delegated Session ${sessionId} cannot resume from ${session.status}`);
+    }
+    const event = await this.eventLogManager.append<SessionResumeRequestedPayload>({
+      type: 'session.resume.requested',
+      actor: 'central',
+      payload: { reason: 'delegation_call' },
+      sequence: session.eventCursor + 1,
+      sessionId
+    });
+    const queued = await this.sessionLifecycleManager.transitionAfterEvent(session, 'queued', event.sequence, event.timestamp, 'delegation_call');
+    await this.sessionLifecycleReconciler?.reconcile();
+    return {
+      session: await this.storage.readSession(sessionId) ?? queued,
+      resumeRequestedEvent: event
+    };
+  }
+
   async respondInteraction(context: RequestContext, sessionId: string, ackId: string | undefined, request: InteractionRespondRequestPayload): Promise<RespondInteractionOutcome> {
     const session = await this.storage.readSession(sessionId);
-    if (!session || session.owner !== context.principal.principalId) {
-      throw new Error(`session ${sessionId} was not found`);
-    }
+    this.assertPublicSession(session, context, sessionId);
     const open = (session.openInteractions ?? []).find((entry) => entry.interactionId === request.interactionId);
     if (!open) {
       throw new Error(`interaction ${request.interactionId} is not open for session ${sessionId}`);
     }
-    const response = this.buildInteractionResponse(open.kind, request);
+    const targetSession = open.delegatedRoute
+      ? await this.requireDelegatedInteractionTarget(session, open.delegatedRoute.childSessionId, open.delegatedRoute.childInteractionId)
+      : session;
+    const targetInteractionId = open.delegatedRoute?.childInteractionId ?? open.interactionId;
+    const targetOpen = (targetSession.openInteractions ?? []).find((entry) => entry.interactionId === targetInteractionId);
+    if (!targetOpen) {
+      throw new Error(`interaction ${targetInteractionId} is not open for session ${targetSession.sessionId}`);
+    }
+    if (open.delegatedRoute && (!targetSession.currentWorkerId || !targetSession.sessionLeaseId)) {
+      throw new Error(`delegated Session ${targetSession.sessionId} has no current worker for interaction response`);
+    }
+    const response = this.buildInteractionResponse(targetOpen.kind, request);
     const event = await this.eventLogManager.append<InteractionRespondedPayload>({
       type: 'interaction.responded',
       actor: 'client',
@@ -307,31 +366,85 @@ export class SessionManager {
     });
     const advanced = await this.sessionLifecycleManager.advanceEventCursor(session, event.sequence);
     const removed = await this.sessionLifecycleManager.removeOpenInteraction(advanced, open.interactionId);
-    const workerCommand = removed.currentWorkerId && removed.sessionLeaseId
+    let routedInteractionRespondedEvent: RuntimeEvent<InteractionRespondedPayload> | undefined;
+    let routedTarget = targetSession;
+    if (open.delegatedRoute) {
+      routedInteractionRespondedEvent = await this.eventLogManager.append<InteractionRespondedPayload>({
+        type: 'interaction.responded',
+        actor: 'client',
+        payload: { interactionId: targetOpen.interactionId, kind: targetOpen.kind, response },
+        turnSeq: targetOpen.turnSeq,
+        sequence: targetSession.eventCursor + 1,
+        sessionId: targetSession.sessionId,
+        workerId: targetSession.currentWorkerId,
+        sessionLeaseId: targetSession.sessionLeaseId
+      });
+      const advancedTarget = await this.sessionLifecycleManager.advanceEventCursor(targetSession, routedInteractionRespondedEvent.sequence);
+      routedTarget = await this.sessionLifecycleManager.removeOpenInteraction(advancedTarget, targetOpen.interactionId);
+    }
+    const workerCommand = routedTarget.currentWorkerId && routedTarget.sessionLeaseId
       ? {
-          workerId: removed.currentWorkerId,
+          workerId: routedTarget.currentWorkerId,
           event: {
             eventId: crypto.randomUUID(),
-            sessionId,
-            workerId: removed.currentWorkerId,
-            turnSeq: open.turnSeq,
-            sequence: event.sequence,
+            sessionId: routedTarget.sessionId,
+            workerId: routedTarget.currentWorkerId,
+            turnSeq: targetOpen.turnSeq,
+            sequence: routedInteractionRespondedEvent?.sequence ?? event.sequence,
             type: 'session.interaction.response' as const,
-            timestamp: event.timestamp,
+            timestamp: routedInteractionRespondedEvent?.timestamp ?? event.timestamp,
             actor: 'central' as const,
-            sessionLeaseId: removed.sessionLeaseId,
+            sessionLeaseId: routedTarget.sessionLeaseId,
             payload: {
-              sessionId,
-              workerId: removed.currentWorkerId,
-              sessionLeaseId: removed.sessionLeaseId,
-              interactionId: open.interactionId,
-              kind: open.kind,
+              sessionId: routedTarget.sessionId,
+              workerId: routedTarget.currentWorkerId,
+              sessionLeaseId: routedTarget.sessionLeaseId,
+              interactionId: targetOpen.interactionId,
+              kind: targetOpen.kind,
               response
             }
           }
         }
       : undefined;
-    return { session: removed, interactionRespondedEvent: event, workerCommand };
+    return { session: removed, interactionRespondedEvent: event, routedInteractionRespondedEvent, workerCommand };
+  }
+
+  async projectDelegatedInteraction(input: {
+    parentSessionId: string;
+    childSessionId: string;
+    callerTurnSeq: number;
+    interaction: InteractionRequestedPayload;
+    requestedAt: string;
+  }): Promise<RuntimeEvent<InteractionRequestedPayload>> {
+    const parent = await this.storage.readSession(input.parentSessionId);
+    if (!parent) {
+      throw new Error(`Parent Session ${input.parentSessionId} was not found`);
+    }
+    const child = await this.requireDelegatedInteractionTarget(parent, input.childSessionId, input.interaction.interactionId);
+    const childOpen = (child.openInteractions ?? []).find((entry) => entry.interactionId === input.interaction.interactionId);
+    if (!childOpen) {
+      throw new Error(`interaction ${input.interaction.interactionId} is not open for delegated Session ${child.sessionId}`);
+    }
+    const event = await this.eventLogManager.append<InteractionRequestedPayload>({
+      type: 'interaction.requested',
+      actor: 'central',
+      payload: input.interaction,
+      turnSeq: input.callerTurnSeq,
+      sequence: parent.eventCursor + 1,
+      sessionId: parent.sessionId
+    });
+    const advanced = await this.sessionLifecycleManager.advanceEventCursor(parent, event.sequence);
+    await this.sessionLifecycleManager.addOpenInteraction(advanced, {
+      interactionId: input.interaction.interactionId,
+      kind: input.interaction.kind,
+      turnSeq: input.callerTurnSeq,
+      requestedAt: input.requestedAt,
+      delegatedRoute: {
+        childSessionId: child.sessionId,
+        childInteractionId: childOpen.interactionId
+      }
+    });
+    return event;
   }
 
   private buildInteractionResponse(kind: InteractionKind, request: InteractionRespondRequestPayload): unknown {
@@ -341,5 +454,32 @@ export class SessionManager {
       return { decision, scope };
     }
     return { result: request.result };
+  }
+
+  private assertPublicSession(session: SessionRecord | undefined, context: RequestContext, sessionId: string): asserts session is SessionRecord {
+    if (!session || session.owner !== context.principal.principalId) {
+      throw new Error(`session ${sessionId} was not found`);
+    }
+  }
+
+  private async requireDelegatedSession(sessionId: string): Promise<SessionRecord> {
+    const session = await this.storage.readSession(sessionId);
+    if (!session?.delegationBinding) {
+      throw new Error(`delegated Session ${sessionId} was not found`);
+    }
+    return session;
+  }
+
+  private async requireDelegatedInteractionTarget(parent: SessionRecord | undefined, childSessionId: string, interactionId: string): Promise<SessionRecord> {
+    if (!parent) {
+      throw new Error('Parent Session was not found');
+    }
+    const child = await this.storage.readSession(childSessionId);
+    if (!child?.delegationBinding
+      || child.delegationBinding.parentSessionId !== parent.sessionId
+      || child.owner !== parent.owner) {
+      throw new Error(`delegated interaction ${interactionId} does not belong to Parent Session ${parent.sessionId}`);
+    }
+    return child;
   }
 }

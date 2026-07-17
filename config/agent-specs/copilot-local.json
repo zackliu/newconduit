@@ -8,7 +8,12 @@
     "command": "copilot",
     "args": []
   },
+  "instructions": "Complete the user's task using the available local workspace and tools.",
   "toolProfile": "copilot-poc-tools",
+  "delegateRefs": {
+    "asCaller": [],
+    "asCallee": []
+  },
   "workerSelector": {
     "matchLabels": {
       "agent": "local",

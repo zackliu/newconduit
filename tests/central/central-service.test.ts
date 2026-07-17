@@ -161,6 +161,7 @@ test('scenario: session list and history queries use runtime request acknowledge
     await transport.publish({ kind: 'tenant-inbox' }, createRequest, context);
     const created = acknowledgements.find((event) => event.ackId === 'ack-create-query-session');
     assert.equal(created?.type, 'session.created.ack');
+    assert.equal(typeof created?.eventId, 'string');
     assert.equal(typeof created?.sessionId, 'string');
     assert.deepEqual(clientProjections.map((event) => event.type), ['session.catalog.updated']);
 

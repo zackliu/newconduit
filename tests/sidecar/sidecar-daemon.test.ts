@@ -11,8 +11,8 @@ import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '..
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { DockerWorkspaceAdapter } from '../../src/sidecar/adapters';
 import { SidecarDaemon } from '../../src/sidecar/sidecar-daemon';
-import type { RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SnapshotPartName, WorkerRegisterPayload } from '../../src/shared';
-import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceHandles, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
+import type { RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeEventTransport, RuntimeSubscription, SessionAssignPayload, SnapshotPartName, WorkerRegisterPayload } from '../../src/shared';
+import type { SidecarAgentProcessAdapter, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarInteractionResponseInput, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceCaptureInput, SidecarWorkspaceHandles, SidecarWorkspaceMount, SidecarWorkspaceRestoreInput } from '../../src/sidecar/contracts';
 
 class SidecarInMemoryTransport implements SidecarRuntimeTransport {
   constructor(private readonly transport: RuntimeEventTransport, readonly publishedEvents: RuntimeEvent[] = []) {}
@@ -130,6 +130,35 @@ class ToolUsingAgentProcessAdapter implements SidecarAgentProcessAdapter {
   }
 }
 
+class RuntimeToolAgentProcessAdapter implements SidecarAgentProcessAdapter {
+  private resolveResponse!: (response: unknown) => void;
+  readonly responseReceived = new Promise<unknown>((resolve) => {
+    this.resolveResponse = resolve;
+  });
+
+  async start(): Promise<void> {}
+
+  async send(_input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult> {
+    await emit({
+      type: 'interaction',
+      payload: {
+        interactionId: 'runtime-request-1',
+        kind: 'tool_call',
+        request: {
+          toolName: 'copilot_foundry',
+          arguments: { message: 'What is 2 + 2?' }
+        }
+      }
+    });
+    const response = await this.responseReceived;
+    return { output: response };
+  }
+
+  async respondToInteraction(input: SidecarInteractionResponseInput): Promise<void> {
+    this.resolveResponse(input.response);
+  }
+}
+
 test('scenario: same session supports multi-turn Copilot exchange', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-slice5-loop-'));
   try {
@@ -175,21 +204,23 @@ test('scenario: same session supports multi-turn Copilot exchange', async () => 
       'session.created',
       'status.changed',
       'input.accepted',
+      'worker.command.accepted',
       'agent.output',
       'turn.completed',
       'input.accepted',
+      'worker.command.accepted',
       'agent.output',
       'turn.completed'
     ]);
     assert.equal((events[1].payload as { status?: string }).status, 'running');
-    assert.equal(events[3].turnSeq, 2);
-    assert.equal((events[3].payload as { message?: string }).message, 'reply:first');
     assert.equal(events[4].turnSeq, 2);
-    assert.deepEqual(events[4].payload, { result: { message: 'reply:first', output: { echoed: 'first' } } });
-    assert.equal(events[6].turnSeq, 3);
-    assert.equal((events[6].payload as { message?: string }).message, 'reply:second');
-    assert.equal(events[7].turnSeq, 3);
-    assert.deepEqual(events[7].payload, { result: { message: 'reply:second', output: { echoed: 'second' } } });
+    assert.equal((events[4].payload as { message?: string }).message, 'reply:first');
+    assert.equal(events[5].turnSeq, 2);
+    assert.deepEqual(events[5].payload, { result: { message: 'reply:first', output: { echoed: 'first' } } });
+    assert.equal(events[8].turnSeq, 3);
+    assert.equal((events[8].payload as { message?: string }).message, 'reply:second');
+    assert.equal(events[9].turnSeq, 3);
+    assert.deepEqual(events[9].payload, { result: { message: 'reply:second', output: { echoed: 'second' } } });
 
     await sidecar.handleWorkerCommand(sessionInputCommandEvent({ sessionId: session.sessionId, workerId: worker.workerId, sessionLeaseId: 'stale-lease', turnSeq: 4, message: 'stale' }));
     const eventsAfterRejection = await storage.readEvents(session.sessionId, 0);
@@ -202,7 +233,7 @@ test('scenario: same session supports multi-turn Copilot exchange', async () => 
     });
 
     const updatedSession = await storage.readSession(session.sessionId);
-    assert.equal(updatedSession?.eventCursor, 9);
+    assert.equal(updatedSession?.eventCursor, 11);
     assert.equal(updatedSession?.nextTurnSeq, 4);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -232,6 +263,71 @@ test('scenario: stale worker command cannot reach Copilot runtime', async () => 
     expectedSessionLeaseId: 'lease-2',
     receivedSessionLeaseId: 'lease-1'
   });
+});
+
+test('scenario: duplicate session input is accepted once and never executes a second turn', async () => {
+  const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+  const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
+  const agentProcessAdapter = new DeterministicAgentProcessAdapter();
+  const sidecar = new SidecarDaemon({ runtimeTransport: sidecarTransport, workspaceAdapter: new PassthroughWorkspaceAdapter(), agentProcessAdapter });
+  await sidecar.handleWorkerCommand(sessionAssignEvent({ sessionLeaseId: 'lease-2' }));
+  const input = sessionInputCommandEvent({ sessionLeaseId: 'lease-2', turnSeq: 4, message: 'once' });
+
+  await sidecar.handleWorkerCommand(input);
+  await sidecar.handleWorkerCommand(input);
+
+  assert.equal(agentProcessAdapter.sends.length, 1);
+  const accepted = sidecarTransport.publishedEvents.filter((event) => event.type === 'worker.command.accepted');
+  assert.equal(accepted.length, 2);
+  assert.deepEqual(accepted[0].payload, { commandEventId: input.eventId, turnSeq: 4 });
+
+  await sidecar.handleWorkerCommand(sessionInputCommandEvent({ sessionLeaseId: 'lease-2', turnSeq: 4, message: 'different', eventId: 'evt-conflict' }));
+  assert.equal(agentProcessAdapter.sends.length, 1);
+  assert.equal((sidecarTransport.publishedEvents.at(-1)?.payload as { reason?: string }).reason, 'turn_input_conflict');
+});
+
+test('scenario: Central-defined runtime tool is forwarded generically and resolves its pending tool request', async () => {
+  const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+  const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
+  const agentProcessAdapter = new RuntimeToolAgentProcessAdapter();
+  const sidecar = new SidecarDaemon({ runtimeTransport: sidecarTransport, workspaceAdapter: new PassthroughWorkspaceAdapter(), agentProcessAdapter });
+  const assign = sessionAssignEvent({ sessionLeaseId: 'lease-2' });
+  (assign.payload as SessionAssignPayload).resolvedAgentSpec.runtimeTools = [{
+    name: 'copilot_foundry',
+    description: 'Ask copilot-foundry.',
+    inputSchema: { type: 'object', required: ['message'], properties: { message: { type: 'string' } } },
+    binding: { kind: 'delegate', delegateId: 'copilot-foundry' }
+  }];
+  await sidecar.handleWorkerCommand(assign);
+  const input = sessionInputCommandEvent({ sessionLeaseId: 'lease-2', turnSeq: 4, message: 'delegate' });
+
+  await sidecar.handleWorkerCommand(input);
+  const requested = sidecarTransport.publishedEvents.find((event) => event.type === 'runtime.tool.requested');
+  assert.deepEqual(requested?.payload, {
+    requestId: 'runtime-request-1',
+    toolName: 'copilot_foundry',
+    input: { message: 'What is 2 + 2?' }
+  });
+
+  await sidecar.handleWorkerCommand({
+    eventId: 'response-1',
+    sessionId: 'session-1',
+    workerId: 'worker-1',
+    turnSeq: 4,
+    sequence: 2,
+    type: 'session.runtime.tool.response',
+    timestamp: new Date().toISOString(),
+    actor: 'central',
+    sessionLeaseId: 'lease-2',
+    payload: {
+      sessionId: 'session-1',
+      workerId: 'worker-1',
+      sessionLeaseId: 'lease-2',
+      requestId: 'runtime-request-1',
+      result: '4'
+    }
+  });
+  assert.deepEqual(await agentProcessAdapter.responseReceived, { result: '4' });
 });
 
 test('scenario: input arriving during Copilot startup waits for the assigned session', async () => {
@@ -459,11 +555,11 @@ function sessionAssignEvent(input: { sessionLeaseId: string }): RuntimeEvent {
   };
 }
 
-function sessionInputCommandEvent(input: { sessionLeaseId: string; turnSeq: number; message: string; sessionId?: string; workerId?: string }): RuntimeEvent {
+function sessionInputCommandEvent(input: { sessionLeaseId: string; turnSeq: number; message: string; sessionId?: string; workerId?: string; eventId?: string }): RuntimeEvent {
   const sessionId = input.sessionId ?? 'session-1';
   const workerId = input.workerId ?? 'worker-1';
   return {
-    eventId: 'evt-session-input',
+    eventId: input.eventId ?? 'evt-session-input',
     sessionId,
     workerId,
     turnSeq: input.turnSeq,

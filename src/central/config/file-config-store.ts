@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import type { AgentSpec, WorkerPoolRecord } from '../../shared';
+import { isAbsolute, join, relative, resolve } from 'node:path';
+import type { AgentSpec, Delegate, WorkerPoolRecord } from '../../shared';
 
 /**
  * A WorkerPool config document declares the pool shape a tenant can scale. The runtime tenant binding
@@ -48,6 +48,10 @@ export class FileConfigStore {
     return this.readJsonDir<AgentSpec>('agent-specs');
   }
 
+  loadDelegates(): Delegate[] {
+    return this.readJsonDir<Delegate>('delegates');
+  }
+
   loadWorkerPools(binding: WorkerPoolBinding): WorkerPoolRecord[] {
     const controllerCentralUrls = this.hostPoolControllerCentralUrls();
     return this.readJsonDir<WorkerPoolConfig>('worker-pools').map((pool) => ({
@@ -82,6 +86,15 @@ export class FileConfigStore {
       .filter((entry) => entry.endsWith('.json'))
       .sort()
       .map((entry) => JSON.parse(readFileSync(join(directory, entry), 'utf8')) as T);
+  }
+
+  private readJsonDocument<T>(reference: string): T {
+    const path = resolve(this.dir, reference);
+    const pathFromRoot = relative(this.dir, path);
+    if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
+      throw new Error(`config reference must stay within config root: ${reference}`);
+    }
+    return JSON.parse(readFileSync(path, 'utf8')) as T;
   }
 }
 

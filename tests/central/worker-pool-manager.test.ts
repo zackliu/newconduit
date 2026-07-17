@@ -181,6 +181,48 @@ test('scenario: a no-reuse pool pins each instance to its session and retains th
   }, { reuse: false });
 });
 
+test('scenario: scale-in rechecks a Worker that became busy after the idle snapshot', async () => {
+  await withRuntime(async ({ central, storage, clock, adapter }) => {
+    const instance = {
+      ...restartInstance('assignment-race-instance', 'assignment-race-worker'),
+      controllerEpoch: 'test-controller',
+      idleSince: '2026-06-25T00:00:00.000Z'
+    };
+    const worker = restartWorker(instance, {
+      heartbeatAt: '2026-06-25T00:00:05.000Z',
+      expiresAt: '2026-06-25T00:01:00.000Z'
+    });
+    await storage.writeHostPoolInstance(instance);
+    await storage.writeWorker(worker);
+
+    const readHostPoolInstances = storage.readHostPoolInstances.bind(storage);
+    let readCount = 0;
+    storage.readHostPoolInstances = async () => {
+      const instances = await readHostPoolInstances();
+      readCount += 1;
+      if (readCount === 3) {
+        await storage.writeWorker({
+          ...worker,
+          allocatable: 0,
+          conditions: ['busy'],
+          currentSessionCount: 1,
+          updatedAt: clock.now()
+        });
+      }
+      return instances;
+    };
+
+    clock.set('2026-06-25T00:00:10.000Z');
+    await central.reconcileSessionsForTenant('poc');
+
+    assert.equal(adapter.ensureStoppedInputs.length, 0);
+    const preserved = await storage.readHostPoolInstance(instance.instanceId);
+    assert.equal(preserved?.state, 'ready');
+    assert.equal(preserved?.idleSince, undefined);
+    assert.deepEqual((await storage.readWorker(worker.workerId))?.conditions, ['busy']);
+  });
+});
+
 test('scenario: central restart re-arms a ready instance until the same Worker sends a fresh report', async () => {
   await withRuntime(async ({ central, storage, transport, clock, adapter }) => {
     const instance = restartInstance('restart-instance', 'restart-worker');
@@ -288,6 +330,42 @@ test('scenario: two fresh Worker lifetimes for one host attempt are fenced as sp
     assert.equal((await storage.readWorker(first.workerId))?.lifecycleState, 'expired');
     assert.equal((await storage.readWorker(second.workerId))?.lifecycleState, 'expired');
     assert.equal(adapter.ensureStoppedInputs.length, 1);
+  });
+});
+
+test('scenario: a ready host instance is never stopped when its worker record is absent', async () => {
+  await withRuntime(async ({ central, storage, clock, adapter }) => {
+    await storage.writeHostPoolInstance(readyInstance('ghost-instance', 'ghost-worker'));
+    // No worker record exists for the instance's currentWorkerId. Absence is a storage-invariant violation, not
+    // evidence the worker died, so the (possibly still-live) host must not be destroyed.
+    clock.set('2026-06-25T00:00:10.000Z');
+
+    await central.reconcileSessionsForTenant('poc');
+
+    assert.equal(adapter.ensureStoppedInputs.length, 0);
+    const preserved = await storage.readHostPoolInstance('ghost-instance');
+    assert.equal(preserved?.state, 'ready');
+    assert.equal(preserved?.currentWorkerId, 'ghost-worker');
+  });
+});
+
+test('scenario: a ready host instance is stopped only when its worker durably reached a terminal state', async () => {
+  await withRuntime(async ({ central, storage, clock, adapter }) => {
+    const instance = readyInstance('terminal-instance', 'terminal-worker');
+    await storage.writeHostPoolInstance(instance);
+    await storage.writeWorker(restartWorker(instance, {
+      lifecycleState: 'expired',
+      conditions: ['disconnected'],
+      terminalReason: 'worker_keepalive_expired'
+    }));
+    clock.set('2026-06-25T00:00:10.000Z');
+
+    await central.reconcileSessionsForTenant('poc');
+
+    assert.equal(adapter.ensureStoppedInputs.length, 1);
+    const stopped = await storage.readHostPoolInstance('terminal-instance');
+    assert.equal(stopped?.state, 'failed');
+    assert.equal(stopped?.failureReason, 'current_worker_lost');
   });
 });
 
@@ -409,6 +487,10 @@ function restartInstance(instanceId: string, currentWorkerId: string): HostPoolI
     createdAt: '2026-06-24T23:59:00.000Z',
     updatedAt: '2026-06-24T23:59:05.000Z'
   };
+}
+
+function readyInstance(instanceId: string, currentWorkerId: string): HostPoolInstanceRecord {
+  return { ...restartInstance(instanceId, currentWorkerId), controllerEpoch: 'test-controller' };
 }
 
 function restartWorker(instance: HostPoolInstanceRecord, overrides: Partial<WorkerRecord> = {}): WorkerRecord {

@@ -1,4 +1,4 @@
-import type { Clock, ResolvedAgentSpec, RuntimeStorage, SessionRecord, SessionStatus } from '../../../shared';
+import type { Clock, ResolvedAgentSpec, RuntimeStorage, SessionDelegationBinding, SessionRecord, SessionStatus } from '../../../shared';
 import type { OpenInteraction } from '../../../shared';
 
 /**
@@ -7,23 +7,32 @@ import type { OpenInteraction } from '../../../shared';
 export class SessionLifecycleManager {
   constructor(private readonly storage: RuntimeStorage, private readonly clock: Clock) {}
 
-  async create(input: { tenantId: string; owner: string; resolvedAgentSpec: ResolvedAgentSpec; workspaceRef: string; nextTurnSeq: number }): Promise<SessionRecord> {
+  async create(input: { sessionId?: string; tenantId: string; owner: string; resolvedAgentSpec: ResolvedAgentSpec; workspaceRef: string; delegationBinding?: SessionDelegationBinding }): Promise<SessionRecord> {
     const now = this.clock.now();
     const session: SessionRecord = {
-      sessionId: crypto.randomUUID(),
+      sessionId: input.sessionId ?? crypto.randomUUID(),
       tenantId: input.tenantId,
       owner: input.owner,
       resolvedAgentSpec: input.resolvedAgentSpec,
+      delegationBinding: input.delegationBinding,
       status: 'created',
       eventCursor: 0,
-      nextTurnSeq: input.nextTurnSeq,
+      nextTurnSeq: 1,
       workspaceRef: input.workspaceRef,
       lastEventUpdatedAt: now,
       createdAt: now,
       updatedAt: now
     };
-    await this.storage.writeSession(session);
-    return session;
+    const created = await this.storage.createSession(session);
+    const actual = created.session;
+    if (actual.tenantId !== input.tenantId
+      || actual.owner !== input.owner
+      || actual.resolvedAgentSpec.digest !== input.resolvedAgentSpec.digest
+      || actual.workspaceRef !== input.workspaceRef
+      || JSON.stringify(actual.delegationBinding) !== JSON.stringify(input.delegationBinding)) {
+      throw new Error(`session ${session.sessionId} exists with a different create intent`);
+    }
+    return actual;
   }
 
   async transition(session: SessionRecord, status: SessionStatus, reason?: string): Promise<SessionRecord> {
@@ -59,6 +68,23 @@ export class SessionLifecycleManager {
     const next = { ...session, nextTurnSeq: turnSeq + 1, updatedAt: this.clock.now() };
     await this.storage.writeSession(next);
     return { session: next, turnSeq };
+  }
+
+  async acceptTurnAfterEvent(session: SessionRecord, turnSeq: number, sequence: number, timestamp: string, status: Extract<SessionStatus, 'queued' | 'running'>, reason?: string): Promise<SessionRecord> {
+    if (session.nextTurnSeq !== turnSeq) {
+      throw new Error(`session ${session.sessionId} expected turn ${session.nextTurnSeq}, received ${turnSeq}`);
+    }
+    const next: SessionRecord = {
+      ...session,
+      status,
+      lifecycleReason: reason,
+      nextTurnSeq: turnSeq + 1,
+      eventCursor: sequence,
+      lastEventUpdatedAt: timestamp,
+      updatedAt: this.clock.now()
+    };
+    await this.storage.writeSession(next);
+    return next;
   }
 
   async advanceEventCursor(session: SessionRecord, sequence: number): Promise<SessionRecord> {

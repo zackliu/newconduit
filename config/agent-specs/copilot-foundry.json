@@ -8,7 +8,12 @@
     "command": "copilot",
     "args": []
   },
+  "instructions": "Complete the user's task using the available workspace and tools.",
   "toolProfile": "copilot-poc-tools",
+  "delegateRefs": {
+    "asCaller": [],
+    "asCallee": ["copilot-foundry"]
+  },
   "workerSelector": {
     "matchLabels": {
       "agent": "copilot",

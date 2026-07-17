@@ -14,6 +14,7 @@ export interface RuntimeConnectionGrant {
 
 export interface SessionSummary {
   sessionId: string;
+  parentSessionId?: string;
   status: SessionStatus;
   agentSpecId: string;
   owner: string;

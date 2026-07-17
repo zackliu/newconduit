@@ -1,6 +1,7 @@
 import type { RequestContext, RuntimeEvent, RuntimeEventTransport } from '../../shared';
 import { AgentRuntimeEventController } from './agent-runtime-event-controller';
 import { ClientRuntimeEventController } from './client-runtime-event-controller';
+import { DelegationRuntimeEventController } from './delegation-runtime-event-controller';
 import { WorkerRuntimeEventController } from './worker-runtime-event-controller';
 
 /**
@@ -11,6 +12,7 @@ export class TenantInboxController {
     private readonly tenantId: string,
     private readonly workerRuntimeEventController: WorkerRuntimeEventController,
     private readonly agentRuntimeEventController: AgentRuntimeEventController,
+    private readonly delegationRuntimeEventController: DelegationRuntimeEventController | undefined,
     private readonly clientRuntimeEventController: ClientRuntimeEventController,
     private readonly eventTransport: RuntimeEventTransport
   ) {}
@@ -21,7 +23,11 @@ export class TenantInboxController {
       if (workerOutcome.handled) {
         return;
       }
+      if (await this.delegationRuntimeEventController?.handleRuntimeEvent(event)) {
+        return;
+      }
       if (await this.agentRuntimeEventController.handleRuntimeEvent(event)) {
+        await this.delegationRuntimeEventController?.observeAgentEvent(event);
         return;
       }
       await this.clientRuntimeEventController.handleRuntimeEvent(context, event);
@@ -33,5 +39,6 @@ export class TenantInboxController {
 
   async reconcileSessions(): Promise<void> {
     await this.workerRuntimeEventController.reconcileSessions();
+    await this.delegationRuntimeEventController?.reconcilePendingAwaitResponses();
   }
 }

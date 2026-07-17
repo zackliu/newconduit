@@ -118,6 +118,7 @@ const state = {
   selectedAgentSpecId: localStorage.getItem('ars.sample.agentSpecId') ?? 'copilot-poc',
   agentSpecDialogOpen: false,
   sessions: [] as SessionSummary[],
+  collapsedSessions: new Set<string>(),
   runtimeStatus: { workerPools: [], hostPoolInstances: [], workers: [], agentSpecs: [] } as RuntimeStatus,
   turns: new Map<number, ConversationTurn>(),
   traceEvents: [] as TraceEvent[],
@@ -182,15 +183,7 @@ function render(): void {
             <button id="newSessionButton" title="Start a new session">+</button>
           </div>
           <div class="sessionList">
-            ${state.sessions.map((session) => `
-              <button class="sessionItem ${state.currentSession?.id === session.sessionId ? 'active' : ''}" data-session-id="${escapeHtml(session.sessionId)}">
-                <span class="sessionItemTop">
-                  <span class="sessionStatus"><i class="dot ${escapeHtml(session.status)}"></i>${escapeHtml(session.status)}</span>
-                  <small>${escapeHtml(formatTime(session.updatedAt))}</small>
-                </span>
-                <span class="sessionItemSub">${escapeHtml(shortId(session.sessionId))} · ${escapeHtml(session.agentSpecId)}</span>
-              </button>
-            `).join('') || '<p class="empty">No sessions yet</p>'}
+            ${renderSessionTree()}
           </div>
         </section>
       </aside>
@@ -292,6 +285,20 @@ function wireEvents(): void {
       }
     });
   });
+  document.querySelectorAll<HTMLButtonElement>('.sessionToggle[data-toggle-session-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const sessionId = button.dataset.toggleSessionId;
+      if (!sessionId) {
+        return;
+      }
+      if (state.collapsedSessions.has(sessionId)) {
+        state.collapsedSessions.delete(sessionId);
+      } else {
+        state.collapsedSessions.add(sessionId);
+      }
+      scheduleRender();
+    });
+  });
   document.querySelectorAll<HTMLButtonElement>('.approvalButton').forEach((button) => {
     button.addEventListener('click', () => {
       const interactionId = button.dataset.interactionId;
@@ -326,6 +333,66 @@ function wireEvents(): void {
     localStorage.setItem('ars.sample.agentSpecId', state.selectedAgentSpecId);
     render();
   });
+}
+
+/**
+ * Sessions render as a tree so a Delegation-created child session sits under its parent.
+ * A session whose parentSessionId points at another session in the list becomes that
+ * session's indented child; roots are top-level sessions (or orphans whose parent is not
+ * currently loaded). Parents with children expose a collapse toggle.
+ */
+function renderSessionTree(): string {
+  if (state.sessions.length === 0) {
+    return '<p class="empty">No sessions yet</p>';
+  }
+  const knownIds = new Set(state.sessions.map((session) => session.sessionId));
+  const childrenByParent = new Map<string, SessionSummary[]>();
+  const roots: SessionSummary[] = [];
+  for (const session of state.sessions) {
+    const parentId = session.parentSessionId;
+    if (parentId && knownIds.has(parentId)) {
+      const bucket = childrenByParent.get(parentId) ?? [];
+      bucket.push(session);
+      childrenByParent.set(parentId, bucket);
+    } else {
+      roots.push(session);
+    }
+  }
+  return roots.map((session) => renderSessionNode(session, childrenByParent, true)).join('');
+}
+
+function renderSessionNode(session: SessionSummary, childrenByParent: Map<string, SessionSummary[]>, isRoot: boolean): string {
+  const children = childrenByParent.get(session.sessionId) ?? [];
+  const hasChildren = children.length > 0;
+  const collapsed = state.collapsedSessions.has(session.sessionId);
+  const isActive = state.currentSession?.id === session.sessionId;
+  const relation = hasChildren
+    ? `<span class="sessionItemRelation">${children.length} sub-session${children.length === 1 ? '' : 's'}</span>`
+    : isRoot && session.parentSessionId
+      ? `<span class="sessionItemRelation">↳ parent ${escapeHtml(shortId(session.parentSessionId))}</span>`
+      : '';
+  const toggle = hasChildren
+    ? `<button class="sessionToggle ${collapsed ? 'collapsed' : ''}" data-toggle-session-id="${escapeHtml(session.sessionId)}" aria-expanded="${collapsed ? 'false' : 'true'}" title="${collapsed ? 'Show sub-sessions' : 'Hide sub-sessions'}"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg></button>`
+    : '<span class="sessionToggle empty" aria-hidden="true"></span>';
+  const childBranch = hasChildren && !collapsed
+    ? `<div class="sessionChildren">${children.map((child) => renderSessionNode(child, childrenByParent, false)).join('')}</div>`
+    : '';
+  return `
+    <div class="sessionNode">
+      <div class="sessionRow">
+        ${toggle}
+        <button class="sessionItem ${isActive ? 'active' : ''}" data-session-id="${escapeHtml(session.sessionId)}">
+          <span class="sessionItemTop">
+            <span class="sessionStatus"><i class="dot ${escapeHtml(session.status)}"></i>${escapeHtml(session.status)}</span>
+            <small>${escapeHtml(formatTime(session.updatedAt))}</small>
+          </span>
+          <span class="sessionItemSub">${escapeHtml(shortId(session.sessionId))} · ${escapeHtml(session.agentSpecId)}</span>
+          ${relation}
+        </button>
+      </div>
+      ${childBranch}
+    </div>
+  `;
 }
 
 function submitPrompt(): void {

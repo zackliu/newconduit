@@ -11,6 +11,8 @@ class FakeCopilotSession {
   readonly prompts: string[] = [];
   readonly permissionResponses: Array<{ requestId: string; result: unknown }> = [];
   readonly toolResponses: Array<{ requestId: string; result: unknown }> = [];
+  readonly scriptedEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+  private readonly handlers = new Set<(event: { type: string; data: Record<string, unknown> }) => void>();
   disconnected = false;
 
   readonly rpc = {
@@ -26,12 +28,18 @@ class FakeCopilotSession {
     }
   };
 
-  on(): () => void {
-    return () => undefined;
+  on(handler: (event: { type: string; data: Record<string, unknown> }) => void): () => void {
+    this.handlers.add(handler);
+    return () => this.handlers.delete(handler);
   }
 
   async sendAndWait(input: { prompt: string }): Promise<{ data: { content: string } }> {
     this.prompts.push(input.prompt);
+    for (const event of this.scriptedEvents) {
+      for (const handler of this.handlers) {
+        handler(event);
+      }
+    }
     return { data: { content: `copilot:${input.prompt}` } };
   }
 
@@ -118,9 +126,9 @@ test('scenario: Copilot provider env is passed to SDK with Azure Identity bearer
     assert.deepEqual(client.options.connection, { kind: 'tcp' });
     assert.equal(client.options.workingDirectory, 'workspace-path');
     assert.equal(client.options.baseDirectory, 'copilot-state-path');
-    const permissionHandler = client.createSessionOptions?.onPermissionRequest as (() => unknown) | undefined;
+    const permissionHandler = client.createSessionOptions?.onPermissionRequest as ((request: Record<string, unknown>) => unknown) | undefined;
     assert.equal(typeof permissionHandler, 'function');
-    assert.deepEqual(permissionHandler?.(), { kind: 'no-result' });
+    assert.deepEqual(permissionHandler?.({ kind: 'write', fileName: 'a.txt' }), { kind: 'no-result' });
     assert.deepEqual(requestedScopes, ['https://cognitiveservices.azure.com/.default']);
     assert.deepEqual({ ...client.createSessionOptions, onPermissionRequest: undefined }, {
       streaming: true,
@@ -133,6 +141,7 @@ test('scenario: Copilot provider env is passed to SDK with Azure Identity bearer
           apiVersion: '2024-12-01-preview'
         }
       },
+      systemMessage: { mode: 'append', content: 'Test agent instructions.' },
       onPermissionRequest: undefined
     });
     assert.deepEqual(client.session.prompts, ['hello']);
@@ -148,6 +157,84 @@ test('scenario: Copilot provider env is passed to SDK with Azure Identity bearer
     restoreEnv('COPILOT_PROVIDER_WIRE_API', originalCopilotProviderWireApi);
     restoreEnv('COPILOT_PROVIDER_AZURE_API_VERSION', originalCopilotProviderAzureApiVersion);
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('scenario: Central-provided runtime tools are registered without Sidecar delegation semantics', async () => {
+  FakeCopilotClient.instances.length = 0;
+  const originalProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  delete process.env.COPILOT_PROVIDER_BASE_URL;
+  const adapter = new CopilotProcessAdapter(async () => ({
+    CopilotClient: FakeCopilotClient,
+    RuntimeConnection: {
+      forStdio: (input: { path: string }) => ({ kind: 'stdio', ...input }),
+      forTcp: (input?: { path?: string }) => ({ kind: 'tcp', ...input })
+    },
+    approveAll: async () => true
+  }));
+  const input = startInput();
+  input.resolvedAgentSpec.runtimeTools = [{
+    name: 'copilot_foundry',
+    description: 'Ask the copilot-foundry subagent.',
+    inputSchema: { type: 'object', required: ['message'], properties: { message: { type: 'string' } } },
+    binding: { kind: 'delegate', delegateId: 'copilot-foundry' }
+  }];
+
+  try {
+    await adapter.start(input);
+    const [client] = FakeCopilotClient.instances;
+    const tools = client.createSessionOptions?.tools as Array<{ name: string; parameters: unknown }>;
+    assert.deepEqual(tools.map((tool) => tool.name), ['copilot_foundry']);
+    const permissionHandler = client.createSessionOptions?.onPermissionRequest as (request: Record<string, unknown>) => unknown;
+    assert.deepEqual(permissionHandler({ kind: 'custom-tool', toolName: 'copilot_foundry' }), { kind: 'approve-once' });
+    assert.deepEqual(permissionHandler({ kind: 'custom-tool', toolName: 'unregistered-tool' }), { kind: 'no-result' });
+    assert.deepEqual(permissionHandler({ kind: 'write', fileName: 'a.txt' }), { kind: 'no-result' });
+
+    client.session.scriptedEvents.push(
+      { type: 'permission.requested', data: { requestId: 'runtime-permission', permissionRequest: { kind: 'custom-tool', toolName: 'copilot_foundry' } } },
+      { type: 'permission.requested', data: { requestId: 'external-permission', permissionRequest: { kind: 'custom-tool', toolName: 'unregistered-tool' } } }
+    );
+    const emitted: Array<{ type: string }> = [];
+    await adapter.send({ sessionId: 'session-1', turnSeq: 1, message: 'delegate' }, async (event) => {
+      emitted.push(event);
+    });
+    assert.deepEqual(emitted.filter((event) => event.type === 'interaction').map((event) => event.type), ['interaction']);
+  } finally {
+    await adapter.stop({ sessionId: 'session-1' });
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalProviderBaseUrl);
+  }
+});
+
+test('scenario: structured runtime tool responses are serialized for the Copilot external-tool RPC', async () => {
+  FakeCopilotClient.instances.length = 0;
+  const originalProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  delete process.env.COPILOT_PROVIDER_BASE_URL;
+  const adapter = new CopilotProcessAdapter(async () => ({
+    CopilotClient: FakeCopilotClient,
+    RuntimeConnection: {
+      forStdio: (input: { path: string }) => ({ kind: 'stdio', ...input }),
+      forTcp: (input?: { path?: string }) => ({ kind: 'tcp', ...input })
+    },
+    approveAll: async () => true
+  }));
+
+  try {
+    await adapter.start(startInput());
+    await adapter.respondToInteraction({
+      sessionId: 'session-1',
+      interactionId: 'runtime-tool-1',
+      kind: 'tool_call',
+      response: { result: { delegationCallId: 'call-1', status: 'queued' } }
+    });
+
+    const [client] = FakeCopilotClient.instances;
+    assert.deepEqual(client.session.toolResponses, [{
+      requestId: 'runtime-tool-1',
+      result: '{"delegationCallId":"call-1","status":"queued"}'
+    }]);
+  } finally {
+    await adapter.stop({ sessionId: 'session-1' });
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalProviderBaseUrl);
   }
 });
 
@@ -185,6 +272,7 @@ test('scenario: OpenAI-compatible Copilot provider env is passed without URL con
         baseUrl: 'https://pmagent2.services.ai.azure.com/openai/v1',
         bearerToken: 'test-msi-token'
       },
+      systemMessage: { mode: 'append', content: 'Test agent instructions.' },
       onPermissionRequest: undefined
     });
   } finally {
@@ -443,7 +531,10 @@ function startInput(): SidecarAgentProcessStartInput {
       agentSpecId: 'copilot-poc',
       labels: {},
       launch: { command: 'copilot', args: [] },
+      instructions: 'Test agent instructions.',
       toolProfile: 'copilot-poc-tools',
+      delegateRefs: { asCaller: [], asCallee: [] },
+      runtimeTools: [],
       workerSelector: { matchLabels: { agent: 'copilot' } },
       pausePolicy: 'turn-boundary-durable-pause',
       recoveryPolicy: 'restart-with-context',

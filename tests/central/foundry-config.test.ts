@@ -3,13 +3,22 @@ import { test } from 'node:test';
 import { FoundryHostPoolAdapter } from '../../src/central/adapters';
 import { FileConfigStore } from '../../src/central/config/file-config-store';
 
-test('scenario: the default config profile declares a host-managed Foundry copilot pool alongside the Docker pools', () => {
+test('scenario: copilot-poc delegates from Docker to copilot-foundry', () => {
   const store = new FileConfigStore();
 
   const specs = store.loadAgentSpecs();
   const spec = specs.find((candidate) => candidate.agentSpecId === 'copilot-foundry');
   assert.ok(spec, 'expected a copilot-foundry AgentSpec');
   assert.deepEqual(spec.workerSelector.matchLabels, { agent: 'copilot', storage: 'host-managed' });
+  const parentSpec = specs.find((candidate) => candidate.agentSpecId === 'copilot-poc');
+  assert.ok(parentSpec, 'expected a copilot-poc AgentSpec');
+  assert.deepEqual(parentSpec.delegateRefs.asCaller, ['copilot-foundry']);
+  const calleeSpec = specs.find((candidate) => candidate.agentSpecId === 'copilot-foundry');
+  assert.ok(calleeSpec, 'expected a copilot-foundry AgentSpec');
+  assert.deepEqual(calleeSpec.delegateRefs.asCallee, ['copilot-foundry']);
+  const [delegate] = store.loadDelegates();
+  assert.equal(delegate.toolName, 'copilot_foundry');
+  assert.match(delegate.description, /copilot-foundry subagent/);
 
   const pools = store.loadWorkerPools({ tenantId: 'tenant-x', centralUrlForWorkers: 'http://central.example:3000' });
   const pool = pools.find((candidate) => candidate.poolId === 'foundry-copilot');
@@ -18,6 +27,11 @@ test('scenario: the default config profile declares a host-managed Foundry copil
   assert.equal(pool.reuse, false);
   // the pool advertises exactly the storage capability the AgentSpec selects, so label matching resolves it
   assert.deepEqual(pool.template.labels, spec.workerSelector.matchLabels);
+  const parentPool = pools.find((candidate) => candidate.poolId === 'poc-docker-copilot');
+  assert.ok(parentPool, 'expected the existing local copilot WorkerPool');
+  assert.equal(parentPool.hostPoolControllerClass, 'docker');
+  assert.deepEqual(parentPool.template.labels, parentSpec.workerSelector.matchLabels);
+  assert.deepEqual(pool.template.labels, calleeSpec.workerSelector.matchLabels);
 
   const controllers = store.loadHostPoolControllers();
   const controller = controllers.find((candidate) => candidate.id === 'foundry');

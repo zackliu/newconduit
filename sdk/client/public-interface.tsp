@@ -194,6 +194,10 @@ model CreateSessionInput {
 /** Catalog summary of a durable session. */
 model SessionSummary {
   sessionId: string;
+
+  /** Parent durable session when this session was created by agent delegation. */
+  parentSessionId?: string;
+
   status: SessionStatus;
   agentSpecId: string;
   owner: string;

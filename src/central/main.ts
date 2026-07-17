@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { CentralService } from './central-service';
 import { DockerHostPoolAdapter, FoundryHostPoolAdapter, WebPubSubTransportAdapter } from './adapters';
 import { FileConfigStore, type HostPoolControllerConfig } from './config/file-config-store';
+import { loadTenantConfigGeneration } from './config/tenant-config-generation';
 import { CentralHttpServer } from './http/central-http-server';
 import { registerPocCentralRoutes } from './http/poc-routes';
 import type { HostPoolAdapter } from './managers';
@@ -55,12 +56,15 @@ async function main(): Promise<void> {
   const centralPort = Number(process.env.CENTRAL_PORT ?? '3000');
   const centralUrlForWorkers = process.env.CENTRAL_URL_FOR_WORKERS ?? `http://host.docker.internal:${centralPort}`;
   const configStore = new FileConfigStore();
+  const configGeneration = loadTenantConfigGeneration(configStore);
   const workerPools = configStore.loadWorkerPools({ tenantId: tenant.tenantId, centralUrlForWorkers });
   const hostPoolAdapters = buildHostPoolAdapters(configStore.loadHostPoolControllers(), join(tenant.storageRoot, 'snapshots'));
   const service = new CentralService({
     tenant,
     eventTransport: webPubSubTransportAdapter,
     connectionIssuer: webPubSubTransportAdapter,
+    agentSpecRegistry: configGeneration.agentSpecRegistry,
+    delegation: configGeneration.delegation,
     workerPools,
     hostPoolAdapters
   });

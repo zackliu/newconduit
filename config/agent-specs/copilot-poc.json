@@ -8,7 +8,12 @@
     "command": "copilot",
     "args": []
   },
+  "instructions": "Complete the user's coding task, verify the result, and report the outcome.",
   "toolProfile": "copilot-poc-tools",
+  "delegateRefs": {
+    "asCaller": ["copilot-foundry"],
+    "asCallee": []
+  },
   "workerSelector": {
     "matchLabels": {
       "agent": "copilot",

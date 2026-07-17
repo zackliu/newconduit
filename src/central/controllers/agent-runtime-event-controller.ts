@@ -1,4 +1,4 @@
-import type { AgentOutputPayload, InteractionRequestedPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPartName, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from '../../shared';
+import type { AgentOutputPayload, InteractionRequestedPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPartName, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandAcceptedPayload, WorkerCommandRejectedPayload } from '../../shared';
 import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
 import { SnapshotManager } from '../persistence';
 
@@ -6,6 +6,8 @@ import { SnapshotManager } from '../persistence';
  * Handles events that originate from a running agent on a leased worker, making sure they become central-owned session history before clients see them.
  */
 export class AgentRuntimeEventController {
+  private readonly sessionAppendTails = new Map<string, Promise<void>>();
+
   constructor(
     private readonly storage: RuntimeStorage,
     private readonly eventLogManager: EventLogManager,
@@ -21,14 +23,7 @@ export class AgentRuntimeEventController {
     switch (event.type) {
       case 'status.changed': {
         const payload = this.parseStatusChangedPayload(event.payload);
-        const appended = await this.appendSessionEvent(event, payload);
-        const session = await this.requireSession(event);
-        this.sessionLeaseManager.assertCurrent(session, this.requireSessionLeaseId(event));
-        if (payload.status === 'running') {
-          await this.sessionLifecycleManager.transition(session, 'running', payload.reason);
-        } else if (payload.status === 'failed') {
-          await this.sessionLifecycleManager.transition(session, 'failed', payload.reason);
-        }
+        const appended = await this.appendSessionEvent(event, payload, { status: payload.status, statusReason: payload.reason });
         await this.eventTransport.publish({ kind: 'client-inbox' }, {
           ...appended,
           ackId: undefined,
@@ -59,6 +54,11 @@ export class AgentRuntimeEventController {
       case 'worker.command.rejected': {
         const payload = this.parseWorkerCommandRejectedPayload(event.payload);
         await this.appendSessionEvent(event, payload, { assertCurrentLease: false });
+        return true;
+      }
+      case 'worker.command.accepted': {
+        const payload = this.parseWorkerCommandAcceptedPayload(event.payload);
+        await this.appendSessionEvent(event, payload);
         return true;
       }
       case 'interaction.requested': {
@@ -119,6 +119,17 @@ export class AgentRuntimeEventController {
     }
   }
 
+  private parseWorkerCommandAcceptedPayload(payload: unknown): WorkerCommandAcceptedPayload {
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('invalid worker.command.accepted payload');
+    }
+    const candidate = payload as Partial<WorkerCommandAcceptedPayload>;
+    if (typeof candidate.commandEventId !== 'string' || typeof candidate.turnSeq !== 'number') {
+      throw new Error('invalid worker.command.accepted payload');
+    }
+    return payload as WorkerCommandAcceptedPayload;
+  }
+
   private triggerReconcile(): void {
     void this.sessionLifecycleReconciler.reconcile()
       .catch((error: unknown) => {
@@ -126,12 +137,23 @@ export class AgentRuntimeEventController {
       });
   }
 
-  private async appendSessionEvent<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean } = {}): Promise<RuntimeEvent<TPayload>> {
+  private async appendSessionEvent<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean; status?: Extract<SessionRecord['status'], 'running' | 'failed'>; statusReason?: string } = {}): Promise<RuntimeEvent<TPayload>> {
+    if (!event.sessionId) {
+      throw new Error(`${event.type} requires sessionId`);
+    }
+    const previous = this.sessionAppendTails.get(event.sessionId) ?? Promise.resolve();
+    const run = previous.then(() => this.appendSessionEventOnce(event, payload, options));
+    this.sessionAppendTails.set(event.sessionId, run.then(() => undefined, () => undefined));
+    return run;
+  }
+
+  private async appendSessionEventOnce<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean; status?: Extract<SessionRecord['status'], 'running' | 'failed'>; statusReason?: string }): Promise<RuntimeEvent<TPayload>> {
     const session = await this.requireSession(event);
     if (options.assertCurrentLease !== false) {
       this.sessionLeaseManager.assertCurrent(session, this.requireSessionLeaseId(event));
     }
     const appended = await this.eventLogManager.append({
+      eventId: event.eventId,
       type: event.type,
       actor: event.actor,
       payload,
@@ -141,7 +163,10 @@ export class AgentRuntimeEventController {
       turnSeq: event.turnSeq,
       sessionLeaseId: event.sessionLeaseId
     });
-    await this.sessionLifecycleManager.advanceEventCursor(session, appended.sequence);
+    const advanced = await this.sessionLifecycleManager.advanceEventCursor(session, appended.sequence);
+    if (options.status) {
+      await this.sessionLifecycleManager.transition(advanced, options.status, options.statusReason);
+    }
     await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, appended);
     return appended;
   }
@@ -272,7 +297,7 @@ export class AgentRuntimeEventController {
     if (!this.isRecord(payload)) {
       throw new Error('invalid session.paused payload');
     }
-    if (payload.reason !== undefined && payload.reason !== 'idle_timeout' && payload.reason !== 'client_requested') {
+    if (payload.reason !== undefined && payload.reason !== 'idle_timeout' && payload.reason !== 'client_requested' && payload.reason !== 'parent_terminal') {
       throw new Error('invalid session.paused reason');
     }
     return {

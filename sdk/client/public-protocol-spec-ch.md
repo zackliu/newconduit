@@ -98,6 +98,7 @@ class SessionClient {
 
 interface SessionSummary {
   sessionId: string;
+  parentSessionId?: string;
   status: SessionStatus;
   agentSpecId: string;
   owner: string;
@@ -128,6 +129,8 @@ class AgentTurn {
   waitForResult(options?: WaitForResultOptions): Promise<AgentTurnResult>;
 }
 ```
+
+`parentSessionId`只表示该Session由另一个Session通过agent delegation创建并与其关联。带有该字段的Child Session仍是普通durable Session：它进入同一Session catalog，并支持相同的`open/send/history/pause/resume/cancel`操作。SDK不因该关联隐藏或限制Session。
 
 `connect()` 调用 central negotiate 并建立 Web PubSub client connection。`ackId` 只用于 request/ack correlation，由 SDK 生成。`sessionId` 是 central-owned durable session identity，client 不能指定。`turnSeq` 是 central-owned、session-scoped、单调递增的 turn identity。
 
@@ -221,6 +224,7 @@ Central acknowledgement：
     "sessions": [
       {
         "sessionId": "<session-id>",
+        "parentSessionId": "<parent-session-id-if-associated>",
         "status": "running",
         "resolvedAgentSpec": { "agentSpecId": "copilot-poc" },
         "owner": "<principal-id>",
@@ -232,6 +236,8 @@ Central acknowledgement：
   }
 }
 ```
+
+Central返回当前principal拥有的全部Session。Delegation创建的Child Session不从catalog中过滤；Central从其持久化关联信息投影可选`parentSessionId`。
 
 Browser apps must not maintain their own authoritative session list; local UI caches may only be display hints.
 

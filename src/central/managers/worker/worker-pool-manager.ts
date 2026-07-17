@@ -156,8 +156,14 @@ export class WorkerPoolManager {
 
         if (instance.state === 'ready') {
           const worker = instance.currentWorkerId ? await this.storage.readWorker(instance.currentWorkerId) : undefined;
-          if (!worker || worker.lifecycleState === 'closed' || worker.lifecycleState === 'expired') {
+          if (this.isWorkerTerminal(worker)) {
             await this.stopInstance(pool, adapter, instance, worker, 'failed', 'current_worker_lost');
+            continue;
+          }
+          if (instance.currentWorkerId && !worker) {
+            // Workers are never deleted, only marked terminal, so a missing worker record for a ready instance is a
+            // storage-invariant violation, not evidence the worker died. Never destroy a possibly-live host on absence.
+            console.error(`host pool instance ${instance.instanceId} references missing worker ${instance.currentWorkerId}; not treating absence as worker loss`);
             continue;
           }
         }
@@ -278,8 +284,13 @@ export class WorkerPoolManager {
       const adapter = this.requireHostPoolAdapter(pool);
       for (const instance of instances.filter((candidate) => candidate.poolId === pool.poolId && candidate.state === 'ready' && candidate.currentWorkerId)) {
         const worker = workers.find((candidate) => candidate.workerId === instance.currentWorkerId);
-        if (!worker || worker.lifecycleState === 'closed' || worker.lifecycleState === 'expired') {
+        if (this.isWorkerTerminal(worker)) {
           await this.stopInstance(pool, adapter, instance, worker, 'failed', 'current_worker_lost');
+          continue;
+        }
+        if (!worker) {
+          // A missing worker record is a storage-invariant violation, never evidence of worker death: do not scale in.
+          console.error(`host pool instance ${instance.instanceId} references missing worker ${instance.currentWorkerId}; not treating absence as worker loss`);
           continue;
         }
         if (!this.isScaleInCandidate(worker)) {
@@ -295,7 +306,18 @@ export class WorkerPoolManager {
         if (Date.parse(now) - Date.parse(idleSince) < pool.scalePolicy.scaleInIdleMs) {
           continue;
         }
-        await this.stopInstance(pool, adapter, { ...instance, idleSince }, worker, 'stopped');
+        const currentInstance = await this.storage.readHostPoolInstance(instance.instanceId);
+        const currentWorker = await this.storage.readWorker(worker.workerId);
+        if (currentInstance?.state !== 'ready'
+          || currentInstance.currentWorkerId !== worker.workerId
+          || !currentWorker
+          || !this.isScaleInCandidate(currentWorker)) {
+          if (currentInstance) {
+            await this.clearIdleSince(currentInstance);
+          }
+          continue;
+        }
+        await this.stopInstance(pool, adapter, { ...currentInstance, idleSince }, currentWorker, 'stopped');
       }
     }
   }
@@ -411,6 +433,13 @@ export class WorkerPoolManager {
       && worker.conditions.includes('ready')
       && worker.currentSessionCount === 0
       && worker.allocatable === worker.capacity;
+  }
+
+  // Only a durable terminal worker fact justifies destroying its host. Absence is never such a fact: workers are never
+  // deleted, only transitioned to closed/expired by the worker lifecycle, so a missing record means storage is
+  // inconsistent, not that the compute died.
+  private isWorkerTerminal(worker: WorkerRecord | undefined): boolean {
+    return worker !== undefined && (worker.lifecycleState === 'closed' || worker.lifecycleState === 'expired');
   }
 
   private async clearIdleSince(instance: HostPoolInstanceRecord): Promise<void> {

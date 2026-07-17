@@ -13,6 +13,16 @@ export interface OpenInteraction {
   kind: InteractionKind;
   turnSeq: number;
   requestedAt: string;
+  delegatedRoute?: {
+    childSessionId: string;
+    childInteractionId: string;
+  };
+}
+
+export interface SessionDelegationBinding {
+  delegationId: string;
+  parentSessionId: string;
+  delegateId: string;
 }
 
 export interface SessionRecord {
@@ -30,6 +40,7 @@ export interface SessionRecord {
   latestSnapshotRef?: string;
   lifecycleReason?: string;
   openInteractions?: OpenInteraction[];
+  delegationBinding?: SessionDelegationBinding;
   lastEventUpdatedAt: string;
   createdAt: string;
   updatedAt: string;

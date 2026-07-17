@@ -238,6 +238,72 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.sessionItemRelation {
+  overflow: hidden;
+  color: #66756c;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionNode {
+  display: grid;
+  gap: 8px;
+}
+
+.sessionRow {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.sessionRow .sessionItem {
+  flex: 1;
+  min-width: 0;
+}
+
+.sessionToggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #8a938c;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sessionToggle:hover {
+  background: rgba(38, 54, 45, 0.08);
+  color: #3c463f;
+}
+
+.sessionToggle svg {
+  transition: transform 0.15s ease;
+  transform: rotate(90deg);
+}
+
+.sessionToggle.collapsed svg {
+  transform: rotate(0deg);
+}
+
+.sessionToggle.empty {
+  cursor: default;
+  pointer-events: none;
+}
+
+.sessionChildren {
+  display: grid;
+  gap: 8px;
+  margin-left: 10px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(38, 54, 45, 0.14);
+}
+
 .agentSpecInspector dl,
 .agentSpecChooser dl {
   display: grid;

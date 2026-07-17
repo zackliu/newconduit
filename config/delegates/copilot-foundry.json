@@ -1,0 +1,9 @@
+{
+  "id": "copilot-foundry",
+  "toolName": "copilot_foundry",
+  "description": "Ask the copilot-foundry subagent to handle the request. Use this when the user asks copilot-foundry to answer or when its hosted agent should perform the task.",
+  "maxInputBytes": 8192,
+  "maxResultBytes": 16384,
+  "deadlineMs": 120000,
+  "maxQueuedCalls": 2
+}

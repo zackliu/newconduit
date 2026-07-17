@@ -1,4 +1,5 @@
-import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentOutputPayload, type InteractionRequestedPayload, type RuntimeConnectionGrant, type RuntimeEvent, type SessionAssignPayload, type SessionInputCommandPayload, type SessionInteractionResponseCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
+import { createHash } from 'node:crypto';
+import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type InteractionRequestedPayload, type JsonValue, type RuntimeConnectionGrant, type RuntimeEvent, type RuntimeToolRequestedPayload, type SessionAssignPayload, type SessionInputCommandPayload, type SessionInteractionResponseCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type SessionRuntimeToolResponseCommandPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandAcceptedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
 import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount } from './contracts';
 
 export interface StandaloneSidecarStartInput extends WorkerRegisterPayload {
@@ -18,6 +19,9 @@ interface ActiveAgentRunState {
   sessionLeaseId: string;
   ready: Promise<void>;
   mount: SidecarWorkspaceMount;
+  runtimeToolNames: ReadonlySet<string>;
+  acceptedInputs: Map<number, { digest: string; commandEventId: string }>;
+  resolvedRuntimeToolRequests: Set<string>;
 }
 
 interface HeartbeatState {
@@ -64,6 +68,9 @@ export class SidecarDaemon {
         return;
       case 'session.interaction.response':
         await this.handleInteractionResponse(event as RuntimeEvent<SessionInteractionResponseCommandPayload>);
+        return;
+      case 'session.runtime.tool.response':
+        await this.handleRuntimeToolResponse(event as RuntimeEvent<SessionRuntimeToolResponseCommandPayload>);
         return;
       default:
         throw new Error(`unexpected sidecar command: ${event.type}`);
@@ -173,7 +180,10 @@ export class SidecarDaemon {
       workerId: payload.workerId,
       sessionLeaseId,
       ready,
-      mount: mounted
+      mount: mounted,
+      runtimeToolNames: new Set(payload.resolvedAgentSpec.runtimeTools.map((tool) => tool.name)),
+      acceptedInputs: new Map(),
+      resolvedRuntimeToolRequests: new Set()
     });
     try {
       await ready;
@@ -224,6 +234,18 @@ export class SidecarDaemon {
       await this.publishCommandRejected(event, 'agent_not_running', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
       return;
     }
+    const inputDigest = createHash('sha256').update(JSON.stringify(payload.input)).digest('hex');
+    const accepted = active.acceptedInputs.get(payload.turnSeq);
+    if (accepted) {
+      if (accepted.digest !== inputDigest) {
+        await this.publishCommandRejected(event, 'turn_input_conflict', active.sessionLeaseId, payload.sessionLeaseId);
+        return;
+      }
+      await this.publishCommandAccepted(event, payload.turnSeq);
+      return;
+    }
+    active.acceptedInputs.set(payload.turnSeq, { digest: inputDigest, commandEventId: event.eventId });
+    await this.publishCommandAccepted(event, payload.turnSeq);
     // Await the turn only until it completes or suspends on its first interaction. A suspended turn
     // keeps running in the background so the interaction response can arrive on this same command loop.
     await this.runTurn(payload);
@@ -249,6 +271,11 @@ export class SidecarDaemon {
           message: payload.input.message
         }, async (event) => {
           if (event.type === 'interaction') {
+            const active = this.activeRuns.get(payload.sessionId);
+            if (event.payload.kind === 'tool_call' && active && await this.publishRuntimeToolRequest(payload, active, event.payload)) {
+              settle();
+              return;
+            }
             await this.publishTenantEvent<InteractionRequestedPayload>({
               type: 'interaction.requested',
               sessionId: payload.sessionId,
@@ -324,6 +351,47 @@ export class SidecarDaemon {
     });
   }
 
+  private async handleRuntimeToolResponse(event: RuntimeEvent<SessionRuntimeToolResponseCommandPayload>): Promise<void> {
+    const payload = this.parseRuntimeToolResponsePayload(event.payload);
+    const active = this.activeRuns.get(payload.sessionId);
+    if (!active) {
+      await this.publishCommandRejected(event, 'unknown_session', undefined, payload.sessionLeaseId);
+      return;
+    }
+    if (active.sessionLeaseId !== payload.sessionLeaseId || event.sessionLeaseId !== active.sessionLeaseId) {
+      await this.publishCommandRejected(event, 'stale_session_lease', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
+      return;
+    }
+    if (active.resolvedRuntimeToolRequests.has(payload.requestId)) {
+      return;
+    }
+    active.resolvedRuntimeToolRequests.add(payload.requestId);
+    await this.options.agentProcessAdapter.respondToInteraction?.({
+      sessionId: payload.sessionId,
+      interactionId: payload.requestId,
+      kind: 'tool_call',
+      response: { result: payload.result }
+    });
+  }
+
+  private async publishRuntimeToolRequest(input: SessionInputCommandPayload, active: ActiveAgentRunState, interaction: { interactionId: string; request: unknown }): Promise<boolean> {
+    const request = this.isRecord(interaction.request) ? interaction.request : undefined;
+    const toolName = typeof request?.toolName === 'string' ? request.toolName : undefined;
+    const args = this.isRecord(request?.arguments) ? request.arguments : undefined;
+    if (!toolName || !args || !active.runtimeToolNames.has(toolName) || !this.isJsonValue(args)) {
+      return false;
+    }
+    await this.publishTenantEvent<RuntimeToolRequestedPayload>({
+      type: 'runtime.tool.requested',
+      sessionId: input.sessionId,
+      workerId: input.workerId,
+      sessionLeaseId: input.sessionLeaseId,
+      turnSeq: input.turnSeq,
+      payload: { requestId: interaction.interactionId, toolName, input: args }
+    });
+    return true;
+  }
+
   private async handlePause(event: RuntimeEvent<SessionPauseCommandPayload>): Promise<void> {
     const payload = this.parsePausePayload(event.payload);
     const active = this.activeRuns.get(payload.sessionId);
@@ -371,6 +439,20 @@ export class SidecarDaemon {
         reason,
         expectedSessionLeaseId,
         receivedSessionLeaseId
+      }
+    });
+  }
+
+  private async publishCommandAccepted(event: RuntimeEvent, turnSeq: number): Promise<void> {
+    await this.publishTenantEvent<WorkerCommandAcceptedPayload>({
+      type: 'worker.command.accepted',
+      sessionId: event.sessionId,
+      workerId: event.workerId,
+      sessionLeaseId: event.sessionLeaseId,
+      turnSeq,
+      payload: {
+        commandEventId: event.eventId,
+        turnSeq
       }
     });
   }
@@ -442,6 +524,32 @@ export class SidecarDaemon {
     return payload as SessionInputCommandPayload;
   }
 
+  private parseRuntimeToolResponsePayload(payload: unknown): SessionRuntimeToolResponseCommandPayload {
+    if (!this.isRecord(payload)
+      || typeof payload.sessionId !== 'string'
+      || typeof payload.workerId !== 'string'
+      || typeof payload.sessionLeaseId !== 'string'
+      || typeof payload.requestId !== 'string'
+      || typeof payload.result !== 'string') {
+      throw new Error('invalid session.runtime.tool.response payload');
+    }
+    return payload as unknown as SessionRuntimeToolResponseCommandPayload;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  private isJsonValue(value: unknown): value is JsonValue {
+    if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return true;
+    }
+    if (Array.isArray(value)) {
+      return value.every((entry) => this.isJsonValue(entry));
+    }
+    return this.isRecord(value) && Object.values(value).every((entry) => this.isJsonValue(entry));
+  }
+
   private parsePausePayload(payload: unknown): SessionPauseCommandPayload {
     if (typeof payload !== 'object' || payload === null) {
       throw new Error('invalid session.pause.requested payload');
@@ -455,7 +563,7 @@ export class SidecarDaemon {
     if (candidate.capture !== undefined && (typeof candidate.capture.snapshotId !== 'string' || typeof candidate.capture.storageClass !== 'string' || typeof candidate.capture.handle !== 'string')) {
       throw new Error('invalid session.pause.requested capture ref');
     }
-    if (candidate.reason !== undefined && candidate.reason !== 'idle_timeout' && candidate.reason !== 'client_requested') {
+    if (candidate.reason !== undefined && candidate.reason !== 'idle_timeout' && candidate.reason !== 'client_requested' && candidate.reason !== 'parent_terminal') {
       throw new Error('invalid session.pause.requested reason');
     }
     return payload as SessionPauseCommandPayload;

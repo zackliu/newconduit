@@ -14,10 +14,11 @@ export class ClientRuntimeEventController {
         const outcome = await this.sessionManager.startSession(context, event.ackId, payload);
         await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.sessionCreatedEvent);
         await this.eventTransport.publish({ kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) }, this.toClientAckEvent(outcome.sessionCreatedEvent, 'session.created.ack', { status: outcome.session.status }));
-        await this.eventTransport.publish({ kind: 'client-inbox' }, this.toClientProjectionEvent(outcome.sessionCreatedEvent, 'session.catalog.updated', { sessionId: outcome.session.sessionId, status: outcome.session.status }));
+        await this.eventTransport.publish({ kind: 'client-inbox' }, outcome.sessionCatalogUpdatedEvent);
         if (outcome.workerCommand) {
           await this.eventTransport.publish({ kind: 'worker-commands', workerId: outcome.workerCommand.workerId }, outcome.workerCommand.event);
         }
+        this.sessionManager.reconcileStartedSession(outcome.needsReconcile);
         return true;
       }
       case 'input.received': {
@@ -66,6 +67,9 @@ export class ClientRuntimeEventController {
         const payload = this.parseInteractionRespondPayload(event.payload);
         const outcome = await this.sessionManager.respondInteraction(context, sessionId, event.ackId, payload);
         await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.interactionRespondedEvent);
+        if (outcome.routedInteractionRespondedEvent) {
+          await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.routedInteractionRespondedEvent.sessionId! }, outcome.routedInteractionRespondedEvent);
+        }
         await this.eventTransport.publish({ kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) }, this.toClientAckEvent(outcome.interactionRespondedEvent, 'interaction.responded.ack', { interactionId: payload.interactionId, status: 'accepted' }));
         if (outcome.workerCommand) {
           await this.eventTransport.publish({ kind: 'worker-commands', workerId: outcome.workerCommand.workerId }, outcome.workerCommand.event);

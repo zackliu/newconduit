@@ -307,6 +307,7 @@ export class AgentRuntimeClient {
     }
     return {
       sessionId: candidate.sessionId,
+      ...(typeof candidate.parentSessionId === 'string' ? { parentSessionId: candidate.parentSessionId } : {}),
       status: candidate.status as SessionStatus,
       agentSpecId: resolvedAgentSpec.agentSpecId,
       owner: candidate.owner,

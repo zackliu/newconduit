@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { DefaultAzureCredential, type AccessToken, type TokenCredential } from '@azure/identity';
+import type { ResolvedAgentSpec } from '../../shared';
 import type { SidecarAgentProcessAdapter, SidecarAgentProcessEvent, SidecarAgentProcessEventHandler, SidecarAgentProcessInput, SidecarAgentProcessStartInput, SidecarAgentTurnResult, SidecarInteractionResponseInput } from '../contracts';
 
 /** A suspended interaction turn can wait indefinitely for an off-agent responder; do not abort agent work. */
@@ -24,7 +25,8 @@ interface CopilotSdkSessionConfig {
   gitHubToken?: string;
   model?: string;
   provider?: CopilotSdkProviderConfig;
-  onPermissionRequest?: () => { kind: 'no-result' };
+  onPermissionRequest?: (request: Record<string, unknown>) => { kind: 'approve-once' } | { kind: 'no-result' };
+  systemMessage?: { mode: 'append'; content: string };
   tools?: Array<{ name: string; description?: string; parameters?: unknown }>;
 }
 
@@ -64,6 +66,7 @@ type ProviderTokenResolver = (scope: string) => Promise<AccessToken | null>;
 interface ActiveGitHubCopilotSession {
   client: CopilotSdkClient;
   session: CopilotSdkSession;
+  runtimeToolNames: ReadonlySet<string>;
   /** Pending Copilot permission requests keyed by requestId. Retained so a session-scoped grant can
    *  rebuild the per-request approval descriptor the Copilot permission rule engine remembers. */
   pendingPermissionRequests: Map<string, Record<string, unknown>>;
@@ -101,7 +104,7 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       logLevel: 'error'
     });
     await client.start();
-    const sessionConfig = await this.createCopilotSessionConfig({ gitHubToken });
+    const sessionConfig = await this.createCopilotSessionConfig({ gitHubToken, resolvedAgentSpec: input.resolvedAgentSpec });
     const restoredSessionId = await client.getLastSessionId();
     const session = restoredSessionId
       ? await client.resumeSession(restoredSessionId, sessionConfig)
@@ -109,6 +112,7 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     this.sessions.set(input.sessionId, {
       client: client as unknown as CopilotSdkClient,
       session: session as unknown as CopilotSdkSession,
+      runtimeToolNames: new Set((sessionConfig.tools ?? []).map((tool) => tool.name)),
       pendingPermissionRequests: new Map()
     });
   }
@@ -125,6 +129,9 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     let lastStreamedOutput: unknown;
     let publishChain: Promise<void> = Promise.resolve();
     const unsubscribe = active.session.on((event) => {
+      if (this.isRuntimeToolPermission(event, active.runtimeToolNames)) {
+        return;
+      }
       this.capturePendingPermissionRequest(active, event);
       const mapped = this.mapSessionEvent(event);
       if (!mapped) {
@@ -190,6 +197,16 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     if (requestId && request) {
       active.pendingPermissionRequests.set(requestId, request);
     }
+  }
+
+  private isRuntimeToolPermission(event: CopilotSdkSessionEvent, runtimeToolNames: ReadonlySet<string>): boolean {
+    if (event.type !== 'permission.requested') {
+      return false;
+    }
+    const request = this.isRecord(event.data.permissionRequest) ? event.data.permissionRequest : undefined;
+    return request?.kind === 'custom-tool'
+      && typeof request.toolName === 'string'
+      && runtimeToolNames.has(request.toolName);
   }
 
   private toPermissionDecision(response: unknown, pendingRequest?: Record<string, unknown>): unknown {
@@ -262,9 +279,20 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     }
   }
 
-  private toToolResult(response: unknown): unknown {
+  private toToolResult(response: unknown): string {
     const record = this.isRecord(response) ? response : {};
-    return 'result' in record ? record.result : response;
+    const result = 'result' in record ? record.result : response;
+    if (result === undefined || result === null) {
+      return '';
+    }
+    if (typeof result === 'string') {
+      return result;
+    }
+    const serialized = JSON.stringify(result);
+    if (serialized === undefined) {
+      throw new Error('Copilot tool result must be JSON serializable');
+    }
+    return serialized;
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {
@@ -364,18 +392,24 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       || undefined;
   }
 
-  private async createCopilotSessionConfig(input: { gitHubToken?: string }): Promise<CopilotSdkSessionConfig> {
+  private async createCopilotSessionConfig(input: { gitHubToken?: string; resolvedAgentSpec: ResolvedAgentSpec }): Promise<CopilotSdkSessionConfig> {
+    const tools = input.resolvedAgentSpec.runtimeTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema
+    }));
+    const runtimeToolNames = new Set(tools.map((tool) => tool.name));
     return {
       streaming: true,
       ...(input.gitHubToken ? { gitHubToken: input.gitHubToken } : {}),
       ...await this.resolveProviderSessionConfig(),
-      // Register a deferring handler instead of omitting it. Providing any handler makes the Copilot CLI
-      // route permission requests to us (requestPermission: true on both createSession and resumeSession);
-      // returning `no-result` leaves each request pending so it surfaces as `permission.requested`, is
-      // mapped to an interaction, and is resolved via rpc.permissions.handlePendingPermissionRequest.
-      // Omitting the handler sets requestPermission: false on createSession, which makes the CLI auto-deny
-      // every tool for fresh sessions ("Permission denied and could not request permission from user").
-      onPermissionRequest: () => ({ kind: 'no-result' })
+      ...(tools.length > 0 ? { tools } : {}),
+      systemMessage: { mode: 'append', content: input.resolvedAgentSpec.instructions },
+      onPermissionRequest: (request) => request.kind === 'custom-tool'
+        && typeof request.toolName === 'string'
+        && runtimeToolNames.has(request.toolName)
+        ? { kind: 'approve-once' }
+        : { kind: 'no-result' }
     };
   }
 

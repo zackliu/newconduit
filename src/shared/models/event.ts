@@ -1,4 +1,5 @@
 import type { ResolvedAgentSpec } from './agent-spec';
+import type { JsonValue } from './delegation';
 import type { InteractionKind, SessionStatus } from './session';
 import type { SnapshotCaptureRef, SnapshotPartName, SnapshotRestoreRef } from './snapshot';
 
@@ -36,13 +37,16 @@ export type RuntimeEventType =
   | 'worker.closed'
   | 'worker.expired'
   | 'worker.heartbeat.rejected'
+  | 'worker.command.accepted'
   | 'worker.command.rejected'
   | 'session.lease.lost'
   | 'interaction.requested'
   | 'interaction.responded'
   | 'interaction.respond.requested'
   | 'interaction.responded.ack'
-  | 'session.interaction.response';
+  | 'session.interaction.response'
+  | 'runtime.tool.requested'
+  | 'session.runtime.tool.response';
 
 export interface RuntimeEvent<TPayload = unknown> {
   eventId: string;
@@ -126,11 +130,11 @@ export interface StatusChangedPayload {
 }
 
 export interface SessionPauseRequestedPayload {
-  reason?: 'idle_timeout' | 'client_requested';
+  reason?: 'idle_timeout' | 'client_requested' | 'parent_terminal';
 }
 
 export interface SessionPausedPayload {
-  reason?: 'idle_timeout' | 'client_requested';
+  reason?: 'idle_timeout' | 'client_requested' | 'parent_terminal';
   snapshot?: {
     snapshotId: string;
     parts: SnapshotPartName[];
@@ -143,21 +147,26 @@ export interface SnapshotCreatedPayload {
 }
 
 export interface SessionResumeRequestedPayload {
-  reason?: 'client_requested';
+  reason?: 'client_requested' | 'delegation_call';
 }
 
 export interface SessionPauseCommandPayload {
   sessionId: string;
   workerId: string;
   sessionLeaseId: string;
-  reason?: 'idle_timeout' | 'client_requested';
+  reason?: 'idle_timeout' | 'client_requested' | 'parent_terminal';
   capture?: SnapshotCaptureRef;
 }
 
 export interface WorkerCommandRejectedPayload {
-  reason: 'stale_session_lease' | 'unknown_session' | 'agent_not_running';
+  reason: 'stale_session_lease' | 'unknown_session' | 'agent_not_running' | 'turn_input_conflict';
   expectedSessionLeaseId?: string;
   receivedSessionLeaseId?: string;
+}
+
+export interface WorkerCommandAcceptedPayload {
+  commandEventId: string;
+  turnSeq: number;
 }
 
 /** Agent (via sidecar) surfaced an off-agent request; the turn is suspended until it is answered. */
@@ -190,4 +199,18 @@ export interface SessionInteractionResponseCommandPayload {
   interactionId: string;
   kind: InteractionKind;
   response: unknown;
+}
+
+export interface RuntimeToolRequestedPayload {
+  requestId: string;
+  toolName: string;
+  input: JsonValue;
+}
+
+export interface SessionRuntimeToolResponseCommandPayload {
+  sessionId: string;
+  workerId: string;
+  sessionLeaseId: string;
+  requestId: string;
+  result: string;
 }

@@ -44,6 +44,49 @@ test('scenario: queued session is assigned when matching worker becomes ready', 
   });
 });
 
+test('scenario: running status is not overwritten by a concurrent command acknowledgement', async () => {
+  await withRuntime(async ({ central, storage, transport, clock }) => {
+    const created = await createQueuedSession(transport);
+    const worker = await registerWorker(central);
+    clock.set('2026-06-25T00:00:10.000Z');
+    await publishReadyHeartbeat(transport, worker.workerId);
+    await central.reconcileSessionsForTenant('poc');
+    const starting = await storage.readSession(created.sessionId!);
+    assert.equal(starting?.status, 'starting');
+    assert.ok(starting?.sessionLeaseId);
+
+    await Promise.all([
+      transport.publish({ kind: 'tenant-inbox' }, {
+        eventId: 'event-session-running',
+        sessionId: starting.sessionId,
+        workerId: worker.workerId,
+        sessionLeaseId: starting.sessionLeaseId,
+        sequence: 0,
+        type: 'status.changed',
+        timestamp: clock.now(),
+        actor: 'sidecar',
+        payload: { status: 'running' }
+      }),
+      transport.publish({ kind: 'tenant-inbox' }, {
+        eventId: 'event-command-accepted',
+        sessionId: starting.sessionId,
+        workerId: worker.workerId,
+        sessionLeaseId: starting.sessionLeaseId,
+        turnSeq: 1,
+        sequence: 0,
+        type: 'worker.command.accepted',
+        timestamp: clock.now(),
+        actor: 'sidecar',
+        payload: { commandEventId: 'event-session-assign', turnSeq: 1 }
+      })
+    ]);
+
+    const running = await storage.readSession(starting.sessionId);
+    assert.equal(running?.status, 'running');
+    assert.equal(running?.eventCursor, 3);
+  });
+});
+
 test('scenario: idle queued session pauses and is not auto-assigned', async () => {
   await withRuntime(async ({ central, storage, transport, clock }) => {
     const created = await createQueuedSession(transport);
@@ -106,6 +149,37 @@ test('scenario: idle running session pauses and releases worker lease', async ()
     const releasedWorker = await storage.readWorker(worker.workerId);
     assert.equal(releasedWorker?.allocatable, 1);
     assert.deepEqual(releasedWorker?.conditions, ['ready']);
+  });
+});
+
+test('scenario: running session awaiting interaction does not idle pause', async () => {
+  await withRuntime(async ({ central, storage, transport, clock }) => {
+    const worker = await registerWorker(central);
+    await writeActiveWorker(storage, worker.workerId, clock.now());
+    const session = await writeRunningSession(storage, worker.workerId, 'lease-awaiting-interaction', clock.now());
+    await storage.writeSession({
+      ...session,
+      openInteractions: [{
+        interactionId: 'interaction-approval',
+        kind: 'approval',
+        turnSeq: 1,
+        requestedAt: clock.now()
+      }]
+    });
+    const workerCommands: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'worker-commands', workerId: worker.workerId }, async (envelope) => {
+      workerCommands.push(envelope.event);
+    });
+    clock.set('2026-06-25T00:02:01.000Z');
+    await writeActiveWorker(storage, worker.workerId, clock.now(), { allocatable: 0, currentSessionCount: 1, conditions: ['busy'] });
+
+    await central.reconcileSessionsForTenant('poc');
+
+    const running = await storage.readSession(session.sessionId);
+    assert.equal(running?.status, 'running');
+    assert.equal(running?.currentWorkerId, worker.workerId);
+    assert.equal(running?.sessionLeaseId, 'lease-awaiting-interaction');
+    assert.deepEqual(workerCommands, []);
   });
 });
 

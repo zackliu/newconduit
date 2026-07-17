@@ -1,5 +1,12 @@
+import type { AgentRuntimeToolDefinition } from './runtime-tool';
+
 export interface LabelSelector {
   matchLabels: Record<string, string>;
+}
+
+export interface AgentSpecDelegateRefs {
+  asCaller: string[];
+  asCallee: string[];
 }
 
 export interface AgentSpec {
@@ -9,7 +16,9 @@ export interface AgentSpec {
     command: string;
     args: string[];
   };
+  instructions: string;
   toolProfile: string;
+  delegateRefs: AgentSpecDelegateRefs;
   workerSelector: LabelSelector;
   pausePolicy: string;
   recoveryPolicy: string;
@@ -18,6 +27,7 @@ export interface AgentSpec {
 }
 
 export interface ResolvedAgentSpec extends AgentSpec {
+  runtimeTools: AgentRuntimeToolDefinition[];
   resolvedAt: string;
   digest: string;
 }

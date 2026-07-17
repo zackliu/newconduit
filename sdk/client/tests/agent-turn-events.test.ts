@@ -2,6 +2,48 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AgentRuntimeClient, AgentTurn, SessionHandle } from '../src/agent-runtime-client';
 
+test('scenario: session list preserves a delegated session parent relationship', async () => {
+  const client = new AgentRuntimeClient({ centralUrl: 'http://central.test', tenantId: 'tenant-1' });
+  const runtime = client as unknown as {
+    waitForAcknowledgement(ackId: string, expectedType: string): Promise<unknown>;
+    publishTenantEvent(input: unknown): Promise<void>;
+  };
+  runtime.waitForAcknowledgement = async (_ackId, expectedType) => {
+    assert.equal(expectedType, 'session.listed');
+    return {
+      eventId: 'event-session-listed',
+      sequence: 0,
+      type: 'session.listed',
+      timestamp: '2026-07-15T00:00:00.000Z',
+      actor: 'central',
+      payload: {
+        sessions: [{
+          sessionId: 'child-session',
+          parentSessionId: 'parent-session',
+          status: 'paused',
+          resolvedAgentSpec: { agentSpecId: 'copilot-foundry' },
+          owner: 'owner-1',
+          eventCursor: 4,
+          createdAt: '2026-07-15T00:00:00.000Z',
+          updatedAt: '2026-07-15T00:01:00.000Z'
+        }]
+      }
+    };
+  };
+  runtime.publishTenantEvent = async () => undefined;
+
+  assert.deepEqual(await client.sessions.list(), [{
+    sessionId: 'child-session',
+    parentSessionId: 'parent-session',
+    status: 'paused',
+    agentSpecId: 'copilot-foundry',
+    owner: 'owner-1',
+    eventCursor: 4,
+    createdAt: '2026-07-15T00:00:00.000Z',
+    updatedAt: '2026-07-15T00:01:00.000Z'
+  }]);
+});
+
 test('scenario: explicit turn completed event completes the turn after final agent output', async () => {
   const runtime = {
     async subscribeSessionEvents(_input: { sessionId: string }, handler: (event: unknown) => void) {

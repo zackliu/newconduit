@@ -134,7 +134,8 @@ export class SessionLifecycleReconciler {
   }
 
   private isIdle(session: SessionRecord): boolean {
-    return Date.parse(this.clock.now()) - Date.parse(session.lastEventUpdatedAt) >= session.resolvedAgentSpec.idlePauseTimeoutMs;
+    return (session.openInteractions?.length ?? 0) === 0
+      && Date.parse(this.clock.now()) - Date.parse(session.lastEventUpdatedAt) >= session.resolvedAgentSpec.idlePauseTimeoutMs;
   }
 
   private async publishSessionStatus(session: SessionRecord, status: SessionRecord['status'], reason?: string): Promise<void> {

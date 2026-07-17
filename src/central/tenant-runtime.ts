@@ -1,7 +1,8 @@
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
+import type { DelegateBindingIndex, ResolvedDelegateRegistry } from './registries/delegate-registry';
 import type { Clock, RequestContext, RuntimeConnectionGrant, RuntimeEventTransport, RuntimeStorage, RuntimeSubscription, TenantConnectionIssuer, TenantContext, WorkerPoolRecord, WorkerRegisterPayload } from '../shared';
-import { AgentRuntimeEventController, ClientRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
-import { AgentSpecAdmissionManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type WorkerPoolManagerStatus } from './managers';
+import { AgentRuntimeEventController, ClientRuntimeEventController, DelegationRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
+import { AgentSpecAdmissionManager, DelegateAdmissionManager, DelegatedSessionManager, DelegationDispatcher, DelegationManager, EventLogManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, SessionStartManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type WorkerPoolManagerStatus } from './managers';
 import { SnapshotManager } from './persistence';
 
 const SESSION_RECONCILE_INTERVAL_MS = 5_000;
@@ -13,6 +14,11 @@ export interface TenantRuntimeOptions {
   connectionIssuer: TenantConnectionIssuer;
   clock: Clock;
   agentSpecRegistry: AgentSpecRegistry;
+  delegation?: {
+    resolvedDelegateRegistry: ResolvedDelegateRegistry;
+    delegateBindingIndex: DelegateBindingIndex;
+    delegateAdmissionManager: DelegateAdmissionManager;
+  };
   workerPools?: WorkerPoolRecord[];
   hostPoolAdapters?: Record<string, HostPoolAdapter>;
   controllerEpoch?: string;
@@ -37,7 +43,14 @@ export class TenantRuntime {
     this.eventTransport = options.eventTransport;
     this.connectionIssuer = options.connectionIssuer;
     this.agentSpecRegistry = options.agentSpecRegistry;
-    const agentSpecAdmissionManager = new AgentSpecAdmissionManager(options.clock);
+    const agentSpecAdmissionManager = new AgentSpecAdmissionManager(options.clock, (spec) => {
+      if (!options.delegation) {
+        return [];
+      }
+      return spec.delegateRefs.asCaller.map((delegateId) => options.delegation!.delegateAdmissionManager.runtimeTool(
+        options.delegation!.resolvedDelegateRegistry.resolve(delegateId)
+      ));
+    });
     const sessionLifecycleManager = new SessionLifecycleManager(options.storage, options.clock);
     const eventLogManager = new EventLogManager(options.storage, options.clock);
     const workerSelector = new WorkerSelector(() => Date.parse(options.clock.now()));
@@ -50,6 +63,7 @@ export class TenantRuntime {
       : undefined;
     const sessionLifecycleReconciler = new SessionLifecycleReconciler(options.storage, options.clock, sessionLifecycleManager, eventLogManager, sessionAssignmentManager, snapshotManager, options.eventTransport, this.workerManager, this.workerPoolManager);
     this.sessionLifecycleReconciler = sessionLifecycleReconciler;
+    const sessionStartManager = new SessionStartManager(sessionLifecycleManager, eventLogManager, sessionAssignmentManager);
     const sessionManager = new SessionManager(
       options.tenant,
       options.storage,
@@ -57,14 +71,33 @@ export class TenantRuntime {
       agentSpecAdmissionManager,
       sessionLifecycleManager,
       eventLogManager,
-      sessionAssignmentManager,
+      sessionStartManager,
       snapshotManager,
       sessionLifecycleReconciler
     );
+    const delegationManager = options.delegation ? new DelegationManager(
+      options.tenant.tenantId,
+      options.storage,
+      options.clock,
+      options.delegation.resolvedDelegateRegistry,
+      options.delegation.delegateBindingIndex,
+      options.delegation.delegateAdmissionManager,
+      agentSpecAdmissionManager,
+      sessionLifecycleManager
+    ) : undefined;
+    const delegationDispatcher = delegationManager ? new DelegationDispatcher(
+      options.storage,
+      options.clock,
+      new DelegatedSessionManager(options.storage, eventLogManager, sessionLifecycleManager, sessionStartManager)
+    ) : undefined;
+    const delegationRuntimeEventController = delegationManager && delegationDispatcher
+      ? new DelegationRuntimeEventController(options.storage, sessionLeaseManager, delegationManager, delegationDispatcher, sessionManager, options.eventTransport)
+      : undefined;
     this.tenantInboxController = new TenantInboxController(
       options.tenant.tenantId,
       new WorkerRuntimeEventController(this.workerManager, sessionLifecycleReconciler),
       new AgentRuntimeEventController(options.storage, eventLogManager, sessionLifecycleManager, sessionLeaseManager, this.workerManager, sessionLifecycleReconciler, snapshotManager, options.eventTransport),
+      delegationRuntimeEventController,
       new ClientRuntimeEventController(sessionManager, options.eventTransport),
       options.eventTransport
     );

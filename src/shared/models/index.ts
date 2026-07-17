@@ -1,8 +1,11 @@
-export type { AgentSpec, LabelSelector, ResolvedAgentSpec } from './agent-spec';
+export type { AgentSpec, AgentSpecDelegateRefs, LabelSelector, ResolvedAgentSpec } from './agent-spec';
 export type { AuditRecord } from './audit';
 export type { AgentSpecRef, CreateSessionRequest, PrincipalContext, RequestContext, SessionInputRequest, TenantContext } from './create-session';
-export type { AgentOutputPayload, InteractionRequestedPayload, InteractionRespondedPayload, InteractionRespondRequestPayload, RuntimeEvent, RuntimeEventType, SessionAssignPayload, SessionInputCommandPayload, SessionInteractionResponseCommandPayload, SessionPauseCommandPayload, SessionPausedPayload, SessionPauseRequestedPayload, SessionResumeRequestedPayload, SnapshotCreatedPayload, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandRejectedPayload } from './event';
-export type { InteractionKind, OpenInteraction, SessionRecord, SessionStatus } from './session';
+export type { Delegate } from './delegate';
+export type { CreateDelegationResult, DelegationCallAwaitRequest, DelegationCallDispatch, DelegationCallRecord, DelegationCallStatus, DelegationCloseReason, DelegationFailure, DelegationRecord, DelegationStatus, JsonValue, ResolvedDelegate } from './delegation';
+export type { AgentOutputPayload, InteractionRequestedPayload, InteractionRespondedPayload, InteractionRespondRequestPayload, RuntimeEvent, RuntimeEventType, RuntimeToolRequestedPayload, SessionAssignPayload, SessionInputCommandPayload, SessionInteractionResponseCommandPayload, SessionPauseCommandPayload, SessionPausedPayload, SessionPauseRequestedPayload, SessionResumeRequestedPayload, SessionRuntimeToolResponseCommandPayload, SnapshotCreatedPayload, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandAcceptedPayload, WorkerCommandRejectedPayload } from './event';
+export type { InteractionKind, OpenInteraction, SessionDelegationBinding, SessionRecord, SessionStatus } from './session';
+export type { AgentRuntimeToolDefinition } from './runtime-tool';
 export type { SnapshotCaptureRef, SnapshotPartName, SnapshotRestoreRef, WorkspaceSnapshot } from './snapshot';
 export type { WorkerCondition, WorkerHeartbeatPayload, WorkerIdentityPayload, WorkerLifecycleState, WorkerRecord, WorkerRegisterPayload } from './worker';
 export type { HostPoolControllerClass, HostPoolInstanceRecord, HostPoolInstanceState, WorkerPoolRecord, WorkerPoolScalePolicy, WorkerPoolTemplate } from './worker-pool';
