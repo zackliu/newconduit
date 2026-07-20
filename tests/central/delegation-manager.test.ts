@@ -3,8 +3,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { AgentSpec, Delegate, SessionRecord } from '../../src/shared';
-import { AgentSpecAdmissionManager, DelegateAdmissionManager, DelegationManager, EventLogManager, SessionAssignmentManager, SessionLeaseManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionManager, SessionStartManager, WorkerSelector } from '../../src/central/managers';
+import type { AgentSpec, Delegate, RuntimeEvent, SessionRecord } from '../../src/shared';
+import { AgentSpecAdmissionManager, DelegateAdmissionManager, DelegationManager, EventLogManager, InteractionManager, SessionAssignmentManager, SessionLeaseManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionManager, SessionPauseManager, SessionStartManager, WorkerSelector } from '../../src/central/managers';
+import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { StaticDelegateBindingIndex, StaticDelegateRegistry, StaticResolvedDelegateRegistry } from '../../src/central/registries/delegate-registry';
 import { StaticAgentSpecRegistry } from '../../src/central/registries/agent-spec-registry';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
@@ -113,61 +114,105 @@ test('scenario: concurrent first calls share one relation and one Child Session'
   }
 });
 
-test('scenario: delegated Child approval is answered through the Parent Session', async () => {
+test('scenario: Child approval resolves both views and a stale Parent response is idempotent', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-delegated-interaction-'));
   try {
     const storage = new LocalFileStorage(root);
     const clock = { now: () => NOW };
+    const transport = new InMemoryRuntimeTransportAdapter();
     const parentSession = parent('parent-a');
     const childSession: SessionRecord = {
       ...parent('child-a', []),
       currentWorkerId: 'worker-child',
       sessionLeaseId: 'lease-child',
-      delegationBinding: { delegationId: 'delegation-a', parentSessionId: parentSession.sessionId, delegateId: DELEGATE_ID },
-      openInteractions: [{ interactionId: 'approval-child', kind: 'approval', turnSeq: 1, requestedAt: NOW }]
+      delegationBinding: { delegationId: 'delegation-a', parentSessionId: parentSession.sessionId, delegateId: DELEGATE_ID }
     };
     await storage.writeSession(parentSession);
     await storage.writeSession(childSession);
-    const lifecycle = new SessionLifecycleManager(storage, clock);
-    const eventLog = new EventLogManager(storage, clock);
-    const snapshot = new SnapshotManager(storage, clock);
-    const assignment = new SessionAssignmentManager(storage, clock, new WorkerSelector(() => Date.parse(NOW)), new SessionLeaseManager(storage), snapshot);
-    const manager = new SessionManager(
-      { tenantId: 'poc', storageRoot: root, webPubSubHub: 'test' },
-      storage,
-      new StaticAgentSpecRegistry([]),
-      new AgentSpecAdmissionManager(clock),
-      lifecycle,
-      eventLog,
-      new SessionStartManager(lifecycle, eventLog, assignment),
-      snapshot
-    );
-
-    const projected = await manager.projectDelegatedInteraction({
+    await storage.createDelegation({
+      delegationId: 'delegation-a',
+      tenantId: 'poc',
       parentSessionId: parentSession.sessionId,
       childSessionId: childSession.sessionId,
-      callerTurnSeq: 2,
-      interaction: { interactionId: 'approval-child', kind: 'approval', request: { action: 'run-shell' } },
-      requestedAt: NOW
+      resolvedDelegate: new DelegateAdmissionManager().resolve(DELEGATE),
+      resolvedCalleeAgentSpec: childSession.resolvedAgentSpec,
+      status: 'open',
+      activeCallId: 'call-a',
+      nextCallSeq: 2,
+      calls: [{
+        delegationCallId: 'call-a',
+        delegationId: 'delegation-a',
+        callSeq: 1,
+        callerTurnSeq: 2,
+        callerToolRequestId: 'tool-a',
+        input: 'diagnose',
+        inputHash: 'hash-a',
+        status: 'active',
+        dispatch: { childTurnSeq: 1, inputEventId: 'input-a', commandEventId: 'command-a', commandState: 'accepted' },
+        deadlineAt: NOW,
+        createdAt: NOW,
+        updatedAt: NOW
+      }],
+      revision: 1,
+      createdAt: NOW,
+      updatedAt: NOW
     });
-    assert.equal(projected.sessionId, parentSession.sessionId);
-    const parentWithApproval = await storage.readSession(parentSession.sessionId);
-    assert.deepEqual(parentWithApproval?.openInteractions?.[0].delegatedRoute, {
-      childSessionId: childSession.sessionId,
-      childInteractionId: 'approval-child'
-    });
-
-    const response = await manager.respondInteraction(
-      { principal: { principalId: parentSession.owner, type: 'user' }, connectionId: 'client-a' },
-      parentSession.sessionId,
-      'ack-approval',
-      { interactionId: 'approval-child', decision: 'approved', scope: 'once' }
+    const lifecycle = new SessionLifecycleManager(storage, clock);
+    const eventLog = new EventLogManager(storage, clock);
+    const interactionManager = new InteractionManager(
+      'poc',
+      storage,
+      clock,
+      eventLog,
+      lifecycle,
+      new SessionLeaseManager(storage),
+      transport
     );
-    assert.equal(response.workerCommand?.workerId, 'worker-child');
-    assert.equal(response.workerCommand?.event.sessionId, childSession.sessionId);
-    assert.equal(response.routedInteractionRespondedEvent?.sessionId, childSession.sessionId);
-    assert.equal((await storage.readSession(parentSession.sessionId))?.openInteractions?.length ?? 0, 0);
-    assert.equal((await storage.readSession(childSession.sessionId))?.openInteractions?.length ?? 0, 0);
+    const parentEvents: RuntimeEvent[] = [];
+    const childEvents: RuntimeEvent[] = [];
+    const workerCommands: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'session-events', sessionId: parentSession.sessionId }, async ({ event }) => { parentEvents.push(event); });
+    await transport.subscribe({ kind: 'session-events', sessionId: childSession.sessionId }, async ({ event }) => { childEvents.push(event); });
+    await transport.subscribe({ kind: 'worker-commands', workerId: 'worker-child' }, async ({ event }) => { workerCommands.push(event); });
+
+    const interaction = await interactionManager.admitAgentRequest({
+      eventId: 'agent-request-a',
+      sessionId: childSession.sessionId,
+      workerId: 'worker-child',
+      sessionLeaseId: 'lease-child',
+      turnSeq: 1,
+      sequence: 0,
+      type: 'agent.interaction.requested',
+      timestamp: NOW,
+      actor: 'sidecar',
+      payload: {}
+    }, {
+      adapterRequestId: 'approval-child',
+      kind: 'approval',
+      request: { action: 'run-shell' }
+    });
+    assert.equal(interaction.views.length, 2);
+    assert.equal((parentEvents[0].payload as { interactionId: string }).interactionId, interaction.interactionId);
+    assert.equal((childEvents[0].payload as { interactionId: string }).interactionId, interaction.interactionId);
+
+    const resolved = await interactionManager.resolve(
+      { principal: { principalId: parentSession.owner, type: 'user' }, connectionId: 'client-a' },
+      childSession.sessionId,
+      { interactionId: interaction.interactionId, decision: 'approved', scope: 'once' }
+    );
+    const stale = await interactionManager.resolve(
+      { principal: { principalId: parentSession.owner, type: 'user' }, connectionId: 'client-b' },
+      parentSession.sessionId,
+      { interactionId: interaction.interactionId, decision: 'denied', scope: 'once' }
+    );
+
+    assert.equal(resolved.status, 'resolved');
+    assert.equal(stale.status, 'already_resolved');
+    assert.equal(parentEvents.filter((event) => event.type === 'interaction.responded').length, 1);
+    assert.equal(childEvents.filter((event) => event.type === 'interaction.responded').length, 1);
+    assert.equal(workerCommands.length, 1);
+    assert.equal(workerCommands[0].sessionId, childSession.sessionId);
+    assert.equal((workerCommands[0].payload as { adapterRequestId: string }).adapterRequestId, 'approval-child');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -289,7 +334,7 @@ function createSessionManager(storage: LocalFileStorage, reconciler?: SessionLif
     lifecycle,
     eventLog,
     new SessionStartManager(lifecycle, eventLog, assignment),
-    snapshot,
+    new SessionPauseManager(storage, lifecycle, eventLog, snapshot),
     reconciler
   );
 }

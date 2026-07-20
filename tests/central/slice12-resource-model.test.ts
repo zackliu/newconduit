@@ -136,7 +136,7 @@ test('scenario: persistence records an opaque handle from a supply-declared driv
     const manager = new SnapshotManager(storage, new SystemClock());
     const session = runningSession(COPILOT_STORAGE_CLASS);
 
-    const capture = manager.planCapture(session);
+    const capture = manager.planCapture(session, 'snapshot-intent');
     assert.ok(capture);
     assert.equal(capture.storageClass, COPILOT_STORAGE_CLASS);
     assert.equal(typeof capture.handle, 'string');
@@ -171,12 +171,12 @@ test('scenario: attachment kind dispatches bytes and recovery reuses the recorde
     // worker-pull driver: central hands the worker a capture/restore spec (the opaque handle).
     const pullSession = runningSession('volume-snapshot');
     assert.equal(manager.attachmentKind(pullSession), 'worker-pull');
-    assert.ok(manager.planCapture(pullSession));
+    assert.ok(manager.planCapture(pullSession, 'pull-snapshot-intent'));
 
     // host-managed driver: central moves nothing and produces no dispatch spec.
     const managedSession = runningSession('host-managed', { sessionId: 'session-managed' });
     assert.equal(manager.attachmentKind(managedSession), 'host-managed');
-    assert.equal(manager.planCapture(managedSession), undefined);
+    assert.equal(manager.planCapture(managedSession, 'managed-snapshot-intent'), undefined);
     assert.equal(await manager.recordCapture(managedSession, { snapshotId: 'x', parts: [] }), undefined);
 
     // Recovery reuses the storageClass driver recorded on the session, not one derived from a new worker.

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type InteractionRequestedPayload, type JsonValue, type RuntimeConnectionGrant, type RuntimeEvent, type RuntimeToolRequestedPayload, type SessionAssignPayload, type SessionInputCommandPayload, type SessionInteractionResponseCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type SessionRuntimeToolResponseCommandPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandAcceptedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
+import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentInteractionRequestedPayload, type JsonValue, type RuntimeConnectionGrant, type RuntimeEvent, type RuntimeToolRequestedPayload, type SessionAssignPayload, type SessionInputCommandPayload, type SessionInteractionResponseCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type SessionRuntimeToolResponseCommandPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandAcceptedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
 import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount } from './contracts';
 
 export interface StandaloneSidecarStartInput extends WorkerRegisterPayload {
@@ -21,6 +21,8 @@ interface ActiveAgentRunState {
   mount: SidecarWorkspaceMount;
   runtimeToolNames: ReadonlySet<string>;
   acceptedInputs: Map<number, { digest: string; commandEventId: string }>;
+  resolvedInteractionCommands: Set<string>;
+  inFlightInteractionCommands: Map<string, Promise<void>>;
   resolvedRuntimeToolRequests: Set<string>;
 }
 
@@ -29,10 +31,19 @@ interface HeartbeatState {
   capacity: number;
 }
 
+interface CompletedPause {
+  sessionId: string;
+  workerId: string;
+  sessionLeaseId: string;
+  payload: SessionPausedPayload;
+}
+
 const HEARTBEAT_INTERVAL_MS = 10_000;
 
 export class SidecarDaemon {
   private readonly activeRuns = new Map<string, ActiveAgentRunState>();
+  private readonly inFlightPauses = new Map<string, Promise<void>>();
+  private readonly completedPauses = new Map<string, CompletedPause>();
   private heartbeatState: HeartbeatState | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
 
@@ -83,6 +94,8 @@ export class SidecarDaemon {
       await Promise.all([...this.activeRuns.values()].map((run) => this.options.agentProcessAdapter.stop?.({ sessionId: run.sessionId })));
     }
     this.activeRuns.clear();
+    this.inFlightPauses.clear();
+    this.completedPauses.clear();
     await this.options.runtimeTransport.stop();
   }
 
@@ -155,6 +168,11 @@ export class SidecarDaemon {
   private async handleAssign(event: RuntimeEvent<SessionAssignPayload>): Promise<void> {
     const payload = this.parseAssignPayload(event.payload);
     const sessionLeaseId = this.requireSessionLeaseId(event, payload.sessionLeaseId);
+    for (const key of this.completedPauses.keys()) {
+      if (key.startsWith(`${payload.sessionId}:`)) {
+        this.completedPauses.delete(key);
+      }
+    }
     const mounted = this.options.workspaceAdapter.mount({
       workspaceRef: payload.workspaceRef,
       agentStateRef: payload.copilotSessionStateRef
@@ -183,6 +201,8 @@ export class SidecarDaemon {
       mount: mounted,
       runtimeToolNames: new Set(payload.resolvedAgentSpec.runtimeTools.map((tool) => tool.name)),
       acceptedInputs: new Map(),
+      resolvedInteractionCommands: new Set(),
+      inFlightInteractionCommands: new Map(),
       resolvedRuntimeToolRequests: new Set()
     });
     try {
@@ -276,13 +296,17 @@ export class SidecarDaemon {
               settle();
               return;
             }
-            await this.publishTenantEvent<InteractionRequestedPayload>({
-              type: 'interaction.requested',
+            await this.publishTenantEvent<AgentInteractionRequestedPayload>({
+              type: 'agent.interaction.requested',
               sessionId: payload.sessionId,
               workerId: payload.workerId,
               sessionLeaseId: payload.sessionLeaseId,
               turnSeq: payload.turnSeq,
-              payload: event.payload
+              payload: {
+                adapterRequestId: event.payload.interactionId,
+                kind: event.payload.kind,
+                request: event.payload.request
+              }
             });
             settle();
             return;
@@ -343,12 +367,30 @@ export class SidecarDaemon {
       await this.publishCommandRejected(event, 'stale_session_lease', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
       return;
     }
-    await this.options.agentProcessAdapter.respondToInteraction?.({
+    if (active.resolvedInteractionCommands.has(event.eventId)) {
+      await this.publishCommandAccepted(event, event.turnSeq ?? 0);
+      return;
+    }
+    const existing = active.inFlightInteractionCommands.get(event.eventId);
+    if (existing) {
+      await existing;
+      await this.publishCommandAccepted(event, event.turnSeq ?? 0);
+      return;
+    }
+    const operation = this.options.agentProcessAdapter.respondToInteraction?.({
       sessionId: payload.sessionId,
-      interactionId: payload.interactionId,
+      interactionId: payload.adapterRequestId,
       kind: payload.kind,
       response: payload.response
-    });
+    }) ?? Promise.resolve();
+    active.inFlightInteractionCommands.set(event.eventId, operation);
+    try {
+      await operation;
+    } finally {
+      active.inFlightInteractionCommands.delete(event.eventId);
+    }
+    active.resolvedInteractionCommands.add(event.eventId);
+    await this.publishCommandAccepted(event, event.turnSeq ?? 0);
   }
 
   private async handleRuntimeToolResponse(event: RuntimeEvent<SessionRuntimeToolResponseCommandPayload>): Promise<void> {
@@ -394,6 +436,17 @@ export class SidecarDaemon {
 
   private async handlePause(event: RuntimeEvent<SessionPauseCommandPayload>): Promise<void> {
     const payload = this.parsePausePayload(event.payload);
+    const pauseKey = `${payload.sessionId}:${payload.sessionLeaseId}`;
+    const inFlight = this.inFlightPauses.get(pauseKey);
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
+    const completed = this.completedPauses.get(pauseKey);
+    if (completed) {
+      await this.publishCompletedPause(completed);
+      return;
+    }
     const active = this.activeRuns.get(payload.sessionId);
     if (!active) {
       await this.publishCommandRejected(event, 'unknown_session', undefined, payload.sessionLeaseId);
@@ -403,24 +456,43 @@ export class SidecarDaemon {
       await this.publishCommandRejected(event, 'stale_session_lease', active.sessionLeaseId, event.sessionLeaseId ?? payload.sessionLeaseId);
       return;
     }
-    await active.ready;
-    await this.options.agentProcessAdapter.pauseAtTurnBoundary?.({ sessionId: payload.sessionId });
-    await this.options.agentProcessAdapter.stop?.({ sessionId: payload.sessionId });
-    const snapshot = payload.capture
-      ? { snapshotId: payload.capture.snapshotId, parts: await this.options.workspaceAdapter.capture({ mount: active.mount, handle: payload.capture.handle }) }
-      : undefined;
-    this.activeRuns.delete(payload.sessionId);
+    const operation = (async () => {
+      await active.ready;
+      await this.options.agentProcessAdapter.pauseAtTurnBoundary?.({ sessionId: payload.sessionId });
+      await this.options.agentProcessAdapter.stop?.({ sessionId: payload.sessionId });
+      const snapshot = payload.capture
+        ? { snapshotId: payload.capture.snapshotId, parts: await this.options.workspaceAdapter.capture({ mount: active.mount, handle: payload.capture.handle }) }
+        : undefined;
+      this.activeRuns.delete(payload.sessionId);
+      const result: CompletedPause = {
+        sessionId: payload.sessionId,
+        workerId: payload.workerId,
+        sessionLeaseId: payload.sessionLeaseId,
+        payload: {
+          reason: payload.reason,
+          ...(snapshot ? { snapshot } : {})
+        }
+      };
+      this.completedPauses.set(pauseKey, result);
+      await this.publishCompletedPause(result);
+      await this.publishHeartbeat();
+    })();
+    this.inFlightPauses.set(pauseKey, operation);
+    try {
+      await operation;
+    } finally {
+      this.inFlightPauses.delete(pauseKey);
+    }
+  }
+
+  private async publishCompletedPause(completed: CompletedPause): Promise<void> {
     await this.publishTenantEvent<SessionPausedPayload>({
       type: 'session.paused',
-      sessionId: payload.sessionId,
-      workerId: payload.workerId,
-      sessionLeaseId: payload.sessionLeaseId,
-      payload: {
-        reason: payload.reason,
-        ...(snapshot ? { snapshot } : {})
-      }
+      sessionId: completed.sessionId,
+      workerId: completed.workerId,
+      sessionLeaseId: completed.sessionLeaseId,
+      payload: completed.payload
     });
-    await this.publishHeartbeat();
   }
 
   private async publishCommandRejected(
@@ -578,6 +650,7 @@ export class SidecarDaemon {
       || typeof candidate.workerId !== 'string'
       || typeof candidate.sessionLeaseId !== 'string'
       || typeof candidate.interactionId !== 'string'
+      || typeof candidate.adapterRequestId !== 'string'
       || (candidate.kind !== 'approval' && candidate.kind !== 'tool_call')) {
       throw new Error('invalid session.interaction.response payload');
     }

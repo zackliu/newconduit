@@ -1057,6 +1057,16 @@ textarea:disabled {
   color: #923628;
 }
 
+.noticeBanner {
+  max-width: 900px;
+  width: 100%;
+  margin: 10px auto 0;
+  padding: 8px 12px;
+  border-left: 2px solid #4f7666;
+  color: #36574a;
+  font-size: 13px;
+}
+
 .approvalDock {
   max-width: 900px;
   width: 100%;
@@ -1114,6 +1124,11 @@ textarea:disabled {
   border: 1px solid transparent;
   font-size: 13px;
   cursor: pointer;
+}
+
+.approvalButton:disabled {
+  cursor: wait;
+  opacity: 0.58;
 }
 
 .approvalButton.deny {

@@ -32,6 +32,7 @@
 | [poc-implementation-plan-ch.md](poc-implementation-plan-ch.md) | 把 POC workflow 拆成按顺序实现的 coding slices，并为每一片定义 scenario-based test。 |
 | [foundry-hosted-agent-workerpool-ch.md](foundry-hosted-agent-workerpool-ch.md) | 把 Foundry 作为又一类 host-pool adapter（worker pool 后端）的目标态设计：Foundry 只托管容器、命令仍走 Web PubSub（同 Docker）；host-pool adapter 持有一条 liveness invocation 做 boot/keepalive、boot payload 传 per-worker 引导、pause=terminate+我们自己的 snapshot、agent 定义放 repo 的 `foundry/`；Foundry 相关全是 config 可选的 class，无 if-else。 |
 | [durable-agent-delegation-ch.md](durable-agent-delegation-ch.md) | 定义 registered Delegate、Parent-scoped Delegation 与逐次 DelegationCall：现有 `copilot-poc` / `copilot-foundry` AgentSpec引用同一个Delegate，同一Parent/Delegate的Calls串行复用一个普通Child Session。 |
+| [durable-interaction-broker-ch.md](durable-interaction-broker-ch.md) | 定义 approval 与 client tool 的 canonical durable Interaction、普通 Session/Child 统一 owner 流程、单层 Parent projection、首次响应、ack 和 Worker delivery。 |
 
 ## 建议的后续拆分
 

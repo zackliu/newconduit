@@ -7,6 +7,9 @@ import type {
   AgentTurnEvent,
   AgentTurnResult,
   CreateSessionInput,
+  DelegatedInteractionSource,
+  InteractionResponseInput,
+  InteractionResponseResult,
   RuntimeConnectionGrant,
   SdkRuntimeEvent,
   SdkRuntimeEventType,
@@ -36,6 +39,13 @@ interface PendingAcknowledgement {
 export interface StartSessionResult {
   session: SessionHandle;
   turn: AgentTurn;
+}
+
+export class InteractionResponseError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'InteractionResponseError';
+  }
 }
 
 export class AgentRuntimeClient {
@@ -509,10 +519,13 @@ export class SessionHandle {
    * `decision` ('approved' | 'denied') and optionally `scope` ('once' | 'session', where 'session'
    * establishes a standing approval rule). For a client tool call, pass `result`.
    */
-  async respondToInteraction(input: { interactionId: string; decision?: 'approved' | 'denied'; scope?: 'once' | 'session'; result?: unknown }): Promise<void> {
+  async respondToInteraction(input: InteractionResponseInput): Promise<InteractionResponseResult> {
+    const ackId = crypto.randomUUID();
+    const acknowledgement = this.runtime.waitForAcknowledgement(ackId, 'interaction.responded.ack');
     await this.runtime.publishTenantEvent({
       type: 'interaction.respond.requested',
       sessionId: this.id,
+      ackId,
       payload: {
         interactionId: input.interactionId,
         decision: input.decision,
@@ -520,6 +533,22 @@ export class SessionHandle {
         result: input.result
       }
     });
+    const acknowledged = await acknowledgement;
+    const payload = mapRecord(acknowledged.payload);
+    if (payload.interactionId !== input.interactionId) {
+      throw new Error('interaction.responded.ack returned the wrong interactionId');
+    }
+    if (payload.status === 'rejected') {
+      const error = mapRecord(payload.error);
+      throw new InteractionResponseError(
+        typeof error.code === 'string' ? error.code : 'interaction_response_rejected',
+        typeof error.message === 'string' ? error.message : 'interaction response was rejected'
+      );
+    }
+    if (payload.status !== 'resolved' && payload.status !== 'already_resolved') {
+      throw new Error('central returned invalid interaction response acknowledgement');
+    }
+    return { status: payload.status };
   }
 }
 
@@ -614,7 +643,7 @@ export class AgentTurn {
     if (!mapped || mapped.turnSeq !== this.sequence) {
       return undefined;
     }
-    if (mapped.type === 'user.message' || mapped.type === 'status' || mapped.type === 'interaction.requested' || mapped.type === 'interaction.responded') {
+    if (mapped.type === 'user.message' || mapped.type === 'status' || mapped.type === 'interaction.requested' || mapped.type === 'interaction.responded' || mapped.type === 'interaction.interrupted') {
       return undefined;
     }
     return mapped;
@@ -667,14 +696,23 @@ export function mapSessionEvent(event: SdkRuntimeEvent): SessionEvent | undefine
   }
   if (event.type === 'interaction.requested') {
     const kind = payload.kind === 'tool_call' ? 'tool_call' : 'approval';
+    const source = mapDelegatedInteractionSource(payload.source);
     return typeof payload.interactionId === 'string'
-      ? { type: 'interaction.requested', sessionId, turnSeq, interactionId: payload.interactionId, kind, request: payload.request }
+      ? { type: 'interaction.requested', sessionId, turnSeq, interactionId: payload.interactionId, kind, request: payload.request, source }
       : undefined;
   }
   if (event.type === 'interaction.responded') {
     const kind = payload.kind === 'tool_call' ? 'tool_call' : 'approval';
     return typeof payload.interactionId === 'string'
       ? { type: 'interaction.responded', sessionId, turnSeq, interactionId: payload.interactionId, kind, response: payload.response }
+      : undefined;
+  }
+  if (event.type === 'interaction.interrupted') {
+    const kind = payload.kind === 'tool_call' ? 'tool_call' : 'approval';
+    const reason = payload.reason;
+    return typeof payload.interactionId === 'string'
+      && (reason === 'owner_lease_lost' || reason === 'owner_turn_failed' || reason === 'owner_session_terminal')
+      ? { type: 'interaction.interrupted', sessionId, turnSeq, interactionId: payload.interactionId, kind, reason }
       : undefined;
   }
   if (event.type !== 'agent.output') {
@@ -702,6 +740,15 @@ export function mapSessionEvent(event: SdkRuntimeEvent): SessionEvent | undefine
     return { type: 'agent.internal', sessionId, turnSeq, label: internalEvent.type, detail: internalEvent.data };
   }
   return undefined;
+}
+
+function mapDelegatedInteractionSource(value: unknown): DelegatedInteractionSource | undefined {
+  const source = mapRecord(value);
+  return source.kind === 'delegated_session'
+    && typeof source.ownerSessionId === 'string'
+    && typeof source.agentSpecId === 'string'
+    ? { kind: 'delegated_session', ownerSessionId: source.ownerSessionId, agentSpecId: source.agentSpecId }
+    : undefined;
 }
 
 

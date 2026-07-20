@@ -1,0 +1,609 @@
+{
+  "data": [
+    {
+      "agent_session_id": "w-32ba0d49-af5f-4d72-9c72-64cd6896fa27",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783482797,
+      "last_accessed_at": 1783482797,
+      "expires_at": 1786074797
+    },
+    {
+      "agent_session_id": "w-352ac354-b55b-4510-ae91-bd3b0af81fd6",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783484987,
+      "last_accessed_at": 1783484987,
+      "expires_at": 1786076987
+    },
+    {
+      "agent_session_id": "w-a4d37150-e2fa-4078-8b13-f7648057770d",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783489785,
+      "last_accessed_at": 1783489785,
+      "expires_at": 1786081785
+    },
+    {
+      "agent_session_id": "w-d1e89edb-284a-40fb-a0dd-0f53fb41eb12",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783488874,
+      "last_accessed_at": 1783488874,
+      "expires_at": 1786080874
+    },
+    {
+      "agent_session_id": "w-71cf1a8f-efd9-4c7f-9759-4ef12d10b7ed",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783489007,
+      "last_accessed_at": 1783489007,
+      "expires_at": 1786081007
+    },
+    {
+      "agent_session_id": "ws-e2e-1783503586189",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783503601,
+      "last_accessed_at": 1783503601,
+      "expires_at": 1786095601
+    },
+    {
+      "agent_session_id": "ws-e2e-1783504123766",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783504137,
+      "last_accessed_at": 1783504137,
+      "expires_at": 1786096137
+    },
+    {
+      "agent_session_id": "4a594aea-1b7f-4b86-9c8a-b61ea98f62b4",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783564490,
+      "last_accessed_at": 1783564490,
+      "expires_at": 1786156490
+    },
+    {
+      "agent_session_id": "ws-e2e-1783564471484",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783564489,
+      "last_accessed_at": 1783564489,
+      "expires_at": 1786156489
+    },
+    {
+      "agent_session_id": "probe-1783564546881",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783564593,
+      "last_accessed_at": 1783564593,
+      "expires_at": 1786156593
+    },
+    {
+      "agent_session_id": "ws-e2e-1783564721911",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783565986,
+      "last_accessed_at": 1783565986,
+      "expires_at": 1786157986
+    },
+    {
+      "agent_session_id": "ws-e2e-1783564833998",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783564842,
+      "last_accessed_at": 1783564842,
+      "expires_at": 1786156842
+    },
+    {
+      "agent_session_id": "ws-e2e-1783565092144",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783565140,
+      "last_accessed_at": 1783565140,
+      "expires_at": 1786157140
+    },
+    {
+      "agent_session_id": "7c2fa0ea-a5fe-4d75-a069-ca5177f2748f",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "deleted",
+      "created_at": 1783566837,
+      "last_accessed_at": 1783566837,
+      "expires_at": 1786158837
+    },
+    {
+      "agent_session_id": "421638ca-1257-419e-8bc0-4519be1e4acd",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783572631,
+      "last_accessed_at": 1783572631,
+      "expires_at": 1786164631
+    },
+    {
+      "agent_session_id": "6c933e7e-e3a6-4680-b9f6-fecaabcb40e7",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783573248,
+      "last_accessed_at": 1783573248,
+      "expires_at": 1786165248
+    },
+    {
+      "agent_session_id": "0101e0a5-59e1-4fa3-80e5-0f5e34abe3b7",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783574831,
+      "last_accessed_at": 1783574831,
+      "expires_at": 1786166831
+    },
+    {
+      "agent_session_id": "9b6dd163-f536-4b6d-b3fa-57aa7474c253",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783578543,
+      "last_accessed_at": 1783578543,
+      "expires_at": 1786170543
+    },
+    {
+      "agent_session_id": "a8e8f65d-f87b-4f57-ab70-08d5b103f23c",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783578543,
+      "last_accessed_at": 1783578543,
+      "expires_at": 1786170543
+    },
+    {
+      "agent_session_id": "e4cf7378-66df-401a-aaec-61a82061e62a",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "3"
+      },
+      "status": "idle",
+      "created_at": 1783574957,
+      "last_accessed_at": 1783574957,
+      "expires_at": 1786166957
+    },
+    {
+      "agent_session_id": "5c6e6570-9453-4407-91c6-912c4e77f5cd",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "6"
+      },
+      "status": "idle",
+      "created_at": 1783578225,
+      "last_accessed_at": 1783578225,
+      "expires_at": 1786170225
+    },
+    {
+      "agent_session_id": "34edec21-d594-45c3-8524-ddf02b1770e0",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "6"
+      },
+      "status": "idle",
+      "created_at": 1783578225,
+      "last_accessed_at": 1783578225,
+      "expires_at": 1786170225
+    },
+    {
+      "agent_session_id": "probe-boot-1908939076",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "6"
+      },
+      "status": "idle",
+      "created_at": 1783577782,
+      "last_accessed_at": 1783577782,
+      "expires_at": 1786169782
+    },
+    {
+      "agent_session_id": "605b55d1-1d89-4fd5-94c1-925cfdaa1b62",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "6"
+      },
+      "status": "idle",
+      "created_at": 1783578575,
+      "last_accessed_at": 1783578575,
+      "expires_at": 1786170575
+    },
+    {
+      "agent_session_id": "556d67f8-0422-4a43-9c9d-285cf824119d",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "7"
+      },
+      "status": "idle",
+      "created_at": 1783577751,
+      "last_accessed_at": 1783577751,
+      "expires_at": 1786169751
+    },
+    {
+      "agent_session_id": "b0d4f0ee-24dc-4d3a-84c3-992c60a7461f",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "7"
+      },
+      "status": "idle",
+      "created_at": 1783612099,
+      "last_accessed_at": 1783612099,
+      "expires_at": 1786204099
+    },
+    {
+      "agent_session_id": "5f94c015-ac7a-4ab6-b040-8c47abeef27a",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "8"
+      },
+      "status": "deleted",
+      "created_at": 1783924408,
+      "last_accessed_at": 1783924408,
+      "expires_at": 1786516408
+    },
+    {
+      "agent_session_id": "5c865061-92f9-42c6-bee4-b2c6dba08ae2",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "9"
+      },
+      "status": "idle",
+      "created_at": 1783923006,
+      "last_accessed_at": 1783923006,
+      "expires_at": 1786515006
+    },
+    {
+      "agent_session_id": "8c8b0167-73f2-4a5d-bb8b-a1df34006bf8",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "9"
+      },
+      "status": "idle",
+      "created_at": 1783924601,
+      "last_accessed_at": 1783924601,
+      "expires_at": 1786516601
+    },
+    {
+      "agent_session_id": "383c49f1-9590-4caf-b9ad-af6ef9647a9e",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "10"
+      },
+      "status": "idle",
+      "created_at": 1783942312,
+      "last_accessed_at": 1783942312,
+      "expires_at": 1786534312
+    },
+    {
+      "agent_session_id": "cc585c6a-1c95-4120-b6b1-214f40ff5455",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "10"
+      },
+      "status": "idle",
+      "created_at": 1783937117,
+      "last_accessed_at": 1783937117,
+      "expires_at": 1786529117
+    },
+    {
+      "agent_session_id": "b0b1c542-8fbf-4ba2-aa71-10eb2a0e1873",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "10"
+      },
+      "status": "idle",
+      "created_at": 1783937329,
+      "last_accessed_at": 1783937329,
+      "expires_at": 1786529329
+    },
+    {
+      "agent_session_id": "a1c3c384-534a-4be0-bb73-a200cbeb580a",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "10"
+      },
+      "status": "idle",
+      "created_at": 1783996443,
+      "last_accessed_at": 1783996443,
+      "expires_at": 1786588443
+    },
+    {
+      "agent_session_id": "163c5d93-d0a4-4de2-bcbe-8124734dd92b",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "11"
+      },
+      "status": "idle",
+      "created_at": 1784081119,
+      "last_accessed_at": 1784081119,
+      "expires_at": 1786673119
+    },
+    {
+      "agent_session_id": "31c808aa-38e3-45bc-a582-da8aa78c5ca9",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "14"
+      },
+      "status": "deleted",
+      "created_at": 1784083483,
+      "last_accessed_at": 1784083483,
+      "expires_at": 1786675483
+    },
+    {
+      "agent_session_id": "202c685b-2a79-47e6-b61e-461f9d928618",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784087202,
+      "last_accessed_at": 1784087202,
+      "expires_at": 1786679202
+    },
+    {
+      "agent_session_id": "38799698-7198-445d-9b6b-e816e5c496fe",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784090263,
+      "last_accessed_at": 1784090263,
+      "expires_at": 1786682263
+    },
+    {
+      "agent_session_id": "51d5295b-f527-4e49-91a1-b2157d14e9a6",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784091483,
+      "last_accessed_at": 1784091483,
+      "expires_at": 1786683483
+    },
+    {
+      "agent_session_id": "0615d1ca-c573-475e-abf2-1c428d43908c",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784091812,
+      "last_accessed_at": 1784091812,
+      "expires_at": 1786683812
+    },
+    {
+      "agent_session_id": "46431471-1c71-48a1-9476-55fe77ad6899",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784092486,
+      "last_accessed_at": 1784092486,
+      "expires_at": 1786684486
+    },
+    {
+      "agent_session_id": "34c24b54-feea-46c8-bdb8-3179f81dd656",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784092831,
+      "last_accessed_at": 1784092831,
+      "expires_at": 1786684831
+    },
+    {
+      "agent_session_id": "1e9331e9-d997-426a-a07e-34c76484598a",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784093720,
+      "last_accessed_at": 1784093720,
+      "expires_at": 1786685720
+    },
+    {
+      "agent_session_id": "5209866d-374f-47da-8131-85ddf0a8b02c",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784097301,
+      "last_accessed_at": 1784097301,
+      "expires_at": 1786689301
+    },
+    {
+      "agent_session_id": "fe3add91-3871-470a-9532-c91304a6f3f2",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784097436,
+      "last_accessed_at": 1784097436,
+      "expires_at": 1786689436
+    },
+    {
+      "agent_session_id": "be0dcba6-7fd3-4ef5-a6e2-74155a838431",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784167629,
+      "last_accessed_at": 1784167629,
+      "expires_at": 1786759629
+    },
+    {
+      "agent_session_id": "1b31f98f-5991-4099-be96-39e16265df0a",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784168630,
+      "last_accessed_at": 1784168630,
+      "expires_at": 1786760630
+    },
+    {
+      "agent_session_id": "92a74368-b9c0-41ab-9104-a596fc1f27ca",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784511895,
+      "last_accessed_at": 1784511895,
+      "expires_at": 1787103895
+    },
+    {
+      "agent_session_id": "b2c5b2b3-2ee8-4c39-8343-f0c9f6fd5d5a",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784517099,
+      "last_accessed_at": 1784517099,
+      "expires_at": 1787109099
+    },
+    {
+      "agent_session_id": "c2e23d74-e27e-4da0-8af3-712118df9559",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784519650,
+      "last_accessed_at": 1784519650,
+      "expires_at": 1787111650
+    },
+    {
+      "agent_session_id": "87cf337c-0f5b-4915-a24d-5d1d3608ad72",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784520109,
+      "last_accessed_at": 1784520109,
+      "expires_at": 1787112109
+    },
+    {
+      "agent_session_id": "a9b7951e-8b5a-4ca2-b460-877c0dac8f52",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "16"
+      },
+      "status": "idle",
+      "created_at": 1784520805,
+      "last_accessed_at": 1784520805,
+      "expires_at": 1787112805
+    },
+    {
+      "agent_session_id": "ws-e2e-1784521153272",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "17"
+      },
+      "status": "deleted",
+      "created_at": 1784521163,
+      "last_accessed_at": 1784521163,
+      "expires_at": 1787113163
+    },
+    {
+      "agent_session_id": "ws-e2e-1784521379517",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "17"
+      },
+      "status": "deleted",
+      "created_at": 1784521408,
+      "last_accessed_at": 1784521408,
+      "expires_at": 1787113408
+    },
+    {
+      "agent_session_id": "ws-e2e-1784521587814",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "17"
+      },
+      "status": "deleted",
+      "created_at": 1784521617,
+      "last_accessed_at": 1784521617,
+      "expires_at": 1787113617
+    },
+    {
+      "agent_session_id": "ws-e2e-1784521678900",
+      "version_indicator": {
+        "type": "version_ref",
+        "agent_version": "17"
+      },
+      "status": "deleted",
+      "created_at": 1784521714,
+      "last_accessed_at": 1784521714,
+      "expires_at": 1787113714
+    }
+  ]
+}

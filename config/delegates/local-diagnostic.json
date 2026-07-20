@@ -1,0 +1,9 @@
+{
+  "id": "local-diagnostic",
+  "toolName": "inspect_local_system",
+  "description": "Collect current evidence from the target developer machine when diagnosis requires local operating-system, process, service, port, network, filesystem, runtime, Docker, WSL, toolchain, or bounded log information. Request only specific read-only checks; the local diagnostic agent reports observed facts and does not perform remediation.",
+  "maxInputBytes": 8192,
+  "maxResultBytes": 32768,
+  "deadlineMs": 600000,
+  "maxQueuedCalls": 1
+}

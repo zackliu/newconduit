@@ -31,29 +31,41 @@ test('scenario: foundry host pool adapter creates and deletes a real Foundry ses
     workerType: 'copilot-local',
     credential
   });
-  // A deleted session lingers in the list with status "deleted"; only "active" ones are reusable sandboxes.
+  // Read the addressed session directly. Listing is paginated and an accumulated project can omit the new
+  // session from its first page even though the session already reached its target status.
   // Timestamps are unix-epoch seconds (numbers), not ISO strings.
-  const listSessions = async (): Promise<Array<{ agent_session_id: string; status: string; created_at?: number; last_accessed_at?: number }>> => {
+  const readSession = async (id: string): Promise<{ agent_session_id: string; status: string; created_at?: number; last_accessed_at?: number } | undefined> => {
     const token = await credential.getToken('https://ai.azure.com/.default');
-    const response = await fetch(`${projectEndpoint.replace(/\/+$/, '')}/agents/${agentName}/endpoint/sessions?api-version=v1`, {
+    const response = await fetch(`${projectEndpoint.replace(/\/+$/, '')}/agents/${agentName}/endpoint/sessions/${encodeURIComponent(id)}?api-version=v1`, {
       headers: { authorization: `Bearer ${token?.token ?? ''}`, 'foundry-features': 'HostedAgents=V1Preview' }
     });
-    const body = (await response.json()) as { data?: Array<{ agent_session_id: string; status: string; created_at?: number; last_accessed_at?: number }> };
-    return body.data ?? [];
+    if (response.status === 404) {
+      return undefined;
+    }
+    assert.equal(response.ok, true, `read Foundry session ${id} failed with HTTP ${response.status}`);
+    return await response.json() as { agent_session_id: string; status: string; created_at?: number; last_accessed_at?: number };
   };
-  const findSession = (sessions: Array<{ agent_session_id: string; status: string; created_at?: number; last_accessed_at?: number }>, id: string) =>
-    sessions.find((session) => session.agent_session_id === id);
   // Status transitions are eventual and pass through a transient `updating`; poll until the target status settles.
   // Observed lifecycle: active (compute up) -> updating -> idle (compute off, $HOME kept, reusable); delete -> deleted.
   const pollStatus = async (id: string, wanted: string, attempts: number) => {
     for (let attempt = 0; attempt < attempts; attempt++) {
       await delay(2_000);
-      const record = findSession(await listSessions(), id);
+      const record = await readSession(id);
       if (record?.status === wanted) {
         return record;
       }
     }
     return undefined;
+  };
+  const pollDeleted = async (id: string, attempts: number): Promise<boolean> => {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      await delay(2_000);
+      const record = await readSession(id);
+      if (!record || record.status === 'deleted') {
+        return true;
+      }
+    }
+    return false;
   };
   const now = new Date().toISOString();
   const pool: WorkerPoolRecord = {
@@ -80,6 +92,7 @@ test('scenario: foundry host pool adapter creates and deletes a real Foundry ses
     createdAt: now,
     updatedAt: now
   };
+  let cleanupInstance = instance;
 
   try {
     // BOOT: ensureRunning invokes the durable session id and holds the liveness request.
@@ -100,6 +113,7 @@ test('scenario: foundry host pool adapter creates and deletes a real Foundry ses
     // the pause/resume loop hangs.
     const resumeInstance: HostPoolInstanceRecord = { ...instance, instanceId: `e2e-resume-${Date.now()}` };
     const resumed = await adapter.ensureRunning({ pool, instance: resumeInstance });
+    cleanupInstance = resumeInstance;
     assert.equal(resumed.hostHandle, workspaceRef, 'resume reuses the same durable Foundry session id');
     const afterResume = await pollStatus(resumed.hostHandle, 'active', 20);
     assert.ok(afterResume, `a paused (stopped) session ${resumed.hostHandle} must be re-invokable so resume cold-boots`);
@@ -114,7 +128,7 @@ test('scenario: foundry host pool adapter creates and deletes a real Foundry ses
 
     // SESSION END: `release` deletes the durable session.
     await adapter.ensureStopped({ pool, instance: { ...resumeInstance, hostHandle: resumed.hostHandle }, durableAction: 'release' });
-    const deleted = await pollStatus(resumed.hostHandle, 'deleted', 15);
+    const deleted = await pollDeleted(resumed.hostHandle, 15);
     assert.ok(deleted, `release should delete session ${resumed.hostHandle}`);
   } catch (error) {
     if (isCredentialUnavailable(error)) {
@@ -122,5 +136,11 @@ test('scenario: foundry host pool adapter creates and deletes a real Foundry ses
       return;
     }
     throw error;
+  } finally {
+    await adapter.ensureStopped({
+      pool,
+      instance: { ...cleanupInstance, hostHandle: workspaceRef },
+      durableAction: 'release'
+    }).catch(() => undefined);
   }
 });

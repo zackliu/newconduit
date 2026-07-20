@@ -169,6 +169,7 @@ type SdkRuntimeEventType =
   | 'session.cancel.requested'
   | 'interaction.requested'
   | 'interaction.responded'
+  | 'interaction.interrupted'
   | 'interaction.respond.requested'
   | 'interaction.responded.ack'
   | 'session.assign'
@@ -387,27 +388,33 @@ Central acknowledgement：
 
 ### Respond To Interaction
 
-Agent 通过 sidecar publish `interaction.requested` 到 tenant inbox（central append 为 durable session event 并计入 session 的 open interactions）。它挂起当前 turn，直到被响应；不依赖 client 是否在线。`interactionId` 复用 agent runtime 的 pending request id，供回包精确关联。
+Agent 通过 sidecar publish `agent.interaction.requested { adapterRequestId, kind, request }` 到 tenant inbox。该 sidecar-to-central ingress fact 不进入 SDK event union。Central 校验当前 Worker lease 后创建 canonical durable Interaction，生成 tenant-unique public `interactionId`，并把 adapter correlation 作为内部 `adapterRequestId` 保存。SDK、session history 和 client response 只使用 Central public ID，不暴露 adapter request ID。
+
+普通 Session 只产生 owner Session event。Delegation-created Child Session仍是 owner；Central 额外向直接 Parent Session 投影同一个 public `interactionId`。Parent projection 带 `source`，Child owner event 不带。递归或链式 Subsession 不属于本协议。
 
 ```json
 {
   "eventId": "<uuid>",
   "sessionId": "<session-id>",
-  "sequence": 0,
+  "sequence": 12,
   "type": "interaction.requested",
   "timestamp": "<iso timestamp>",
-  "actor": "sidecar",
-  "sessionLeaseId": "<lease-id>",
+  "actor": "central",
   "turnSeq": 2,
   "payload": {
-    "interactionId": "<agent-runtime request id>",
+    "interactionId": "<central public interaction id>",
     "kind": "approval",
-    "request": {}
+    "request": {},
+    "source": {
+      "kind": "delegated_session",
+      "ownerSessionId": "<child-session-id>",
+      "agentSpecId": "<child-agent-spec-id>"
+    }
   }
 }
 ```
 
-`session.respondToInteraction()` publish `interaction.respond.requested` 到 tenant inbox。`approval` 带 `decision` 和 `scope`（`scope: session` 建立常驻放行规则）；`tool_call` 带 `result`。
+`session.respondToInteraction()` 先为 `interaction.responded.ack` 注册 private-inbox waiter，再 publish `interaction.respond.requested` 到 tenant inbox。`approval` 带 `decision` 和 `scope`；`tool_call` 带 `result`。`scope: session` 只在 canonical owner agent session 建立 standing rule，即使 response 从 Parent projection 发出，也不作用于 Parent。
 
 ```json
 {
@@ -426,7 +433,37 @@ Agent 通过 sidecar publish `interaction.requested` 到 tenant inbox（central 
 }
 ```
 
-Central 授权 principal、append `interaction.responded`、从 open interactions 移除，并把 `session.interaction.response` worker command route 到当前 lease 的 Worker；ack `interaction.responded.ack` 回 client private inbox。Agent-executed built-in/MCP tool 仍走 `tool.started`/`tool.completed` observation，不产生 interaction。
+Central 对 addressed Session view 和 canonical owner 执行 authorization，并通过 durable compare-and-set 完成唯一的 `open -> resolved`。第一次合法响应为 owner 和 Parent view append `interaction.responded`，并把 response 幂等投递给 owner Worker；后到响应不覆盖结果、不追加第二组 responded event，也不产生第二次 Worker delivery。
+
+Private acknowledgement：
+
+```json
+{
+  "eventId": "<uuid>",
+  "sessionId": "<addressed-session-id>",
+  "sequence": 0,
+  "type": "interaction.responded.ack",
+  "timestamp": "<iso timestamp>",
+  "actor": "central",
+  "ackId": "<same-ack-id>",
+  "payload": {
+    "interactionId": "<same public interaction id>",
+    "status": "resolved"
+  }
+}
+```
+
+`status` 取值：
+
+- `resolved`：本次 command 赢得第一次合法 response。
+- `already_resolved`：Interaction 已被同一或另一 Session view 回答；这是正常幂等结果，SDK 不抛异常。
+- `rejected`：authorization、view ownership 或 typed response 校验失败，payload 同时包含 `{ error: { code, message } }`，SDK 抛 typed error。
+
+`respondToInteraction()` 返回 `{ status: 'resolved' | 'already_resolved' }`。合法 command 不得因为 Central exception 只留下服务端日志并最终让 SDK timeout。
+
+Client disconnect 不影响 open Interaction。存在 open Interaction 时 turn 尚未到 pause boundary，正常 pause 不释放 owner lease。Owner Worker lease 丢失时，Central append `interaction.interrupted`；restart-with-context 后 agent 新产生的 request 是新 Interaction，旧 approval 或 tool result不自动重放。
+
+Agent-executed built-in/MCP tool 仍走 `tool.started`/`tool.completed` observation，不产生 Interaction。完整 resource、delivery、Delegation projection 和 recovery 语义见 [`specs/durable-interaction-broker-ch.md`](../../specs/durable-interaction-broker-ch.md)。
 
 ## 9. Turn Events And Result
 

@@ -1,8 +1,8 @@
-import type { Clock, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPauseCommandPayload, SessionPausedPayload, SessionPauseRequestedPayload, SessionRecord } from '../../../shared';
+import type { Clock, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPauseCommandPayload, SessionPausedPayload, SessionRecord, WorkerRecord } from '../../../shared';
 import { EventLogManager } from './event-log-manager';
 import { SessionAssignmentManager, type WorkerCommandOutput } from './session-assignment-manager';
 import { SessionLifecycleManager } from './session-lifecycle-manager';
-import { SnapshotManager } from '../../persistence/snapshot-manager';
+import { SessionPauseManager } from './session-pause-manager';
 import { WorkerPoolManager } from '../worker/worker-pool-manager';
 import { WorkerManager } from '../worker/worker-manager';
 
@@ -18,7 +18,7 @@ export class SessionLifecycleReconciler {
     private readonly sessionLifecycleManager: SessionLifecycleManager,
     private readonly eventLogManager: EventLogManager,
     private readonly sessionAssignmentManager: SessionAssignmentManager,
-    private readonly snapshotManager: SnapshotManager,
+    private readonly sessionPauseManager: SessionPauseManager,
     private readonly eventTransport: RuntimeEventTransport,
     private readonly workerManager: WorkerManager,
     private readonly workerPoolManager?: WorkerPoolManager
@@ -48,16 +48,24 @@ export class SessionLifecycleReconciler {
     await this.workerPoolManager?.reconcile();
     const workerCommands: Array<WorkerCommandOutput<SessionPauseCommandPayload> | WorkerCommandOutput> = [];
     const sessions = await this.storage.readSessions();
+    const sessionsWithPendingDelegationWork = await this.sessionsWithPendingDelegationWork();
     for (const session of sessions) {
       if (session.status === 'queued') {
-        const command = await this.reconcileQueuedSession(session);
+        const command = await this.reconcileQueuedSession(session, sessionsWithPendingDelegationWork.has(session.sessionId));
         if (command) {
           workerCommands.push(command);
         }
         continue;
       }
-      if (session.status === 'running' && this.isIdle(session)) {
+      if (session.status === 'running' && await this.isIdle(session, sessionsWithPendingDelegationWork.has(session.sessionId))) {
         const command = await this.requestIdlePause(session);
+        if (command) {
+          workerCommands.push(command);
+        }
+        continue;
+      }
+      if (session.status === 'pausing') {
+        const command = await this.recoverPause(session);
         if (command) {
           workerCommands.push(command);
         }
@@ -69,8 +77,8 @@ export class SessionLifecycleReconciler {
     }
   }
 
-  private async reconcileQueuedSession(session: SessionRecord): Promise<WorkerCommandOutput | undefined> {
-    if (this.isIdle(session)) {
+  private async reconcileQueuedSession(session: SessionRecord, hasPendingDelegationWork: boolean): Promise<WorkerCommandOutput | undefined> {
+    if (await this.isIdle(session, hasPendingDelegationWork)) {
       await this.pauseQueuedSession(session);
       return undefined;
     }
@@ -99,43 +107,54 @@ export class SessionLifecycleReconciler {
     if (!session.currentWorkerId || !session.sessionLeaseId) {
       return undefined;
     }
-    const event = await this.eventLogManager.append<SessionPauseRequestedPayload>({
-      type: 'session.pause.requested',
-      actor: 'central',
-      payload: { reason: 'idle_timeout' },
-      sequence: session.eventCursor + 1,
-      sessionId: session.sessionId,
-      workerId: session.currentWorkerId,
-      sessionLeaseId: session.sessionLeaseId
-    });
-    const pausing = await this.sessionLifecycleManager.transitionAfterEvent(session, 'pausing', event.sequence, event.timestamp, 'idle_timeout');
-    await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, event);
-    await this.publishSessionStatus(pausing, 'pausing', 'idle_timeout');
-    return {
-      workerId: session.currentWorkerId,
-      event: {
-        eventId: crypto.randomUUID(),
-        sessionId: session.sessionId,
-        workerId: session.currentWorkerId,
-        sequence: event.sequence,
-        type: 'session.pause.requested',
-        timestamp: event.timestamp,
-        actor: 'central',
-        sessionLeaseId: session.sessionLeaseId,
-        payload: {
-          sessionId: session.sessionId,
-          workerId: session.currentWorkerId,
-          sessionLeaseId: session.sessionLeaseId,
-          reason: 'idle_timeout',
-          capture: this.snapshotManager.planCapture(session)
-        }
-      }
-    };
+    const outcome = await this.sessionPauseManager.request(session, 'central', 'idle_timeout');
+    await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, outcome.pauseRequestedEvent);
+    await this.publishSessionStatus(outcome.session, 'pausing', 'idle_timeout');
+    return outcome.workerCommand;
   }
 
-  private isIdle(session: SessionRecord): boolean {
-    return (session.openInteractions?.length ?? 0) === 0
+  private async recoverPause(session: SessionRecord): Promise<WorkerCommandOutput<SessionPauseCommandPayload> | undefined> {
+    const worker = session.currentWorkerId ? await this.storage.readWorker(session.currentWorkerId) : undefined;
+    const workerState = worker?.lifecycleState ?? 'missing';
+    if (!this.canContinuePause(session, worker)) {
+      await this.workerManager.failSessionForWorkerLoss(session, workerState);
+      return undefined;
+    }
+    const command = await this.sessionPauseManager.recover(session);
+    if (command) {
+      return command;
+    }
+    await this.workerManager.failSessionForWorkerLoss(session, workerState);
+    return undefined;
+  }
+
+  private canContinuePause(session: SessionRecord, worker: WorkerRecord | undefined): boolean {
+    return Boolean(session.currentWorkerId
+      && session.sessionLeaseId
+      && worker
+      && worker.workerId === session.currentWorkerId
+      && worker.lifecycleState === 'active'
+      && !worker.conditions.includes('disconnected')
+      && Date.parse(worker.expiresAt) > Date.parse(this.clock.now()));
+  }
+
+  private async isIdle(session: SessionRecord, hasPendingDelegationWork: boolean): Promise<boolean> {
+    const hasOpenInteraction = (await this.storage.readInteractionsBySession(session.sessionId)).some((interaction) => interaction.state === 'open');
+    return !hasPendingDelegationWork
+      && !hasOpenInteraction
       && Date.parse(this.clock.now()) - Date.parse(session.lastEventUpdatedAt) >= session.resolvedAgentSpec.idlePauseTimeoutMs;
+  }
+
+  private async sessionsWithPendingDelegationWork(): Promise<Set<string>> {
+    const sessionIds = new Set<string>();
+    for (const delegation of await this.storage.readDelegations()) {
+      if (!delegation.calls.some((call) => call.status === 'queued' || call.status === 'active' || call.status === 'cancel_requested')) {
+        continue;
+      }
+      sessionIds.add(delegation.parentSessionId);
+      sessionIds.add(delegation.childSessionId);
+    }
+    return sessionIds;
   }
 
   private async publishSessionStatus(session: SessionRecord, status: SessionRecord['status'], reason?: string): Promise<void> {

@@ -58,6 +58,23 @@ export interface WaitForResultOptions {
 
 export type InteractionKind = 'approval' | 'tool_call';
 
+export interface DelegatedInteractionSource {
+  kind: 'delegated_session';
+  ownerSessionId: string;
+  agentSpecId: string;
+}
+
+export interface InteractionResponseInput {
+  interactionId: string;
+  decision?: 'approved' | 'denied';
+  scope?: 'once' | 'session';
+  result?: unknown;
+}
+
+export interface InteractionResponseResult {
+  status: 'resolved' | 'already_resolved';
+}
+
 export type AgentTurnEvent =
   | { type: 'turn.started'; sessionId: string; turnSeq: number }
   | { type: 'assistant.delta'; sessionId: string; turnSeq: number; text: string }
@@ -78,8 +95,9 @@ export type AgentTurnEvent =
 export type SessionEvent =
   | { type: 'user.message'; sessionId: string; turnSeq: number; text: string }
   | { type: 'status'; sessionId: string; turnSeq: number; status: SessionStatus }
-  | { type: 'interaction.requested'; sessionId: string; turnSeq: number; interactionId: string; kind: InteractionKind; request: unknown }
+  | { type: 'interaction.requested'; sessionId: string; turnSeq: number; interactionId: string; kind: InteractionKind; request: unknown; source?: DelegatedInteractionSource }
   | { type: 'interaction.responded'; sessionId: string; turnSeq: number; interactionId: string; kind: InteractionKind; response: unknown }
+  | { type: 'interaction.interrupted'; sessionId: string; turnSeq: number; interactionId: string; kind: InteractionKind; reason: 'owner_lease_lost' | 'owner_turn_failed' | 'owner_session_terminal' }
   | AgentTurnEvent;
 
 export interface SessionObserveOptions {
@@ -136,6 +154,7 @@ export type SdkRuntimeEventType =
   | 'session.cancel.requested'
   | 'interaction.requested'
   | 'interaction.responded'
+  | 'interaction.interrupted'
   | 'interaction.respond.requested'
   | 'interaction.responded.ack'
   | 'session.created'

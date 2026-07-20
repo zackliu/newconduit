@@ -149,6 +149,82 @@ export class WorkerManager {
     return next;
   }
 
+  async failSessionForWorkerLoss(session: SessionRecord, workerState: WorkerRecord['lifecycleState'] | 'missing'): Promise<SessionRecord> {
+    if (!session.currentWorkerId || !session.sessionLeaseId) {
+      return session;
+    }
+    const existingEvents = await this.storage.readEvents(session.sessionId, 0);
+    let sequence = Math.max(session.eventCursor, ...existingEvents.map((event) => event.sequence));
+    const eventsToPublish: RuntimeEvent[] = [];
+    const inFlightTurnSeq = await this.findInFlightTurnSeq(session);
+    const existingTurnFailure = inFlightTurnSeq === undefined ? undefined : existingEvents.find((event) =>
+      event.type === 'turn.failed'
+      && event.turnSeq === inFlightTurnSeq
+      && event.sessionLeaseId === session.sessionLeaseId);
+    if (inFlightTurnSeq !== undefined && !existingTurnFailure) {
+      sequence += 1;
+      const turnFailed: RuntimeEvent<TurnFailedPayload> = {
+        eventId: crypto.randomUUID(),
+        sessionId: session.sessionId,
+        workerId: session.currentWorkerId,
+        sequence,
+        type: 'turn.failed',
+        timestamp: this.clock.now(),
+        actor: 'central',
+        turnSeq: inFlightTurnSeq,
+        sessionLeaseId: session.sessionLeaseId,
+        payload: {
+          error: {
+            message: 'worker was lost before the turn completed',
+            code: 'worker_lost',
+            details: { workerState }
+          }
+        }
+      };
+      await this.storage.appendEvent(turnFailed);
+      eventsToPublish.push(turnFailed);
+    }
+    const existingLeaseLost = existingEvents.find((event) =>
+      event.type === 'session.lease.lost'
+      && event.workerId === session.currentWorkerId
+      && event.sessionLeaseId === session.sessionLeaseId);
+    let leaseLost = existingLeaseLost;
+    if (!leaseLost) {
+      sequence += 1;
+      leaseLost = {
+        eventId: crypto.randomUUID(),
+        sessionId: session.sessionId,
+        workerId: session.currentWorkerId,
+        sequence,
+        type: 'session.lease.lost',
+        timestamp: this.clock.now(),
+        actor: 'central',
+        sessionLeaseId: session.sessionLeaseId,
+        payload: {
+          reason: 'worker_lost',
+          workerState
+        }
+      };
+      await this.storage.appendEvent(leaseLost);
+    }
+    sequence = Math.max(sequence, leaseLost.sequence);
+    const nextSession: SessionRecord = {
+      ...session,
+      status: 'failed',
+      currentWorkerId: undefined,
+      sessionLeaseId: undefined,
+      lifecycleReason: 'worker_lost',
+      eventCursor: sequence,
+      updatedAt: this.clock.now()
+    };
+    await this.storage.writeSession(nextSession);
+    eventsToPublish.push(leaseLost);
+    for (const event of eventsToPublish) {
+      await this.publishSessionEvent(session.sessionId, event);
+    }
+    return nextSession;
+  }
+
   private async terminate(worker: WorkerRecord, lifecycleState: 'closed' | 'expired', reason: string, eventType: 'worker.closed' | 'worker.expired'): Promise<WorkerRecord> {
     const now = this.clock.now();
     const next: WorkerRecord = {
@@ -169,56 +245,7 @@ export class WorkerManager {
     const sessions = await this.storage.readSessions();
     const leasedSessions = sessions.filter((session) => this.hasActiveLease(session, worker.workerId));
     for (const session of leasedSessions) {
-      let sequence = session.eventCursor;
-      const inFlightTurnSeq = await this.findInFlightTurnSeq(session);
-      if (inFlightTurnSeq !== undefined) {
-        sequence += 1;
-        await this.appendSessionEvent<TurnFailedPayload>(session.sessionId, {
-          eventId: crypto.randomUUID(),
-          sessionId: session.sessionId,
-          workerId: worker.workerId,
-          sequence,
-          type: 'turn.failed',
-          timestamp: this.clock.now(),
-          actor: 'central',
-          turnSeq: inFlightTurnSeq,
-          sessionLeaseId: session.sessionLeaseId,
-          payload: {
-            error: {
-              message: 'worker was lost before the turn completed',
-              code: 'worker_lost',
-              details: {
-                workerState: worker.lifecycleState
-              }
-            }
-          }
-        });
-      }
-      sequence += 1;
-      await this.appendSessionEvent(session.sessionId, {
-        eventId: crypto.randomUUID(),
-        sessionId: session.sessionId,
-        workerId: worker.workerId,
-        sequence,
-        type: 'session.lease.lost',
-        timestamp: this.clock.now(),
-        actor: 'central',
-        sessionLeaseId: session.sessionLeaseId,
-        payload: {
-          reason: 'worker_lost',
-          workerState: worker.lifecycleState
-        }
-      });
-      const nextSession: SessionRecord = {
-        ...session,
-        status: 'failed',
-        currentWorkerId: undefined,
-        sessionLeaseId: undefined,
-        lifecycleReason: 'worker_lost',
-        eventCursor: sequence,
-        updatedAt: this.clock.now()
-      };
-      await this.storage.writeSession(nextSession);
+      await this.failSessionForWorkerLoss(session, worker.lifecycleState);
     }
   }
 
@@ -242,12 +269,11 @@ export class WorkerManager {
     return candidateTurnSeq;
   }
 
-  private async appendSessionEvent<TPayload>(sessionId: string, event: RuntimeEvent<TPayload>): Promise<void> {
-    const appended = await this.storage.appendEvent(event);
-    await this.eventTransport?.publish({ kind: 'session-events', sessionId }, appended);
+  private async publishSessionEvent(sessionId: string, event: RuntimeEvent): Promise<void> {
+    await this.eventTransport?.publish({ kind: 'session-events', sessionId }, event);
     if (event.type === 'session.lease.lost') {
       await this.eventTransport?.publish({ kind: 'client-inbox' }, {
-        ...appended,
+        ...event,
         ackId: undefined,
         type: 'session.status.updated',
         payload: {

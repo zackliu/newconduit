@@ -247,6 +247,29 @@ test('scenario: Worker loss fails a pausing session that still owns the Worker l
   });
 });
 
+test('scenario: Worker loss commits terminal Session state before transport fan-out', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const transport = new InMemoryRuntimeTransportAdapter();
+    const manager = new WorkerManager(storage, clock, 1_000, transport);
+    const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 0, conditions: ['busy'] });
+    const session = await writeLeasedSession(storage, worker);
+    await transport.subscribe({ kind: 'session-events', sessionId: session.sessionId }, async () => {
+      throw new Error('transport unavailable');
+    });
+    clock.set('2026-06-24T00:00:01.001Z');
+
+    await assert.rejects(manager.expireWorkers(), /transport unavailable/);
+
+    assert.equal((await storage.readWorker(worker.workerId))?.lifecycleState, 'expired');
+    const failed = await storage.readSession(session.sessionId);
+    assert.equal(failed?.status, 'failed');
+    assert.equal(failed?.currentWorkerId, undefined);
+    assert.equal(failed?.sessionLeaseId, undefined);
+    assert.deepEqual((await storage.readEvents(session.sessionId, 0)).map((event) => event.type), ['session.lease.lost']);
+  });
+});
+
 test('scenario: worker expiry fails in-flight turn and fans out lease loss', async () => {
   await withStorage(async ({ storage, clock }) => {
     const transport = new InMemoryRuntimeTransportAdapter();

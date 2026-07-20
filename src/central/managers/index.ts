@@ -6,10 +6,14 @@ export { DelegatedSessionManager } from './delegation/delegated-session-manager'
 export type { PreparedDelegatedCall } from './delegation/delegated-session-manager';
 export { DelegationDispatcher } from './delegation/delegation-dispatcher';
 export type { DispatchDelegationCallResult } from './delegation/delegation-dispatcher';
+export { InteractionManager } from './interaction/interaction-manager';
+export type { ResolveInteractionResult } from './interaction/interaction-manager';
 export { EventLogManager } from './session/event-log-manager';
 export { SessionAssignmentManager } from './session/session-assignment-manager';
 export type { SessionAssignmentOutcome, WorkerCommandOutput } from './session/session-assignment-manager';
 export { SessionLifecycleManager } from './session/session-lifecycle-manager';
+export { SessionPauseManager } from './session/session-pause-manager';
+export type { PauseSessionOutcome, SessionPauseReason } from './session/session-pause-manager';
 export { SessionStartManager } from './session/session-start-manager';
 export type { StartSessionOutcome } from './session/session-start-manager';
 export { SessionLifecycleReconciler } from './session/session-lifecycle-reconciler';

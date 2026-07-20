@@ -103,6 +103,18 @@ Client创建与Delegation创建必须进入同一个Session start workflow：持
 
 一个Delegation最多一个active Call。Call完成后Child Session保持普通durable identity；队列为空时Central通过普通pause路径释放Worker，后续Call恢复同一个Child Session。
 
+### 5.1 Interaction Projection
+
+Child Session 的 approval 和 client tool request 遵循 [Durable Interaction Broker](durable-interaction-broker-ch.md)，不由 Delegation 另建一套 interaction 状态：
+
+- Child 是 canonical Interaction 的 owner，和 client-created 普通 Session 进入同一个 admission、resolution 和 Worker delivery 流程。
+- Central 为直接 Parent 增加一个可操作 projection；Child 与 Parent event 使用同一个 Central-generated public `interactionId`。
+- Parent 或 Child 任一 view 的第一次合法响应完成唯一 canonical resolution，两个 view 随同一 resolution 收敛关闭，response 只投递给 Child Worker。
+- Parent 代答 approval 或 client tool 不会直接完成 `DelegationCall`。Child 继续执行普通 turn，产生 terminal result 后再沿 Delegation result path 返回 Parent。
+- `scope: session` 的 approval 只作用于 Child agent session，不作用于 Parent 或同一 Delegate 的其他 Child Session。
+
+本设计只支持直接 Parent projection。Child Session不能继续发起 Delegation，不计算祖先链，也不把 Interaction 投影到多个层级。
+
 ## 6. Generic Runtime Tool Protocol
 
 Central随`session.assign`下发ResolvedAgentSpec，其中包含runtime tool definitions。Sidecar把`name/description/inputSchema`直接传给Agent SDK。
@@ -160,6 +172,8 @@ Parent不得在Call失败后自行生成一个看似成功的subagent答案；�
 - Child普通turn message直接完成Call，无callee结果工具。
 - Sidecar只转发Central定义的通用runtime tool request/response。
 - 非runtime tool权限仍走普通人工approval路径。
+- Child approval 同时投影到 Child 与直接 Parent，任一 view 响应后两个 view 收敛，且只向 Child Worker 投递一次。
+- Child 直接响应后，Parent stale response 返回 `already_resolved`，不产生失败弹窗或第二次 Worker delivery。
 
 产品验收使用真实`samples/webclient`手工Playwright：
 

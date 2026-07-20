@@ -1,6 +1,107 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { AgentRuntimeClient, AgentTurn, SessionHandle } from '../src/agent-runtime-client';
+import { AgentRuntimeClient, AgentTurn, InteractionResponseError, SessionHandle, mapSessionEvent } from '../src/agent-runtime-client';
+
+test('scenario: delegated interaction source and interruption map into Session events', () => {
+  assert.deepEqual(mapSessionEvent({
+    eventId: 'interaction-requested',
+    sessionId: 'parent-session',
+    turnSeq: 2,
+    sequence: 1,
+    type: 'interaction.requested',
+    timestamp: '2026-07-20T00:00:00.000Z',
+    actor: 'central',
+    payload: {
+      interactionId: 'interaction-1',
+      kind: 'approval',
+      request: { action: 'run-shell' },
+      source: { kind: 'delegated_session', ownerSessionId: 'child-session', agentSpecId: 'diagnostic-expert' }
+    }
+  }), {
+    type: 'interaction.requested',
+    sessionId: 'parent-session',
+    turnSeq: 2,
+    interactionId: 'interaction-1',
+    kind: 'approval',
+    request: { action: 'run-shell' },
+    source: { kind: 'delegated_session', ownerSessionId: 'child-session', agentSpecId: 'diagnostic-expert' }
+  });
+
+  assert.deepEqual(mapSessionEvent({
+    eventId: 'interaction-interrupted',
+    sessionId: 'parent-session',
+    turnSeq: 2,
+    sequence: 2,
+    type: 'interaction.interrupted',
+    timestamp: '2026-07-20T00:00:01.000Z',
+    actor: 'central',
+    payload: { interactionId: 'interaction-1', kind: 'approval', reason: 'owner_lease_lost' }
+  }), {
+    type: 'interaction.interrupted',
+    sessionId: 'parent-session',
+    turnSeq: 2,
+    interactionId: 'interaction-1',
+    kind: 'approval',
+    reason: 'owner_lease_lost'
+  });
+});
+
+test('scenario: interaction response waits for a typed private acknowledgement', async () => {
+  const client = new AgentRuntimeClient({ centralUrl: 'http://central.test', tenantId: 'tenant-1' });
+  const runtime = client as unknown as {
+    waitForAcknowledgement(ackId: string, expectedType: string): Promise<unknown>;
+    publishTenantEvent(input: { ackId?: string }): Promise<void>;
+  };
+  let publishedAckId: string | undefined;
+  runtime.waitForAcknowledgement = async (_ackId, expectedType) => {
+    assert.equal(expectedType, 'interaction.responded.ack');
+    return {
+      eventId: 'interaction-ack',
+      sessionId: 'session-1',
+      sequence: 0,
+      type: 'interaction.responded.ack',
+      timestamp: '2026-07-20T00:00:00.000Z',
+      actor: 'central',
+      payload: { interactionId: 'interaction-1', status: 'already_resolved' }
+    };
+  };
+  runtime.publishTenantEvent = async (input) => { publishedAckId = input.ackId; };
+
+  const result = await new SessionHandle(client, 'session-1', 'running').respondToInteraction({
+    interactionId: 'interaction-1',
+    decision: 'approved'
+  });
+
+  assert.ok(publishedAckId);
+  assert.deepEqual(result, { status: 'already_resolved' });
+});
+
+test('scenario: rejected interaction acknowledgement throws a typed error', async () => {
+  const client = new AgentRuntimeClient({ centralUrl: 'http://central.test', tenantId: 'tenant-1' });
+  const runtime = client as unknown as {
+    waitForAcknowledgement(ackId: string, expectedType: string): Promise<unknown>;
+    publishTenantEvent(input: unknown): Promise<void>;
+  };
+  runtime.waitForAcknowledgement = async () => ({
+    eventId: 'interaction-ack',
+    sessionId: 'session-1',
+    sequence: 0,
+    type: 'interaction.responded.ack',
+    timestamp: '2026-07-20T00:00:00.000Z',
+    actor: 'central',
+    payload: {
+      interactionId: 'interaction-1',
+      status: 'rejected',
+      error: { code: 'interaction_response_rejected', message: 'not authorized' }
+    }
+  });
+  runtime.publishTenantEvent = async () => undefined;
+
+  await assert.rejects(
+    new SessionHandle(client, 'session-1', 'running').respondToInteraction({ interactionId: 'interaction-1', decision: 'approved' }),
+    (error: unknown) => error instanceof InteractionResponseError && error.code === 'interaction_response_rejected'
+  );
+});
 
 test('scenario: session list preserves a delegated session parent relationship', async () => {
   const client = new AgentRuntimeClient({ centralUrl: 'http://central.test', tenantId: 'tenant-1' });

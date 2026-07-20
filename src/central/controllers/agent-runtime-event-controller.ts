@@ -1,5 +1,5 @@
-import type { AgentOutputPayload, InteractionRequestedPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPartName, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandAcceptedPayload, WorkerCommandRejectedPayload } from '../../shared';
-import { EventLogManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
+import type { AgentInteractionRequestedPayload, AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPartName, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandAcceptedPayload, WorkerCommandRejectedPayload } from '../../shared';
+import { EventLogManager, InteractionManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
 import { SnapshotManager } from '../persistence';
 
 /**
@@ -16,6 +16,7 @@ export class AgentRuntimeEventController {
     private readonly workerManager: WorkerManager,
     private readonly sessionLifecycleReconciler: SessionLifecycleReconciler,
     private readonly snapshotManager: SnapshotManager,
+    private readonly interactionManager: InteractionManager,
     private readonly eventTransport: RuntimeEventTransport
   ) {}
 
@@ -24,6 +25,9 @@ export class AgentRuntimeEventController {
       case 'status.changed': {
         const payload = this.parseStatusChangedPayload(event.payload);
         const appended = await this.appendSessionEvent(event, payload, { status: payload.status, statusReason: payload.reason });
+        if (payload.status === 'failed' && event.sessionId) {
+          await this.interactionManager.interruptForOwnerSession(event.sessionId, 'owner_session_terminal');
+        }
         await this.eventTransport.publish({ kind: 'client-inbox' }, {
           ...appended,
           ackId: undefined,
@@ -49,6 +53,9 @@ export class AgentRuntimeEventController {
       case 'turn.failed': {
         const payload = this.parseTurnFailedPayload(event.payload);
         await this.appendSessionEvent(event, payload);
+        if (event.sessionId) {
+          await this.interactionManager.interruptForOwnerSession(event.sessionId, 'owner_turn_failed');
+        }
         return true;
       }
       case 'worker.command.rejected': {
@@ -59,18 +66,12 @@ export class AgentRuntimeEventController {
       case 'worker.command.accepted': {
         const payload = this.parseWorkerCommandAcceptedPayload(event.payload);
         await this.appendSessionEvent(event, payload);
+        await this.interactionManager.acknowledgeDelivery(payload.commandEventId);
         return true;
       }
-      case 'interaction.requested': {
-        const payload = this.parseInteractionRequestedPayload(event.payload);
-        const appended = await this.appendSessionEvent(event, payload);
-        const session = await this.requireSession(event);
-        await this.sessionLifecycleManager.addOpenInteraction(session, {
-          interactionId: payload.interactionId,
-          kind: payload.kind,
-          turnSeq: event.turnSeq ?? session.nextTurnSeq,
-          requestedAt: appended.timestamp
-        });
+      case 'agent.interaction.requested': {
+        const payload = this.parseAgentInteractionRequestedPayload(event.payload);
+        await this.interactionManager.admitAgentRequest(event, payload);
         return true;
       }
       case 'session.paused': {
@@ -254,15 +255,15 @@ export class AgentRuntimeEventController {
     };
   }
 
-  private parseInteractionRequestedPayload(payload: unknown): InteractionRequestedPayload {
-    if (!this.isRecord(payload) || typeof payload.interactionId !== 'string') {
-      throw new Error('invalid interaction.requested payload');
+  private parseAgentInteractionRequestedPayload(payload: unknown): AgentInteractionRequestedPayload {
+    if (!this.isRecord(payload) || typeof payload.adapterRequestId !== 'string' || !payload.adapterRequestId) {
+      throw new Error('invalid agent.interaction.requested payload');
     }
     if (payload.kind !== 'approval' && payload.kind !== 'tool_call') {
-      throw new Error('invalid interaction.requested kind');
+      throw new Error('invalid agent.interaction.requested kind');
     }
     return {
-      interactionId: payload.interactionId,
+      adapterRequestId: payload.adapterRequestId,
       kind: payload.kind,
       request: payload.request
     };

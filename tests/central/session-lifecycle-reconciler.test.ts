@@ -8,7 +8,7 @@ import { CentralService } from '../../src/central/central-service';
 import { AgentSpecAdmissionManager } from '../../src/central/managers';
 import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import type { Clock, RuntimeEvent, SessionRecord, WorkerRecord } from '../../src/shared';
+import type { Clock, DelegationRecord, RuntimeEvent, SessionRecord, WorkerRecord } from '../../src/shared';
 
 class FixedClock implements Clock {
   constructor(private currentTime: string) {}
@@ -152,19 +152,86 @@ test('scenario: idle running session pauses and releases worker lease', async ()
   });
 });
 
+test('scenario: pausing session with a live Worker replays its durable pause intent', async () => {
+  await withRuntime(async ({ central, storage, transport, clock }) => {
+    const worker = await registerWorker(central);
+    await writeActiveWorker(storage, worker.workerId, clock.now(), { allocatable: 0, currentSessionCount: 1, conditions: ['busy'] });
+    const session = await writePausingSession(storage, worker.workerId, 'lease-pausing', clock.now());
+    const workerCommands: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'worker-commands', workerId: worker.workerId }, async (envelope) => {
+      workerCommands.push(envelope.event);
+    });
+
+    await central.reconcileSessionsForTenant('poc');
+
+    assert.equal((await storage.readSession(session.sessionId))?.status, 'pausing');
+    assert.equal(workerCommands.length, 1);
+    assert.equal(workerCommands[0].type, 'session.pause.requested');
+    assert.equal(workerCommands[0].sequence, 2);
+    assert.deepEqual((workerCommands[0].payload as { capture?: unknown }).capture, {
+      snapshotId: 'event-pause-requested',
+      storageClass: COPILOT_STORAGE_CLASS,
+      handle: `${session.sessionId}/event-pause-requested`
+    });
+    assert.deepEqual((await storage.readEvents(session.sessionId, 0)).map((event) => event.type), ['session.created', 'session.pause.requested']);
+  });
+});
+
+test('scenario: pausing session whose Worker is terminal becomes failed', async () => {
+  await withRuntime(async ({ central, storage, clock }) => {
+    const worker = await registerWorker(central);
+    await writeActiveWorker(storage, worker.workerId, clock.now(), {
+      allocatable: 0,
+      currentSessionCount: 1,
+      conditions: ['disconnected'],
+      lifecycleState: 'expired',
+      terminalReason: 'worker_keepalive_expired'
+    });
+    const session = await writePausingSession(storage, worker.workerId, 'lease-terminal-pausing', clock.now());
+
+    await central.reconcileSessionsForTenant('poc');
+
+    const failed = await storage.readSession(session.sessionId);
+    assert.equal(failed?.status, 'failed');
+    assert.equal(failed?.currentWorkerId, undefined);
+    assert.equal(failed?.sessionLeaseId, undefined);
+    assert.equal(failed?.lifecycleReason, 'worker_lost');
+    assert.deepEqual((await storage.readEvents(session.sessionId, 0)).map((event) => event.type), [
+      'session.created',
+      'session.pause.requested',
+      'session.lease.lost'
+    ]);
+  });
+});
+
 test('scenario: running session awaiting interaction does not idle pause', async () => {
   await withRuntime(async ({ central, storage, transport, clock }) => {
     const worker = await registerWorker(central);
     await writeActiveWorker(storage, worker.workerId, clock.now());
     const session = await writeRunningSession(storage, worker.workerId, 'lease-awaiting-interaction', clock.now());
-    await storage.writeSession({
-      ...session,
-      openInteractions: [{
-        interactionId: 'interaction-approval',
-        kind: 'approval',
+    await storage.createInteraction({
+      interactionId: 'interaction-approval',
+      tenantId: 'poc',
+      kind: 'approval',
+      request: { action: 'run-shell' },
+      ownerSessionId: session.sessionId,
+      ownerTurnSeq: 1,
+      adapterRequestId: 'adapter-approval',
+      requestLeaseId: 'lease-awaiting-interaction',
+      views: [{
+        sessionId: session.sessionId,
         turnSeq: 1,
-        requestedAt: clock.now()
-      }]
+        role: 'owner',
+        requestedEventId: 'interaction-requested-event',
+        requestedProjected: true,
+        respondedProjected: false,
+        interruptedProjected: false
+      }],
+      state: 'open',
+      delivery: { state: 'not_ready' },
+      revision: 1,
+      createdAt: clock.now(),
+      updatedAt: clock.now()
     });
     const workerCommands: RuntimeEvent[] = [];
     await transport.subscribe({ kind: 'worker-commands', workerId: worker.workerId }, async (envelope) => {
@@ -180,6 +247,30 @@ test('scenario: running session awaiting interaction does not idle pause', async
     assert.equal(running?.currentWorkerId, worker.workerId);
     assert.equal(running?.sessionLeaseId, 'lease-awaiting-interaction');
     assert.deepEqual(workerCommands, []);
+  });
+});
+
+test('scenario: Parent and queued Child with active delegation do not idle pause while waiting for capacity', async () => {
+  await withRuntime(async ({ central, storage, clock }) => {
+    const worker = await registerWorker(central);
+    const parent = await writeRunningSession(storage, worker.workerId, 'lease-parent-delegation', clock.now());
+    const child = await writeQueuedSession(storage, 'session-delegated-child', clock.now());
+    child.delegationBinding = {
+      delegationId: 'delegation-active',
+      parentSessionId: parent.sessionId,
+      delegateId: 'local-diagnostic'
+    };
+    await storage.writeSession(child);
+    await storage.createDelegation(activeDelegation(parent, child, clock.now()));
+    clock.set('2026-06-25T00:02:01.000Z');
+    await writeActiveWorker(storage, worker.workerId, clock.now(), { allocatable: 0, currentSessionCount: 1, conditions: ['busy'] });
+
+    await central.reconcileSessionsForTenant('poc');
+
+    assert.equal((await storage.readSession(parent.sessionId))?.status, 'running');
+    assert.equal((await storage.readSession(child.sessionId))?.status, 'queued');
+    assert.deepEqual((await storage.readEvents(parent.sessionId, 0)).map((event) => event.type), ['session.created']);
+    assert.deepEqual((await storage.readEvents(child.sessionId, 0)).map((event) => event.type), ['session.created']);
   });
 });
 
@@ -420,6 +511,29 @@ async function writeRunningSession(storage: LocalFileStorage, workerId: string, 
   return session;
 }
 
+async function writePausingSession(storage: LocalFileStorage, workerId: string, sessionLeaseId: string, now: string): Promise<SessionRecord> {
+  const running = await writeRunningSession(storage, workerId, sessionLeaseId, now);
+  const session: SessionRecord = {
+    ...running,
+    status: 'pausing',
+    eventCursor: 2,
+    lifecycleReason: 'client_requested'
+  };
+  await storage.writeSession(session);
+  await storage.appendEvent({
+    eventId: 'event-pause-requested',
+    sessionId: session.sessionId,
+    workerId,
+    sessionLeaseId,
+    sequence: 2,
+    type: 'session.pause.requested',
+    timestamp: now,
+    actor: 'client',
+    payload: { reason: 'client_requested' }
+  });
+  return session;
+}
+
 async function writePausedSession(storage: LocalFileStorage, lastEventUpdatedAt: string): Promise<SessionRecord> {
   const session: SessionRecord = {
     sessionId: 'session-paused',
@@ -481,6 +595,51 @@ async function writeQueuedSession(storage: LocalFileStorage, sessionId: string, 
     payload: { status: 'queued' }
   });
   return session;
+}
+
+function activeDelegation(parent: SessionRecord, child: SessionRecord, now: string): DelegationRecord {
+  return {
+    delegationId: 'delegation-active',
+    tenantId: 'poc',
+    parentSessionId: parent.sessionId,
+    childSessionId: child.sessionId,
+    resolvedDelegate: {
+      id: 'local-diagnostic',
+      toolName: 'inspect_local_system',
+      description: 'Collect local diagnostic evidence.',
+      digest: 'delegate-digest',
+      maxInputBytes: 8192,
+      maxResultBytes: 32768,
+      deadlineMs: 600000,
+      maxQueuedCalls: 1
+    },
+    resolvedCalleeAgentSpec: child.resolvedAgentSpec,
+    status: 'open',
+    activeCallId: 'delegation-call-active',
+    nextCallSeq: 2,
+    calls: [{
+      delegationCallId: 'delegation-call-active',
+      delegationId: 'delegation-active',
+      callSeq: 1,
+      callerTurnSeq: 1,
+      callerToolRequestId: 'tool-request-active',
+      input: 'Collect evidence.',
+      inputHash: 'input-digest',
+      status: 'active',
+      dispatch: {
+        childTurnSeq: 1,
+        inputEventId: `event-${child.sessionId}-created`,
+        commandEventId: 'child-command-active',
+        commandState: 'pending'
+      },
+      deadlineAt: '2026-06-25T00:10:00.000Z',
+      createdAt: now,
+      updatedAt: now
+    }],
+    revision: 1,
+    createdAt: now,
+    updatedAt: now
+  };
 }
 
 function demoContext() {

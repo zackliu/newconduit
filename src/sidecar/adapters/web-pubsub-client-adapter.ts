@@ -20,8 +20,11 @@ export class WebPubSubClientAdapter implements SidecarRuntimeTransport {
       throw new Error('accessUrl is required');
     }
     const client = new WebPubSubClient(accessUrl, {
-      autoReconnect: false,
-      autoRejoinGroups: false
+      autoReconnect: true,
+      autoRejoinGroups: true,
+      reconnectRetryOptions: {
+        maxRetries: Number.MAX_VALUE
+      }
     });
     await client.start();
     this.client = client;

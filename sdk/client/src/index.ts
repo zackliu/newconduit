@@ -1,4 +1,4 @@
-export { AgentRuntimeClient, AgentTurn, SessionClient, SessionHandle, mapSessionEvent } from './agent-runtime-client';
+export { AgentRuntimeClient, AgentTurn, InteractionResponseError, SessionClient, SessionHandle, mapSessionEvent } from './agent-runtime-client';
 export { SdkWebPubSubRuntimeChannelMapper } from './web-pubsub-runtime-channel';
 export type {
 	AgentRuntimeClientOptions,
@@ -7,6 +7,9 @@ export type {
 	AgentTurnResult,
 	AgentSpecRef,
 	CreateSessionInput,
+	DelegatedInteractionSource,
+	InteractionResponseInput,
+	InteractionResponseResult,
 	RuntimeConnectionGrant,
 	SdkRuntimeEvent,
 	SdkRuntimeEventType,

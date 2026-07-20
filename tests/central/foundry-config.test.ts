@@ -54,3 +54,33 @@ test('scenario: copilot-poc delegates from Docker to copilot-foundry', () => {
   });
   assert.ok(adapter);
 });
+
+test('scenario: Foundry diagnostic expert delegates evidence collection to a standalone local worker', () => {
+  const store = new FileConfigStore();
+  const specs = store.loadAgentSpecs();
+  const diagnosticExpert = specs.find((candidate) => candidate.agentSpecId === 'diagnostic-expert');
+  assert.ok(diagnosticExpert, 'expected a diagnostic-expert AgentSpec');
+  assert.deepEqual(diagnosticExpert.workerSelector.matchLabels, { agent: 'copilot', storage: 'host-managed' });
+  assert.deepEqual(diagnosticExpert.delegateRefs.asCaller, ['local-diagnostic']);
+  assert.match(diagnosticExpert.instructions, /hypotheses/);
+  assert.match(diagnosticExpert.instructions, /inspect_local_system/);
+
+  const localDiagnostic = specs.find((candidate) => candidate.agentSpecId === 'local-diagnostic');
+  assert.ok(localDiagnostic, 'expected a local-diagnostic AgentSpec');
+  assert.deepEqual(localDiagnostic.workerSelector.matchLabels, { agent: 'local-diagnostic', storage: 'host-managed' });
+  assert.deepEqual(localDiagnostic.delegateRefs.asCallee, ['local-diagnostic']);
+
+  const delegate = store.loadDelegates().find((candidate) => candidate.id === 'local-diagnostic');
+  assert.ok(delegate, 'expected a local-diagnostic Delegate');
+  assert.equal(delegate.toolName, 'inspect_local_system');
+
+  const pools = store.loadWorkerPools({ tenantId: 'tenant-x', centralUrlForWorkers: 'http://central.example:3000' });
+  const foundryPool = pools.find((candidate) => candidate.poolId === 'foundry-copilot');
+  assert.ok(foundryPool, 'expected the existing foundry-copilot worker pool');
+  assert.deepEqual(foundryPool.template.labels, diagnosticExpert.workerSelector.matchLabels);
+  assert.equal(
+    pools.some((pool) => pool.template.labels.agent === 'local-diagnostic'),
+    false,
+    'local-diagnostic must be provided by a standalone registered Worker, not a WorkerPool'
+  );
+});

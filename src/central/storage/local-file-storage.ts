@@ -1,7 +1,7 @@
 import { appendFile, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import type { CreateDelegationResult, DelegationRecord, HostPoolInstanceRecord, RuntimeEvent, RuntimeStorage, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../../shared';
+import type { CreateDelegationResult, CreateInteractionResult, DelegationRecord, HostPoolInstanceRecord, InteractionRecord, RuntimeEvent, RuntimeStorage, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../../shared';
 
 // Windows can transiently reject an atomic replace or a read (EPERM/EACCES/EBUSY) when the same path is momentarily
 // held by a concurrent reader or another in-flight replace. The operation stays correct; only its timing is racy.
@@ -13,6 +13,7 @@ function delay(ms: number): Promise<void> {
 
 export class LocalFileStorage implements RuntimeStorage {
   private delegationWriteSequence: Promise<void> = Promise.resolve();
+  private interactionWriteSequence: Promise<void> = Promise.resolve();
 
   constructor(private readonly root: string) {}
 
@@ -178,6 +179,75 @@ export class LocalFileStorage implements RuntimeStorage {
     }
   }
 
+  async createInteraction(interaction: InteractionRecord): Promise<CreateInteractionResult> {
+    return this.serializeInteractionWrite(async () => {
+      const existingById = await this.readInteraction(interaction.interactionId);
+      if (existingById) {
+        return { interaction: existingById, created: false };
+      }
+      const existingByAdapterRequest = await this.readInteractionByAdapterRequest(
+        interaction.ownerSessionId,
+        interaction.requestLeaseId,
+        interaction.adapterRequestId
+      );
+      if (existingByAdapterRequest) {
+        return { interaction: existingByAdapterRequest, created: false };
+      }
+      await this.writeInteraction(interaction);
+      return { interaction, created: true };
+    });
+  }
+
+  async compareAndSetInteraction(expectedRevision: number, interaction: InteractionRecord): Promise<boolean> {
+    return this.serializeInteractionWrite(async () => {
+      const current = await this.readInteraction(interaction.interactionId);
+      if (!current || current.revision !== expectedRevision) {
+        return false;
+      }
+      if (interaction.revision !== expectedRevision + 1) {
+        throw new Error(`Interaction ${interaction.interactionId} revision must advance from ${expectedRevision} to ${expectedRevision + 1}`);
+      }
+      if (current.tenantId !== interaction.tenantId
+        || current.ownerSessionId !== interaction.ownerSessionId
+        || current.ownerTurnSeq !== interaction.ownerTurnSeq
+        || current.adapterRequestId !== interaction.adapterRequestId
+        || current.requestLeaseId !== interaction.requestLeaseId) {
+        throw new Error(`Interaction ${interaction.interactionId} immutable owner binding changed`);
+      }
+      await this.writeInteraction(interaction);
+      return true;
+    });
+  }
+
+  async readInteraction(interactionId: string): Promise<InteractionRecord | undefined> {
+    return this.readJson(this.interactionPath(interactionId));
+  }
+
+  async readInteractionByAdapterRequest(ownerSessionId: string, requestLeaseId: string, adapterRequestId: string): Promise<InteractionRecord | undefined> {
+    const interactions = await this.readInteractions();
+    return interactions.find((interaction) => interaction.ownerSessionId === ownerSessionId
+      && interaction.requestLeaseId === requestLeaseId
+      && interaction.adapterRequestId === adapterRequestId);
+  }
+
+  async readInteractions(): Promise<InteractionRecord[]> {
+    const directory = join(this.root, 'interactions');
+    try {
+      const files = await readdir(directory);
+      const interactions = await Promise.all(files.filter((file) => file.endsWith('.json')).map((file) => this.readJson<InteractionRecord>(join(directory, file))));
+      return interactions.filter((interaction): interaction is InteractionRecord => interaction !== undefined);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async readInteractionsBySession(sessionId: string): Promise<InteractionRecord[]> {
+    return (await this.readInteractions()).filter((interaction) => interaction.views.some((view) => view.sessionId === sessionId));
+  }
+
   // A runtime-state record must never be observed torn or empty: a concurrent reader mid-write once made central
   // read a live Worker as missing and stop its host. Write to a unique temp file, fsync it, then atomically rename
   // over the target, so any reader sees either the whole previous record or the whole next one, never a partial file.
@@ -231,13 +301,27 @@ export class LocalFileStorage implements RuntimeStorage {
     return join(this.root, 'delegations', `${delegationId}.json`);
   }
 
+  private interactionPath(interactionId: string): string {
+    return join(this.root, 'interactions', `${interactionId}.json`);
+  }
+
   private async writeDelegation(delegation: DelegationRecord): Promise<void> {
     await this.writeJson(this.delegationPath(delegation.delegationId), delegation);
+  }
+
+  private async writeInteraction(interaction: InteractionRecord): Promise<void> {
+    await this.writeJson(this.interactionPath(interaction.interactionId), interaction);
   }
 
   private serializeDelegationWrite<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.delegationWriteSequence.then(operation, operation);
     this.delegationWriteSequence = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private serializeInteractionWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.interactionWriteSequence.then(operation, operation);
+    this.interactionWriteSequence = result.then(() => undefined, () => undefined);
     return result;
   }
 

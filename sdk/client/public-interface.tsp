@@ -81,6 +81,7 @@ union SdkRuntimeEventType {
   "session.cancel.requested",
   "interaction.requested",
   "interaction.responded",
+  "interaction.interrupted",
   "interaction.respond.requested",
   "interaction.responded.ack",
   "session.created",
@@ -148,6 +149,12 @@ model InteractionResponseInput {
 
   /** Client tool-call result. */
   result?: unknown;
+}
+
+/** Result of resolving a canonical durable interaction. */
+model InteractionResponseResult {
+  /** `already_resolved` is a successful idempotent outcome, not an exception. */
+  status: "resolved" | "already_resolved";
 }
 
 /** App-facing input for `SessionClient.start`. */
@@ -334,6 +341,13 @@ union InteractionKind {
   "tool_call",
 }
 
+/** Authorized source shown when a Child Session interaction is projected to its direct Parent. */
+model DelegatedInteractionSource {
+  kind: "delegated_session";
+  ownerSessionId: string;
+  agentSpecId: string;
+}
+
 /** A durable off-agent request that suspends the turn until answered via `respondToInteraction`. */
 model InteractionRequestedEvent {
   type: "interaction.requested";
@@ -342,6 +356,7 @@ model InteractionRequestedEvent {
   interactionId: string;
   kind: InteractionKind;
   request: unknown;
+  source?: DelegatedInteractionSource;
 }
 
 /** Central-owned fact that an open interaction was resolved. */
@@ -352,6 +367,16 @@ model InteractionRespondedEvent {
   interactionId: string;
   kind: InteractionKind;
   response: unknown;
+}
+
+/** The owner Worker lease ended before the pending request could be completed. */
+model InteractionInterruptedEvent {
+  type: "interaction.interrupted";
+  sessionId: string;
+  turnSeq: safeint;
+  interactionId: string;
+  kind: InteractionKind;
+  reason: "owner_lease_lost" | "owner_turn_failed" | "owner_session_terminal";
 }
 
 /** Typed event covering one agent turn, discriminated by `type`. */
@@ -384,13 +409,14 @@ model SessionStatusEvent {
  * The single typed model for everything in a session across all turns; the only
  * stream a UI needs (`SessionHandleOperations.observe`). Every variant carries a
  * `type` discriminator: `user.message`, `status`, `interaction.requested`,
- * `interaction.responded`, or any `AgentTurnEvent`.
+ * `interaction.responded`, `interaction.interrupted`, or any `AgentTurnEvent`.
  */
 union SessionEvent {
   UserMessageEvent,
   SessionStatusEvent,
   InteractionRequestedEvent,
   InteractionRespondedEvent,
+  InteractionInterruptedEvent,
   AgentTurnEvent,
 }
 
@@ -528,7 +554,7 @@ interface SessionHandleOperations {
    * For an approval, pass `decision` (and optional `scope`, where `session` establishes a
    * standing approval rule). For a client tool call, pass `result`.
    */
-  respondToInteraction(input: InteractionResponseInput): void;
+  respondToInteraction(input: InteractionResponseInput): InteractionResponseResult;
 }
 
 /** Methods of a live `AgentTurn`. */

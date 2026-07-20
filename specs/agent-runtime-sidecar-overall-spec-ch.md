@@ -325,11 +325,11 @@ Audit 先覆盖安全关键路径：
 
 ### 13.4 Approval and Human-in-the-loop
 
-先实现的流程：agent process 通过 sidecar daemon 发出 permission request 或 user input request。Central service 持久化 request event，通知有权限的 client。client response 经过 authorization 后路由回 current worker lease 对应的 sidecar daemon。request completion 也写入 event log。
+先实现的流程：agent process 通过 sidecar daemon 发出 permission request 或 client tool request。Central service 为每个 pending request 创建 canonical durable Interaction，生成与 adapter request ID 分离的 public ID，并把 request event 投影给有权限的 Session view。普通 Session 只有 owner view；单层 Delegation-created Child 仍是 owner，直接 Parent 增加一个可操作 projection。任一 view 的第一次合法 response 通过 durable compare-and-set完成 resolution，所有 view 收敛同一个 responded event，response 只向 owner Session request 所绑定的 Worker lease 幂等投递。
 
 后续扩展的流程：approval delegation、timeout policy、multi-approver、tool-specific policy、location-scoped approval。
 
-架构讨论重点：approval 不能只是 worker 内存里的 pending promise。否则 client 断线、worker failure 或 audit review 时都无法解释系统状态。
+架构讨论重点：approval 不能只是 worker 内存里的 pending promise，也不能为 Parent/Child 各保存一份可独立变化的 open 状态。Canonical Interaction 保存 obligation、首次 response 和 delivery state；Session event log保存各 view 的 replay facts。Client 断线时 Interaction 保持 open；owner lease 丢失时旧 pending request明确 interrupted，不把旧 approval 猜测重放到 restart-with-context 后的新请求。完整机制见 `specs/durable-interaction-broker-ch.md`。
 
 ### 13.5 Workspace Output Access
 

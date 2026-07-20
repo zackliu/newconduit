@@ -39,6 +39,7 @@ src/
     adapters/         # Copilot SDK process wrapper, Docker workspace (mount + snapshot parts), Web PubSub client
 sdk/client/           # Customer-facing TypeScript SDK (talks to central; never imports src/)
 samples/webclient/    # Browser demo that drives durable sessions through the SDK
+samples/diagnostic-console/ # SignalOS end-user diagnostic application
 containers/sidecar/   # Dockerfile baked into the sidecar worker image
 specs/                # POC workflow, runtime resource model, and implementation plan
 tests/                # Scenario-based tests (central, sidecar, recovery, webpubsub, workerpool)
@@ -117,6 +118,8 @@ With central running, start the browser demo (Vite dev server on `http://127.0.0
 pnpm --dir samples/webclient dev
 ```
 
+The page keeps its connection in the URL as `?central=<central-url>&tenant=<tenant-id>`. Copy the current browser URL to share a dashboard link that opens with the same Central endpoint and tenant.
+
 Then, in the browser:
 
 1. Set **Central URL** to `http://localhost:3000` and **Tenant** to `poc`, and click **Connect**. The right rail shows the `poc-docker-copilot` WorkerPool.
@@ -172,6 +175,159 @@ pnpm start:central
 In the web client, choose the **`copilot-foundry`** AgentSpec (it now appears alongside the Docker `copilot-poc` spec). Central scales the `foundry-copilot` pool out onto a Foundry hosted-agent worker — a cold start boots the container, which reverse-registers over Web PubSub — runs the turn, and pauses by scaling in. The Docker pools stay available in the same central for `copilot-poc` sessions.
 
 > **Local-test topology only:** when central runs on your machine while the worker runs in Foundry, the container must reach central's `/sidecar/negotiate`. Expose central with a tunnel (for example `devtunnel host -p 3000 --allow-anonymous`) and put that public https URL in the Foundry controller's `centralUrlForWorkers` (in `config/host-pool-controllers/foundry.json`). Because that URL is resolved per host-pool-controller, the Foundry pool uses the tunnel while the Docker pools keep `host.docker.internal` — one central drives both. This is a convenience for local testing, not a production topology.
+
+## Run SignalOS Agentic Diagnostics
+
+[samples/diagnostic-console/](samples/diagnostic-console/) is an end-user application built on the runtime. SignalOS starts a `diagnostic-expert` Session on the existing Foundry WorkerPool. The expert can answer from its diagnostic knowledge and fetch public documentation, but it cannot treat its Foundry container as the user's machine. When it needs device facts, it calls `inspect_local_system`; Central routes that Delegate to a `local-diagnostic` Child Session on a manually registered standalone Worker on the developer machine.
+
+The existing [samples/webclient/](samples/webclient/) is only an optional runtime dashboard for observing Sessions, Workers, WorkerPools, events, and interactions. End users use SignalOS on port `5175`; they do not need the dashboard.
+
+### 1. Prepare the repository and Azure login
+
+From the repository root:
+
+```powershell
+pnpm install
+pnpm build
+pnpm --dir sdk/client build
+pnpm --dir samples/diagnostic-console build
+az login
+```
+
+The current sample expects the existing Foundry hosted agent declared by [config/host-pool-controllers/foundry.json](config/host-pool-controllers/foundry.json):
+
+```text
+Project: https://pmagent2.services.ai.azure.com/api/projects/proj-default
+Agent:   agent-runtime-sidecar
+```
+
+If that hosted agent has not been deployed, complete the image build and deployment in [foundry/README.md](foundry/README.md) first. The deployed image must use the `invocations` protocol and must contain the provider build arguments described there.
+
+### 2. Expose Central to the Foundry worker
+
+Central runs locally on port `3000`, but the Foundry container must call its `/sidecar/negotiate` endpoint. Start a tunnel in a dedicated terminal:
+
+```powershell
+devtunnel host -p 3000 --allow-anonymous
+```
+
+Copy the tunnel's public HTTPS URL into `centralUrlForWorkers` in [config/host-pool-controllers/foundry.json](config/host-pool-controllers/foundry.json). The currently configured URL is:
+
+```text
+https://8p3g7wcl-3000.aue.devtunnels.ms
+```
+
+Keep the tunnel process running. If `devtunnel` returns a different URL, update the config before starting Central. Central loads AgentSpecs, Delegates, WorkerPools, and host-pool-controller config only at startup.
+
+### 3. Start Central
+
+In a second terminal:
+
+```powershell
+$env:WEBPUBSUB_ENDPOINT = "https://chenylremoteagent.webpubsub.azure.com"
+$env:WEBPUBSUB_HUB = "agentruntimepoc"
+$env:CENTRAL_PORT = "3000"
+pnpm start:central
+```
+
+Expected startup output includes:
+
+```text
+central service listening on http://localhost:3000
+worker pool foundry-copilot will connect sidecars to https://8p3g7wcl-3000.aue.devtunnels.ms
+```
+
+Restart Central after changing either diagnostic AgentSpec or the Delegate config:
+
+- [config/agent-specs/diagnostic-expert.json](config/agent-specs/diagnostic-expert.json)
+- [config/agent-specs/local-diagnostic.json](config/agent-specs/local-diagnostic.json)
+- [config/delegates/local-diagnostic.json](config/delegates/local-diagnostic.json)
+
+### 4. Register the standalone local diagnostic Worker
+
+The local machine is intentionally represented by one standalone Worker, not by a WorkerPool. Start it in a third terminal on the machine SignalOS should diagnose:
+
+```powershell
+$env:CENTRAL_URL = "http://localhost:3000"
+$env:TENANT_ID = "poc"
+$env:WORKER_TYPE = "copilot-local"
+$env:SIDECAR_LABELS_JSON = '{"agent":"local-diagnostic","storage":"host-managed"}'
+$env:SIDECAR_CAPACITY = "10"
+
+$env:COPILOT_MODEL = "gpt-5.4-mini"
+$env:COPILOT_PROVIDER_TYPE = "openai"
+$env:COPILOT_PROVIDER_BASE_URL = "https://pmagent2.services.ai.azure.com/openai/v1"
+
+pnpm start:sidecar
+```
+
+Expected output:
+
+```text
+sidecar daemon started as worker type copilot-local via host env
+```
+
+Do not set `WORKER_POOL_ID` for this process. Its labels match only the `local-diagnostic` AgentSpec, and Central cannot scale out or replace the developer machine. Capacity is `10`, so this standalone Worker can host up to ten concurrent `local-diagnostic` Sessions.
+
+If the sidecar reports `Session was not created with authentication info or custom provider`, the three `COPILOT_*` provider variables are missing from that terminal. If a long-lived local agent session later receives provider HTTP `401`, restart the standalone sidecar so `DefaultAzureCredential` obtains a fresh bearer token.
+
+### 5. Start SignalOS
+
+In a fourth terminal:
+
+```powershell
+pnpm --dir samples/diagnostic-console dev
+```
+
+Open [http://127.0.0.1:5175](http://127.0.0.1:5175). The default connection is `http://localhost:3000`, tenant `poc`; use the settings button to change either value. SignalOS keeps both values in the URL as `?central=<central-url>&tenant=<tenant-id>`, so copying the current browser URL preserves the connection for another user.
+
+SignalOS keeps one Session in page memory:
+
+- The first question or quick diagnostic creates a `diagnostic-expert` Session.
+- Later questions reuse that Session while the page remains open.
+- **New** becomes available after the current turn finishes. It pauses the previous Session and resets the page to a new case.
+- Refreshing the page starts with an empty browser case; the runtime Session remains visible in the optional dashboard, but SignalOS intentionally does not persist or restore its ID.
+
+### 6. Exercise the two diagnostic paths
+
+For a device-backed diagnosis, click **Why is my machine slow?**. The expected flow is:
+
+1. SignalOS starts the Foundry `diagnostic-expert` Session.
+2. The expert calls `inspect_local_system`.
+3. Central creates or resumes a `local-diagnostic` Child Session and assigns it to the standalone Worker.
+4. SignalOS displays one end-user consent dialog for read-only device checks.
+5. Click **Allow this diagnosis** once. For the rest of that browser case, SignalOS automatically approves each later approval originating from `local-diagnostic`.
+6. The device card progresses through **Understand**, **Permission**, **Check**, and **Results**.
+7. The Foundry expert returns a conclusion that separates observed device facts, likely causes, and one next step.
+
+For a knowledge-only question, click an item under **Ask an expert**, or ask the expert to consult public documentation. Public URL fetch permissions are approved automatically and do not show the device consent dialog. SignalOS rejects hosted shell or filesystem approvals: the Foundry workspace is not the target machine, and target-machine evidence must go through `inspect_local_system`.
+
+### 7. Optional runtime observation
+
+To inspect the platform while using SignalOS, start the dashboard separately:
+
+```powershell
+pnpm --dir samples/webclient dev
+```
+
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173), connect to `http://localhost:3000`, and select tenant `poc`. A device diagnosis should show:
+
+- one `diagnostic-expert` Parent Session on `foundry-copilot`;
+- one `local-diagnostic` Child Session beneath it;
+- one standalone Worker with labels `agent=local-diagnostic, storage=host-managed`;
+- approval interactions projected from the Child to the Parent.
+
+The dashboard is an operator view and is not part of the SignalOS end-user workflow.
+
+### 8. Validate the sample build
+
+```powershell
+pnpm --dir samples/diagnostic-console build
+pnpm typecheck
+pnpm test
+```
+
+The verified browser E2E covers both paths: one device diagnosis completed after a single visible consent, and one public Microsoft documentation fetch completed without an approval dialog or local device inspection.
 
 ## How Scaling and Recovery Work
 

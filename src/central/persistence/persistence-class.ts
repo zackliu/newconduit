@@ -12,7 +12,7 @@ export type StorageAttachmentKind = 'worker-pull' | 'host-managed';
 export interface StorageClass {
   readonly classId: string;
   readonly attachmentKind: StorageAttachmentKind;
-  planCapture(session: SessionRecord): SnapshotCaptureRef | undefined;
+  planCapture(session: SessionRecord, snapshotId: string): SnapshotCaptureRef | undefined;
   planRestore(session: SessionRecord): Promise<SnapshotRestoreRef | undefined>;
   recordCapture(session: SessionRecord, input: { snapshotId: string; parts: SnapshotPartName[] }): Promise<WorkspaceSnapshot | undefined>;
 }
@@ -27,8 +27,7 @@ export class VolumeSnapshotStorageClass implements StorageClass {
 
   constructor(private readonly storage: RuntimeStorage, private readonly clock: Clock) {}
 
-  planCapture(session: SessionRecord): SnapshotCaptureRef {
-    const snapshotId = crypto.randomUUID();
+  planCapture(session: SessionRecord, snapshotId: string): SnapshotCaptureRef {
     return { snapshotId, storageClass: this.classId, handle: this.buildHandle(session.sessionId, snapshotId) };
   }
 

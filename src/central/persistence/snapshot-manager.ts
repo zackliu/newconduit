@@ -23,8 +23,8 @@ export class SnapshotManager {
     return this.resolve(session).attachmentKind;
   }
 
-  planCapture(session: SessionRecord): SnapshotCaptureRef | undefined {
-    return this.resolve(session).planCapture(session);
+  planCapture(session: SessionRecord, snapshotId: string): SnapshotCaptureRef | undefined {
+    return this.resolve(session).planCapture(session, snapshotId);
   }
 
   async planRestore(session: SessionRecord): Promise<SnapshotRestoreRef | undefined> {

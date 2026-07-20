@@ -1,0 +1,44 @@
+{
+  "object": "agent.version",
+  "id": "agent-runtime-sidecar:17",
+  "name": "agent-runtime-sidecar",
+  "version": "17",
+  "description": "Hosted container agent using pre-built image pmagent.azurecr.io/agent-runtime-sidecar-foundry:interaction-broker-20260720",
+  "metadata": {
+    "enableVnextExperience": "true"
+  },
+  "created_at": 1784521048,
+  "definition": {
+    "container_configuration": {
+      "image": "pmagent.azurecr.io/agent-runtime-sidecar-foundry:interaction-broker-20260720"
+    },
+    "container_protocol_versions": [],
+    "cpu": "0.5",
+    "kind": "hosted",
+    "memory": "1Gi",
+    "protocol_versions": [
+      {
+        "protocol": "invocations",
+        "version": "2.0.0"
+      }
+    ]
+  },
+  "status": "active",
+  "instance_identity": {
+    "principal_id": "d67870df-4ef2-40e3-8a66-ea0f7496396b",
+    "client_id": "d67870df-4ef2-40e3-8a66-ea0f7496396b"
+  },
+  "blueprint": {
+    "principal_id": "f5e40e88-a380-42d2-828c-f688e9976aed",
+    "client_id": "eea722aa-332c-41e2-9239-bffade5c5c4b"
+  },
+  "blueprint_reference": {
+    "type": "ManagedAgentIdentityBlueprint",
+    "blueprint_id": "agent-runtime-sidecar-eaca7"
+  },
+  "agent_guid": "eaca74d2-1077-4572-9590-1c627199f50c",
+  "playground_url": "https://ai.azure.com/nextgen/r/nK8qHpxJSbaJola97H4_lw,pmagent,,pmagent2,proj-default/build/agents/agent-runtime-sidecar/build?version=17",
+  "agent_endpoints": {
+    "invocations": "https://pmagent2.services.ai.azure.com/api/projects/proj-default/agents/agent-runtime-sidecar/endpoint/protocols/invocations?api-version=v1"
+  }
+}

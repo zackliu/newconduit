@@ -1,11 +1,15 @@
-import type { CreateSessionRequest, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeEventTransport, SessionInputRequest } from '../../shared';
-import { SessionManager } from '../managers';
+import type { CreateSessionRequest, InteractionRespondedAckPayload, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeEventTransport, SessionInputRequest } from '../../shared';
+import { InteractionManager, SessionManager } from '../managers';
 
 /**
  * Translates client-authored runtime events into durable session work, so application code talks to sessions instead of worker locations.
  */
 export class ClientRuntimeEventController {
-  constructor(private readonly sessionManager: SessionManager, private readonly eventTransport: RuntimeEventTransport) {}
+  constructor(
+    private readonly sessionManager: SessionManager,
+    private readonly interactionManager: InteractionManager,
+    private readonly eventTransport: RuntimeEventTransport
+  ) {}
 
   async handleRuntimeEvent(context: RequestContext, event: RuntimeEvent): Promise<boolean> {
     switch (event.type) {
@@ -50,6 +54,9 @@ export class ClientRuntimeEventController {
       case 'session.pause.requested': {
         const sessionId = this.parseSessionCommandSessionId(event.sessionId, event.type);
         const outcome = await this.sessionManager.pauseSession(context, sessionId, event.ackId);
+        if (!outcome) {
+          return true;
+        }
         await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.pauseRequestedEvent);
         await this.eventTransport.publish({ kind: 'client-inbox' }, this.toClientProjectionEvent(outcome.pauseRequestedEvent, 'session.status.updated', { sessionId: outcome.session.sessionId, status: outcome.session.status }));
         await this.eventTransport.publish({ kind: 'worker-commands', workerId: outcome.workerCommand.workerId }, outcome.workerCommand.event);
@@ -65,15 +72,23 @@ export class ClientRuntimeEventController {
       case 'interaction.respond.requested': {
         const sessionId = this.parseSessionCommandSessionId(event.sessionId, event.type);
         const payload = this.parseInteractionRespondPayload(event.payload);
-        const outcome = await this.sessionManager.respondInteraction(context, sessionId, event.ackId, payload);
-        await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.session.sessionId }, outcome.interactionRespondedEvent);
-        if (outcome.routedInteractionRespondedEvent) {
-          await this.eventTransport.publish({ kind: 'session-events', sessionId: outcome.routedInteractionRespondedEvent.sessionId! }, outcome.routedInteractionRespondedEvent);
+        let acknowledgement: InteractionRespondedAckPayload;
+        try {
+          acknowledgement = await this.interactionManager.resolve(context, sessionId, payload);
+        } catch (error) {
+          acknowledgement = {
+            interactionId: payload.interactionId,
+            status: 'rejected',
+            error: {
+              code: 'interaction_response_rejected',
+              message: error instanceof Error ? error.message : String(error)
+            }
+          };
         }
-        await this.eventTransport.publish({ kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) }, this.toClientAckEvent(outcome.interactionRespondedEvent, 'interaction.responded.ack', { interactionId: payload.interactionId, status: 'accepted' }));
-        if (outcome.workerCommand) {
-          await this.eventTransport.publish({ kind: 'worker-commands', workerId: outcome.workerCommand.workerId }, outcome.workerCommand.event);
-        }
+        await this.eventTransport.publish(
+          { kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) },
+          this.toRequestAckEvent(event, 'interaction.responded.ack', acknowledgement)
+        );
         return true;
       }
       default:
@@ -101,6 +116,16 @@ export class ClientRuntimeEventController {
       ...event,
       ackId: undefined,
       turnSeq: undefined,
+      type,
+      payload
+    };
+  }
+
+  private toRequestAckEvent<TPayload>(event: RuntimeEvent, type: RuntimeEvent['type'], payload: TPayload): RuntimeEvent<TPayload> {
+    return {
+      ...event,
+      eventId: crypto.randomUUID(),
+      actor: 'central',
       type,
       payload
     };

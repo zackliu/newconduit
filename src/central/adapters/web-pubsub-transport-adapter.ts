@@ -74,8 +74,11 @@ export class WebPubSubTransportAdapter implements RuntimeEventTransport, TenantC
       roles: ['webpubsub.joinLeaveGroup', 'webpubsub.sendToGroup']
     });
     const client = new WebPubSubClient(token.url, {
-      autoReconnect: false,
-      autoRejoinGroups: false
+      autoReconnect: true,
+      autoRejoinGroups: true,
+      reconnectRetryOptions: {
+        maxRetries: Number.MAX_VALUE
+      }
     });
     client.on('group-message', (message) => {
       void this.dispatchGroupMessage(message);

@@ -1,4 +1,4 @@
-import type { InteractionRequestedPayload, JsonValue, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, RuntimeToolRequestedPayload, SessionRecord, SessionRuntimeToolResponseCommandPayload, TurnCompletedPayload, WorkerCommandAcceptedPayload } from '../../shared';
+import type { JsonValue, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, RuntimeToolRequestedPayload, SessionRecord, SessionRuntimeToolResponseCommandPayload, TurnCompletedPayload, WorkerCommandAcceptedPayload } from '../../shared';
 import type { DelegationDispatcher, DelegationManager, SessionLeaseManager, SessionManager, WorkerCommandOutput } from '../managers';
 
 export class DelegationRuntimeEventController {
@@ -30,24 +30,11 @@ export class DelegationRuntimeEventController {
     }
     if (event.type === 'worker.command.accepted') {
       const payload = event.payload as WorkerCommandAcceptedPayload;
-      await this.delegationManager.acknowledgeCommand(session.sessionId, payload.commandEventId, payload.turnSeq);
-      return;
-    }
-    if (event.type === 'interaction.requested') {
       const delegation = await this.storage.readDelegation(session.delegationBinding.delegationId);
       const activeCall = delegation?.calls.find((call) => call.delegationCallId === delegation.activeCallId);
-      if (!delegation || !activeCall) {
-        throw new Error(`Delegation ${session.delegationBinding.delegationId} has no active Call for interaction`);
+      if (activeCall?.dispatch?.commandEventId === payload.commandEventId) {
+        await this.delegationManager.acknowledgeCommand(session.sessionId, payload.commandEventId, payload.turnSeq);
       }
-      const interaction = this.parseInteractionRequested(event.payload);
-      const projected = await this.sessionManager.projectDelegatedInteraction({
-        parentSessionId: delegation.parentSessionId,
-        childSessionId: session.sessionId,
-        callerTurnSeq: activeCall.callerTurnSeq,
-        interaction,
-        requestedAt: event.timestamp
-      });
-      await this.eventTransport.publish({ kind: 'session-events', sessionId: delegation.parentSessionId }, projected);
       return;
     }
     if (event.type === 'turn.completed' && event.turnSeq !== undefined) {
@@ -263,15 +250,6 @@ export class DelegationRuntimeEventController {
       throw new Error('delegated Child turn completed without a message');
     }
     return result.result.message;
-  }
-
-  private parseInteractionRequested(payload: unknown): InteractionRequestedPayload {
-    const candidate = this.record(payload);
-    if (typeof candidate.interactionId !== 'string'
-      || (candidate.kind !== 'approval' && candidate.kind !== 'tool_call')) {
-      throw new Error('invalid delegated interaction.requested payload');
-    }
-    return candidate as unknown as InteractionRequestedPayload;
   }
 
   private failureMessage(payload: unknown): string {

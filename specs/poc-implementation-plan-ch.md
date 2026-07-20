@@ -700,84 +700,55 @@ Expect：
 
 ## 12. Slice 10：Durable Interaction Broker For Approval And Client Tools
 
-目标：把 Copilot SDK 的 pending-request 模型桥接成 central-owned durable interaction，让一个 turn 在 agent 请求 off-agent 响应（human approval 或 client 兑现的 tool result）时挂起，并且这个挂起不依赖 client 是否在线，能跨 pause/resume 和 reconnect 继续等待。Agent 自己执行的 built-in/MCP/handler-backed tool 保持纯 observation，不进入 interaction。
+目标：按 [Durable Interaction Broker](durable-interaction-broker-ch.md) 把 Copilot SDK pending request 桥接成 tenant-owned canonical Interaction。普通 Session 与 Delegation-created Child Session进入同一 owner 流程；单层 Parent 只有可操作 projection，不保存第二份 approval 状态。Client 断线不丢 obligation，多 view 并发响应首次获胜，Central resolution 与 Worker delivery 都可在 restart 后 reconcile。
 
-实现范围：
+实现顺序：
 
-- Interaction 边界：一个 turn 只有在 Copilot surface 出 off-agent 请求时才挂起——`permission.requested`（kind `approval`）或 declaration-only tool 被 externalize 成 external tool request（kind `tool_call`）。built-in、MCP、以及带 handler 的 custom tool 由 agent runtime 自己执行，继续走 `tool.started`/`tool.completed` observation，不产生 interaction，也不挂起 turn。执行位置（agent 本地 vs host 兑现）与 approval gate 是两条正交轴：一个 agent 本地执行的 MCP 调用仍可能带 approval gate，此时挂起的是那道 gate，而不是把执行搬到 client。
-- Sidecar bridge：移除 `approveAll`。Copilot session 配置为不自动解决 permission（不挂 auto-resolve handler），让 permission 以 pending event 形式 surface；AgentSpec 声明的 client tools 以 declaration-only `Tool`（无 handler）注册，使其调用被 externalize 成 pending external tool request。correlation 直接复用 Copilot 的 `requestId`：sidecar 把 `interactionId` 取成对应 pending request 的 `requestId`（`tool_call` 来自 `external_tool.requested` 的 `requestId`，`approval` 来自 pending permission 的 `requestId`），不另建映射表；resolve 时按 `kind` 把 `interactionId` 当 `requestId` 传回对应 pending RPC。
-- Durable interaction event：sidecar 把 `interaction.requested` publish 到 tenant inbox runtime channel，携带 `interactionId`（= Copilot `requestId`，作为回包关联键）、`kind`、`turnSeq`、typed `request` 和当前 `sessionLeaseId`；`tool_call` 的 `request` 带 `toolName`、`arguments`（供 client 执行）和 `toolCallId`（供 trace/分组）。Central append `interaction.requested` 到 `events.jsonl`，并把它加入 session record 的 `openInteractions`。
-- Central open-interaction truth：session record 增加以 `interactionId` 索引的 `openInteractions`（含 `kind`、`turnSeq`、requested 时间）。`interaction.requested` 加入，`interaction.responded` 移除。只要该 turn 还有 open interaction，central 就不认为 turn 结束，也不 synthesize `turn.completed`；只有 Worker 真正的 `turn.completed` 才关闭 turn。Placement status（running/paused）与 interaction 正交；client 侧从 `openInteractions` 派生“需要响应”，而不是新增一个互斥 status。
-- Client response command：新增 client-authored runtime event `interaction.respond.requested`，携带 `sessionId`、`interactionId` 和 typed `response`。`approval` 的 response 带 `decision`（`approved`/`denied`）和 `scope`（`once` 或 `session`）；`tool_call` 的 response 带 tool result。Central `ClientRuntimeEventController` 处理它：先按 session 和 interaction kind 授权 principal，再校验该 interaction 当前 open，append 带 `scope` 的 `interaction.responded` durable event（`scope: session` 的 approve 即一条可审计的常驻放行记录），从 `openInteractions` 移除，并把 `session.interaction.response` worker command route 到当前 `sessionLeaseId` 对应的 Worker；`interaction.responded.ack` 回 client private inbox。
-- Sidecar response command：sidecar 处理 `session.interaction.response` worker command：校验 `sessionLeaseId`，按 `kind` 把 `interactionId` 当 `requestId` 回给对应 pending RPC——`tool_call` → `rpc.tools.handlePendingToolCall({ requestId, result })`，`approval` → `rpc.permissions.handlePendingPermissionRequest({ requestId, result })`，因此 response 精确命中 Copilot 那次 pending request，无需额外映射。`approval` response 的 `scope` 映射到 Copilot permission decision：`once` → `Approved`，`session` → `ApprovedForSession`，让 Copilot permission rule engine 记下 session 级放行规则。挂起的 turn 与 worker command 处理并发进行，resolve 命令能在 turn 挂起期间被接收，不被 in-flight turn head-of-line 阻塞；同一 turn 的多个 open interaction 按 `interactionId` 独立 resolve。
-- Standing approval rule（auto-approve after first）：一次 `scope: session` 的 approve 不是 client 端记忆，而是 gate 上的一条 rule。之后命中该 rule 的 gated action 由 Copilot permission rule engine 在 gate 处直接放行，不 surface 成 `interaction.requested`、不挂起 turn、不往返 client；central 靠那条带 `scope` 的 `interaction.responded` 记录该常驻放行以供 audit 与吊销。SDK 不实现有状态的 auto-approver，app 也不盲返回 approval——“第一次问、之后自动”完全由 scope 化 decision + gate rule 承担。本 slice 用 Copilot session permission rule 落地常驻放行；把它泛化成 central-owned approval policy 不在本 slice。
-- Pause/resume：带 open interaction 的 session 被 pause 时，`openInteractions` 随 session record 和 event log 持久化（它是 durable fact，不是 worker-local state），pause 照常释放 Worker lease。Resume 重新 lease Worker 并从 agent session state 重启该 turn；central 始终是该 obligation 的 source of truth。Pause 期间收到的 decision 在重启后的 agent 再次请求同一 interaction（按 kind+turn 对齐）时下发；recovery 语义是 restart-with-context，不承诺 tool 调用中点的透明续跑。
-- Reconnect / client offline：interaction 存在于 event log 和 `openInteractions`，与任何 client connection 无关。晚到的 client 连接后从历史里 fold `interaction.requested`/`interaction.responded` 得到仍然 open 的 interaction，并通过同一 command 响应；interaction 的存在和持久不需要任何 client 在线。
-- SDK surface：Client SDK 把 `interaction.requested`/`interaction.responded` 映射成 typed session event 暴露在 `observe()`，暴露当前 open interactions，并提供 `respond({ interactionId, decision, scope })`（`approval` 可选 `scope: 'once' | 'session'`）以及可选的 per-kind registered handler；handler 只做逐请求的动态决策，不做常驻自动批准。SDK 不暴露 Worker endpoint 或 pending-RPC 机制，也不持有 auto-approve 状态。移除旧的 observation-only `approval.requested` event 和 `agent.output.approvalRequested` 字段，approval 只走 durable interaction。Public protocol 变化同步 `sdk/client/public-protocol-spec-ch.md`、SDK 类型、central/sidecar handler、e2e tests。
+1. **Shared contract 与 storage**：新增 `InteractionRecord`、Central public `interactionId`、owner/view、resolution、delivery 和 revision；storage 实现 create/read/list-by-session/compare-and-set。删除 `SessionRecord.openInteractions` 作为 interaction truth 的路径，不保留双行为。
+2. **统一 InteractionManager**：tenant-scoped manager 接管所有 agent-originated `agent.interaction.requested { adapterRequestId }` admission、public ID 生成、`interaction.requested { interactionId }` session event projection、typed response validation、authorization、first-response CAS、delivery reconcile 和 lease-loss terminalization。普通 Session 的 views 只有 owner；Child 根据 immutable binding 增加一个直接 Parent view。
+3. **Controller 接线**：`AgentRuntimeEventController` 只解析并验证 sidecar ingress后调用 manager；`ClientRuntimeEventController` 调用统一 resolve，并对 `resolved`、`already_resolved`、`rejected` 都发送 private ack；`SessionManager` 和 `DelegationRuntimeEventController` 删除 interaction response/projection 逻辑。
+4. **Sidecar delivery**：`session.interaction.response` 同时携带 public `interactionId` 和内部 `adapterRequestId`；Sidecar 按 lease fence 和 `commandEventId` 幂等处理，pending RPC accepted 后上报 acknowledgement。Central 只把 response 投递给 owner Worker。
+5. **SDK 与 Webclient**：SDK `respondToInteraction()` 注册 ack waiter并返回 `{ status: 'resolved' | 'already_resolved' }`；`interaction.requested` 映射可选 delegated `source`。Webclient 等待 ack期间保留并禁用 approval UI；两种成功状态都收起，`rejected` 恢复操作。Webclient 不做跨 Session 去重或同步。
 
-Scenario-based test：`scenario: approval interaction survives client absence and resumes the turn`
+Interaction 边界保持不变：`permission.requested` 是 `approval`，declaration-only external tool 是 `tool_call`；built-in、MCP 和 handler-backed tool 只产生 observation。`scope: session` 只作用于 canonical owner agent session。递归 Delegation、链式 Subsession、multi-approver 和 restart-with-context 后自动重放旧 approval 不在本 slice。
 
-Given：
+Scenario-based test：`scenario: ordinary Session approval uses canonical interaction and typed ack`
 
-- 一个 session 的 agent runtime 在没有任何 client 订阅 session events 时请求一个 gated action（Copilot `permission.requested`）。
+Given：普通 Session 在 client 离线时产生一个 approval。
 
-Expect：
+Expect：Central 创建一个 public ID 与 adapter ID 分离的 canonical record；reconnect replay 能看到 open request；client response 返回 `resolved` ack；Sidecar 只 resolve 一次 pending RPC；turn 走到真实 `turn.completed`。
 
-- Sidecar 让该 Copilot permission 保持 pending，并 publish `interaction.requested{kind:'approval'}` 到 tenant inbox，携带稳定 `interactionId` 和当前 `sessionLeaseId`。
-- Central append `interaction.requested` 到 `events.jsonl`，并把它记入 session 的 `openInteractions`；turn 保持 open，不出现 `turn.completed`。
-- 无 client 连接时该 interaction 持续存在；随后连接的 client replay history 能看到这个 open `approval` interaction。
-- Client publish `interaction.respond.requested{ interactionId, decision: approved, scope: once }` 后，central 授权、append `interaction.responded`、从 `openInteractions` 移除，并 route `session.interaction.response` 到当前 Worker。
-- Sidecar 用 pending-permission RPC resolve 该 permission，turn 继续走到真实的 `turn.completed`。
+Scenario-based test：`scenario: Child interaction can be resolved from Parent or Child view`
 
-Scenario-based test：`scenario: parallel client tool interactions resolve independently`
+Given：一个 Delegation-created Child 产生 approval，直接 Parent 与 Child 同时观察各自 session events。
 
-Given：
+Expect：两个 view 使用同一个 Central public ID，Parent event 带 Child source；从 Parent 响应后两个 view 都收到 `interaction.responded`，response 只投递给 Child Worker；从 Child 先响应时，Parent stale response 返回 `already_resolved` 而不是失败。
 
-- Agent 在同一个 turn 内发起两个 declaration-only tool 调用。
+Scenario-based test：`scenario: concurrent Parent and Child decisions have one winner`
 
-Expect：
+Given：Parent 与 Child 同时对同一个 Interaction 提交不同 decision。
 
-- Sidecar publish 两条 `interaction.requested{kind:'tool_call'}`，`interactionId` 不同、`turnSeq` 相同，两条都保持 pending。
-- 先响应第二个 `interactionId` 只 resolve 对应的 Copilot tool request，第一个仍然 open。
-- Turn 挂起期间 sidecar 仍在处理 worker command，command 入站不被 in-flight turn 阻塞。
-- 两条 `interaction.respond.requested` 都到达后，两个 tool result 都被下发，turn 走到 `turn.completed`。
+Expect：只有一个 compare-and-set 成功；另一方得到 `already_resolved`；canonical response immutable；event projection和 Worker delivery各发生一次。
 
-Scenario-based test：`scenario: agent-executed MCP tool stays observation, not interaction`
+Scenario-based test：`scenario: public interaction identity cannot collide across views`
 
-Given：
+Given：Parent 自己的 pending request 与 Child adapter request 使用相同 adapter request ID。
 
-- Agent 调用一个 built-in/MCP/handler-backed tool。
+Expect：Central 为两者生成不同 public ID；两个 canonical Interaction 独立存在并可独立 resolve。
 
-Expect：
+Scenario-based test：`scenario: resolved delivery reconciles after Central restart`
 
-- Central append `tool.started`/`tool.completed` observation event，不产生 `interaction.requested`。
-- Turn 不挂起，`openInteractions` 保持为空。
+Given：Central 在 resolution CAS 后、view projection 或 Worker publish 前退出。
 
-Scenario-based test：`scenario: session-scoped approval auto-resolves later matching actions at the gate`
+Expect：restart 后 reconciler 补齐每个 Session 的唯一 `interaction.responded` event，并用相同 command event ID完成一次 owner Worker delivery。
 
-Given：
+Scenario-based test：`scenario: owner lease loss does not replay stale approval`
 
-- 第一个 gated action 的 approval interaction 被 `interaction.respond.requested{ interactionId, decision: approved, scope: session }` 响应。
+Given：owner pending RPC 所在 Worker lease 在 response accepted 前丢失。
 
-Expect：
+Expect：Interaction terminalize 为 `interrupted` 或 pending delivery 变为 `abandoned`；各 view 收到 terminal event；restart-with-context 后的新 agent request 获得新 public ID，不自动消费旧 response。
 
-- Central append 带 `scope: session` 的 `interaction.responded`，作为该常驻放行的可审计记录。
-- Sidecar 用 `ApprovedForSession` resolve 该 permission，Copilot 记下 session rule。
-- 之后同类 gated action 被 gate 直接放行，不产生新的 `interaction.requested`，turn 不挂起、也不往返 client。
-- 该常驻放行后 `openInteractions` 对同类动作保持为空。
-
-Scenario-based test：`scenario: open interaction persists across pause and resume`
-
-Given：
-
-- 一个 session 带一个 open `approval` interaction。
-
-Expect：
-
-- Pause 释放 Worker lease，session status 是 `paused`，`openInteractions` 仍包含该 interaction（持久在 session record 和 event log）。
-- Resume 重新 lease Worker，该 interaction 仍是 central-owned obligation；重启的 agent 再次请求该 gated action 时，用 `interaction.respond.requested` 记录的 decision resolve 它，turn 继续。
-
-Automated scenario test 使用实现同一 `agentProcessAdapter` contract 的 deterministic agent test harness 驱动 permission/external-tool 的 pending 与 resolve；测试必须经过 central-owned event log、worker command channel 和 session events channel，不允许 sidecar-local 旁路。
+Automated scenario tests 使用 deterministic `agentProcessAdapter`，但必须经过 Interaction storage、tenant ingress、session event channels、client private ack 和 Worker command channel，不允许 direct manager state mutation 或 sidecar-local 旁路。
 
 ## 13. Slice 11：Externalize Demo Config To Default Config Directory
 

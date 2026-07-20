@@ -31,6 +31,12 @@ interface PendingInteraction {
   turnSeq: number;
   kind: 'approval' | 'tool_call';
   request: unknown;
+  source?: {
+    kind: 'delegated_session';
+    ownerSessionId: string;
+    agentSpecId: string;
+  };
+  submitting: boolean;
 }
 
 interface RuntimeStatus {
@@ -99,6 +105,8 @@ const PLACEHOLDER_AGENT_SPEC: AgentSpecOption = {
   storage: '—'
 };
 
+const initialQuery = new URLSearchParams(location.search);
+
 function agentSpecOptions(): AgentSpecOption[] {
   return state.runtimeStatus.agentSpecs.map((spec) => ({
     agentSpecId: spec.agentSpecId,
@@ -109,8 +117,8 @@ function agentSpecOptions(): AgentSpecOption[] {
 }
 
 const state = {
-  centralUrl: localStorage.getItem('ars.sample.centralUrl') ?? 'http://localhost:3000',
-  tenantId: localStorage.getItem('ars.sample.tenantId') ?? 'poc',
+  centralUrl: initialQuery.get('central') ?? localStorage.getItem('ars.sample.centralUrl') ?? 'http://localhost:3000',
+  tenantId: initialQuery.get('tenant') ?? localStorage.getItem('ars.sample.tenantId') ?? 'poc',
   client: undefined as AgentRuntimeClient | undefined,
   clientEventSubscription: undefined as SdkSubscription | undefined,
   observeAbort: undefined as AbortController | undefined,
@@ -125,7 +133,8 @@ const state = {
   openInteractions: [] as PendingInteraction[],
   pending: false,
   connectionState: 'disconnected' as 'disconnected' | 'connecting' | 'connected' | 'error',
-  error: ''
+  error: '',
+  notice: ''
 };
 
 let runtimeStatusTimer: number | undefined;
@@ -143,6 +152,7 @@ function scheduleRender(): void {
   requestAnimationFrame(() => { renderScheduled = false; render(); });
 }
 
+syncShareableConnectionUrl();
 render();
 
 function render(): void {
@@ -152,7 +162,7 @@ function render(): void {
   const activeSession = getActiveSessionSummary();
   const selectedAgentSpec = getSelectedAgentSpec();
   const canSend = Boolean(state.currentSession && activeSession?.status === 'running' && !state.pending);
-  const canPause = Boolean(state.currentSession && activeSession?.status === 'running' && !state.pending);
+  const canPause = Boolean(state.currentSession && activeSession?.status === 'running' && !state.pending && state.openInteractions.length === 0);
   const canResume = Boolean(state.currentSession && activeSession?.status === 'paused' && !state.pending);
   const canRefresh = Boolean(state.currentSession && state.connectionState === 'connected' && !state.pending);
   const statusText = activeSession?.status ?? (state.pending ? 'working' : 'idle');
@@ -225,6 +235,7 @@ function render(): void {
             <button class="sendButton" ${canSend ? '' : 'disabled'}>Send</button>
           </form>
         ` : ''}
+        ${state.notice ? `<div class="noticeBanner">${escapeHtml(state.notice)}</div>` : ''}
         ${state.error ? `<div class="errorBanner">${escapeHtml(state.error)}</div>` : ''}
       </section>
 
@@ -323,10 +334,12 @@ function wireEvents(): void {
   document.querySelector<HTMLInputElement>('#centralUrl')?.addEventListener('input', (event) => {
     state.centralUrl = (event.target as HTMLInputElement).value.trim();
     localStorage.setItem('ars.sample.centralUrl', state.centralUrl);
+    syncShareableConnectionUrl();
   });
   document.querySelector<HTMLInputElement>('#tenantId')?.addEventListener('input', (event) => {
     state.tenantId = (event.target as HTMLInputElement).value.trim();
     localStorage.setItem('ars.sample.tenantId', state.tenantId);
+    syncShareableConnectionUrl();
   });
   document.querySelector<HTMLSelectElement>('#agentSpecSelect')?.addEventListener('change', (event) => {
     state.selectedAgentSpecId = (event.target as HTMLSelectElement).value;
@@ -481,6 +494,14 @@ function syncConnectionInputs(): void {
     state.tenantId = tenantId;
     localStorage.setItem('ars.sample.tenantId', tenantId);
   }
+  syncShareableConnectionUrl();
+}
+
+function syncShareableConnectionUrl(): void {
+  const url = new URL(location.href);
+  url.searchParams.set('central', state.centralUrl);
+  url.searchParams.set('tenant', state.tenantId);
+  history.replaceState(null, '', url);
 }
 
 async function startSession(): Promise<void> {
@@ -581,13 +602,17 @@ function applyTyped(event: SessionEvent): boolean {
       return true;
     case 'interaction.requested':
       if (event.kind === 'approval' && !state.openInteractions.some((entry) => entry.interactionId === event.interactionId)) {
-        state.openInteractions.push({ interactionId: event.interactionId, turnSeq, kind: event.kind, request: event.request });
+        state.openInteractions.push({ interactionId: event.interactionId, turnSeq, kind: event.kind, request: event.request, source: event.source, submitting: false });
       }
       state.traceEvents.push({ id: `ir:${turnSeq}:${event.interactionId}`, turnSeq, label: 'interaction.requested', detail: event.kind });
       return true;
     case 'interaction.responded':
       state.openInteractions = state.openInteractions.filter((entry) => entry.interactionId !== event.interactionId);
       state.traceEvents.push({ id: `id:${turnSeq}:${event.interactionId}`, turnSeq, label: 'interaction.responded', detail: event.kind });
+      return true;
+    case 'interaction.interrupted':
+      state.openInteractions = state.openInteractions.filter((entry) => entry.interactionId !== event.interactionId);
+      state.traceEvents.push({ id: `ii:${turnSeq}:${event.interactionId}`, turnSeq, label: 'interaction.interrupted', detail: event.reason });
       return true;
   }
   return false;
@@ -660,15 +685,25 @@ async function respondToApproval(interactionId: string, decision: 'approved' | '
   if (!state.currentSession) {
     return;
   }
-  // Optimistically clear the card; the durable interaction.responded event will also remove it.
-  state.openInteractions = state.openInteractions.filter((entry) => entry.interactionId !== interactionId);
+  const interaction = state.openInteractions.find((entry) => entry.interactionId === interactionId);
+  if (!interaction || interaction.submitting) {
+    return;
+  }
+  interaction.submitting = true;
+  state.error = '';
+  state.notice = '';
   render();
   try {
-    await state.currentSession.respondToInteraction({ interactionId, decision, scope });
+    const result = await state.currentSession.respondToInteraction({ interactionId, decision, scope });
+    state.openInteractions = state.openInteractions.filter((entry) => entry.interactionId !== interactionId);
+    if (result.status === 'already_resolved') {
+      state.notice = 'This request was already handled in another session view.';
+    }
   } catch (error) {
+    interaction.submitting = false;
     state.error = error instanceof Error ? error.message : String(error);
-    render();
   }
+  render();
 }
 
 async function resumeSession(): Promise<void> {
@@ -1055,13 +1090,13 @@ function renderPendingApprovals(): string {
       ${approvals.map((interaction) => `
         <div class="approvalCard">
           <div class="approvalInfo">
-            <span class="approvalKind">Approval needed</span>
+            <span class="approvalKind">${interaction.source ? `Approval needed by ${escapeHtml(interaction.source.agentSpecId)}` : 'Approval needed'}</span>
             <span class="approvalDetail">${escapeHtml(describeInteraction(interaction))}</span>
           </div>
           <div class="approvalActions">
-            <button class="approvalButton deny" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="denied">Deny</button>
-            <button class="approvalButton approve" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="approved" data-scope="once">Approve</button>
-            <button class="approvalButton always" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="approved" data-scope="session">Always approve</button>
+            <button class="approvalButton deny" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="denied" ${interaction.submitting ? 'disabled' : ''}>Deny</button>
+            <button class="approvalButton approve" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="approved" data-scope="once" ${interaction.submitting ? 'disabled' : ''}>${interaction.submitting ? 'Submitting…' : 'Approve'}</button>
+            <button class="approvalButton always" data-interaction-id="${escapeHtml(interaction.interactionId)}" data-decision="approved" data-scope="session" ${interaction.submitting ? 'disabled' : ''}>${interaction.source ? `Always for ${escapeHtml(interaction.source.agentSpecId)}` : 'Always approve'}</button>
           </div>
         </div>
       `).join('')}

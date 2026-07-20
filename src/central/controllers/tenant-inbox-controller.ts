@@ -3,6 +3,7 @@ import { AgentRuntimeEventController } from './agent-runtime-event-controller';
 import { ClientRuntimeEventController } from './client-runtime-event-controller';
 import { DelegationRuntimeEventController } from './delegation-runtime-event-controller';
 import { WorkerRuntimeEventController } from './worker-runtime-event-controller';
+import type { InteractionManager } from '../managers';
 
 /**
  * Owns the tenant inbox demultiplexing point where all external runtime messages first cross into tenant-owned control flow.
@@ -14,6 +15,7 @@ export class TenantInboxController {
     private readonly agentRuntimeEventController: AgentRuntimeEventController,
     private readonly delegationRuntimeEventController: DelegationRuntimeEventController | undefined,
     private readonly clientRuntimeEventController: ClientRuntimeEventController,
+    private readonly interactionManager: InteractionManager,
     private readonly eventTransport: RuntimeEventTransport
   ) {}
 
@@ -40,5 +42,6 @@ export class TenantInboxController {
   async reconcileSessions(): Promise<void> {
     await this.workerRuntimeEventController.reconcileSessions();
     await this.delegationRuntimeEventController?.reconcilePendingAwaitResponses();
+    await this.interactionManager.reconcile();
   }
 }

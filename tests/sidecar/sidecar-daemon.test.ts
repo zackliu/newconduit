@@ -466,6 +466,26 @@ test('scenario: pause command stops agent run and publishes paused event', async
   });
 });
 
+test('scenario: repeated pause command republishes the same result without repeating stop or capture', async () => {
+  const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+  const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);
+  const agentProcessAdapter = new DeterministicAgentProcessAdapter();
+  const workspaceAdapter = new PassthroughWorkspaceAdapter();
+  const sidecar = new SidecarDaemon({ runtimeTransport: sidecarTransport, workspaceAdapter, agentProcessAdapter });
+
+  await sidecar.handleWorkerCommand(sessionAssignEvent({ sessionLeaseId: 'lease-2' }));
+  const pause = sessionPauseCommandEvent({ sessionLeaseId: 'lease-2', reason: 'client_requested' });
+  await sidecar.handleWorkerCommand(pause);
+  await sidecar.handleWorkerCommand(pause);
+
+  assert.deepEqual(agentProcessAdapter.pauses, ['session-1']);
+  assert.deepEqual(agentProcessAdapter.stops, ['session-1']);
+  assert.equal(workspaceAdapter.captures.length, 1);
+  const pausedEvents = sidecarTransport.publishedEvents.filter((event) => event.type === 'session.paused');
+  assert.equal(pausedEvents.length, 2);
+  assert.deepEqual(pausedEvents[0].payload, pausedEvents[1].payload);
+});
+
 test('scenario: a tool-using turn publishes exactly one turn.completed with the final answer', async () => {
   const runtimeTransport = new InMemoryRuntimeTransportAdapter();
   const sidecarTransport = new SidecarInMemoryTransport(runtimeTransport);

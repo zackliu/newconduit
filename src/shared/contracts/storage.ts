@@ -1,4 +1,4 @@
-import type { CreateDelegationResult, DelegationRecord, HostPoolInstanceRecord, RuntimeEvent, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../models';
+import type { CreateDelegationResult, CreateInteractionResult, DelegationRecord, HostPoolInstanceRecord, InteractionRecord, RuntimeEvent, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../models';
 
 export interface RuntimeStorage {
   createSession(session: SessionRecord): Promise<{ session: SessionRecord; created: boolean }>;
@@ -20,4 +20,10 @@ export interface RuntimeStorage {
   readDelegation(delegationId: string): Promise<DelegationRecord | undefined>;
   readDelegationByKey(parentSessionId: string, delegateId: string): Promise<DelegationRecord | undefined>;
   readDelegations(): Promise<DelegationRecord[]>;
+  createInteraction(interaction: InteractionRecord): Promise<CreateInteractionResult>;
+  compareAndSetInteraction(expectedRevision: number, interaction: InteractionRecord): Promise<boolean>;
+  readInteraction(interactionId: string): Promise<InteractionRecord | undefined>;
+  readInteractionByAdapterRequest(ownerSessionId: string, requestLeaseId: string, adapterRequestId: string): Promise<InteractionRecord | undefined>;
+  readInteractions(): Promise<InteractionRecord[]>;
+  readInteractionsBySession(sessionId: string): Promise<InteractionRecord[]>;
 }

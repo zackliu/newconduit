@@ -4,21 +4,6 @@ export type SessionStatus = 'created' | 'queued' | 'starting' | 'running' | 'pau
 
 export type InteractionKind = 'approval' | 'tool_call';
 
-/**
- * A durable, session-owned obligation: the agent turn is suspended until an off-agent responder
- * answers. Persisted on the session record so it survives client disconnect and pause/resume.
- */
-export interface OpenInteraction {
-  interactionId: string;
-  kind: InteractionKind;
-  turnSeq: number;
-  requestedAt: string;
-  delegatedRoute?: {
-    childSessionId: string;
-    childInteractionId: string;
-  };
-}
-
 export interface SessionDelegationBinding {
   delegationId: string;
   parentSessionId: string;
@@ -39,7 +24,6 @@ export interface SessionRecord {
   workspaceRef: string;
   latestSnapshotRef?: string;
   lifecycleReason?: string;
-  openInteractions?: OpenInteraction[];
   delegationBinding?: SessionDelegationBinding;
   lastEventUpdatedAt: string;
   createdAt: string;
