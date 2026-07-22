@@ -2,7 +2,7 @@ import type { AgentSpecRegistry } from './registries/agent-spec-registry';
 import type { DelegateBindingIndex, ResolvedDelegateRegistry } from './registries/delegate-registry';
 import type { Clock, RequestContext, RuntimeConnectionGrant, RuntimeEventTransport, RuntimeStorage, RuntimeSubscription, TenantConnectionIssuer, TenantContext, WorkerPoolRecord, WorkerRegisterPayload } from '../shared';
 import { AgentRuntimeEventController, ClientRuntimeEventController, DelegationRuntimeEventController, TenantInboxController, WorkerRuntimeEventController } from './controllers';
-import { AgentSpecAdmissionManager, DelegateAdmissionManager, DelegatedSessionManager, DelegationDispatcher, DelegationManager, EventLogManager, InteractionManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, SessionPauseManager, SessionStartManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type WorkerPoolManagerStatus } from './managers';
+import { AgentSpecAdmissionManager, CasePairingManager, DelegateAdmissionManager, DelegatedSessionManager, DelegationDispatcher, DelegationManager, EDGE_CASE_LABEL_KEY, EDGE_DEVICE_REF_LABEL_KEY, EventLogManager, FanoutManager, InteractionManager, SessionAssignmentManager, SessionLifecycleManager, SessionLifecycleReconciler, SessionLeaseManager, SessionManager, SessionPauseManager, SessionStartManager, WorkerManager, WorkerPoolManager, WorkerSelector, type HostPoolAdapter, type RedeemPairingInput, type RedeemPairingResult, type WorkerPoolManagerStatus } from './managers';
 import { SnapshotManager } from './persistence';
 
 const SESSION_RECONCILE_INTERVAL_MS = 5_000;
@@ -32,6 +32,7 @@ export class TenantRuntime {
   private readonly tenantInboxController: TenantInboxController;
   private readonly workerManager: WorkerManager;
   private readonly workerPoolManager: WorkerPoolManager | undefined;
+  private readonly casePairingManager: CasePairingManager;
   private readonly sessionLifecycleReconciler: SessionLifecycleReconciler;
   private readonly agentSpecRegistry: AgentSpecRegistry;
   private tenantInboxSubscription: RuntimeSubscription | undefined;
@@ -51,7 +52,18 @@ export class TenantRuntime {
         options.delegation!.resolvedDelegateRegistry.resolve(delegateId)
       ));
     });
-    const sessionLifecycleManager = new SessionLifecycleManager(options.storage, options.clock);
+    this.casePairingManager = new CasePairingManager(options.tenant.tenantId, options.storage, options.clock);
+    // The authoritative device-binding revocation: whenever a session first crosses into a terminal status — from any
+    // path, including a case that never spawned a delegation — revoke that case's device bindings so a lingering edge
+    // credential can no longer register/route. Best-effort and idempotent; the terminal-case guard in
+    // resolveEdgeBinding is the correctness backstop that closes the window before this persists.
+    const sessionLifecycleManager = new SessionLifecycleManager(options.storage, options.clock, async (session) => {
+      try {
+        await this.casePairingManager.revokeCase(session.sessionId);
+      } catch (error: unknown) {
+        console.error(`case-binding revocation for terminal session ${session.sessionId} failed`, error);
+      }
+    });
     const eventLogManager = new EventLogManager(options.storage, options.clock);
     const workerSelector = new WorkerSelector(() => Date.parse(options.clock.now()));
     const sessionLeaseManager = new SessionLeaseManager(options.storage);
@@ -101,14 +113,14 @@ export class TenantRuntime {
       new DelegatedSessionManager(options.storage, eventLogManager, sessionLifecycleManager, sessionStartManager)
     ) : undefined;
     const delegationRuntimeEventController = delegationManager && delegationDispatcher
-      ? new DelegationRuntimeEventController(options.storage, sessionLeaseManager, delegationManager, delegationDispatcher, sessionManager, options.eventTransport)
+      ? new DelegationRuntimeEventController(options.storage, sessionLeaseManager, delegationManager, delegationDispatcher, sessionManager, options.eventTransport, new FanoutManager(options.tenant.tenantId, options.storage, options.clock), this.casePairingManager)
       : undefined;
     this.tenantInboxController = new TenantInboxController(
       options.tenant.tenantId,
       new WorkerRuntimeEventController(this.workerManager, sessionLifecycleReconciler),
       new AgentRuntimeEventController(options.storage, eventLogManager, sessionLifecycleManager, sessionLeaseManager, this.workerManager, sessionLifecycleReconciler, snapshotManager, interactionManager, options.eventTransport),
       delegationRuntimeEventController,
-      new ClientRuntimeEventController(sessionManager, interactionManager, options.eventTransport),
+      new ClientRuntimeEventController(sessionManager, interactionManager, this.casePairingManager, options.eventTransport),
       interactionManager,
       options.eventTransport
     );
@@ -141,7 +153,8 @@ export class TenantRuntime {
   }
 
   async negotiateSidecarConnection(context: RequestContext, registration: WorkerRegisterPayload): Promise<RuntimeConnectionGrant> {
-    const worker = await this.workerManager.register({ tenantId: this.tenant.tenantId, ...registration });
+    const labels = await this.resolveWorkerLabels(registration);
+    const worker = await this.workerManager.register({ tenantId: this.tenant.tenantId, ...registration, labels });
     const grant = await this.connectionIssuer.issueSidecarConnection({
       principal: {
         principalId: worker.workerId,
@@ -154,6 +167,31 @@ export class TenantRuntime {
       ]
     });
     return { ...grant, worker };
+  }
+
+  /**
+   * Redeem a one-time pairing invite into a durable device binding. This is the edge HTTP enrollment path (peer of
+   * negotiate): it runs after an explicit user action on the device and returns the binding credential exactly once.
+   */
+  async redeemPairingInvite(input: RedeemPairingInput): Promise<RedeemPairingResult> {
+    return this.casePairingManager.redeemPairingInvite(input);
+  }
+
+  /**
+   * Compute the authoritative worker labels for a registration. The `case`/`deviceRef` label keys are Central-owned:
+   * any client-supplied value for them is stripped, and they are re-minted only from a validated edge binding. A
+   * worker without an edge binding therefore cannot self-declare case/device routing labels — closing the
+   * self-asserted-label hole while leaving ordinary sidecars unaffected.
+   */
+  private async resolveWorkerLabels(registration: WorkerRegisterPayload): Promise<Record<string, string>> {
+    const sanitized = { ...registration.labels };
+    delete sanitized[EDGE_CASE_LABEL_KEY];
+    delete sanitized[EDGE_DEVICE_REF_LABEL_KEY];
+    if (!registration.edgeBinding) {
+      return sanitized;
+    }
+    const resolved = await this.casePairingManager.resolveEdgeBinding(registration.edgeBinding);
+    return { ...sanitized, ...resolved.mintedLabels };
   }
 
   async reconcileSessions(): Promise<void> {

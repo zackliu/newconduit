@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { POC_RUNTIME_HTTP_PATHS, POC_RUNTIME_HTTP_QUERY, type AgentInteractionRequestedPayload, type JsonValue, type RuntimeConnectionGrant, type RuntimeEvent, type RuntimeToolRequestedPayload, type SessionAssignPayload, type SessionInputCommandPayload, type SessionInteractionResponseCommandPayload, type SessionPauseCommandPayload, type SessionPausedPayload, type SessionRuntimeToolResponseCommandPayload, type StatusChangedPayload, type TurnCompletedPayload, type TurnFailedPayload, type WorkerCommandAcceptedPayload, type WorkerCommandRejectedPayload, type WorkerHeartbeatPayload, type WorkerRecord, type WorkerRegisterPayload } from '../shared';
 import type { SidecarAgentProcessAdapter, SidecarRuntimeTransport, SidecarWorkspaceAdapter, SidecarWorkspaceMount } from './contracts';
+import { describeNegotiateFailure } from './negotiate-error';
 
 export interface StandaloneSidecarStartInput extends WorkerRegisterPayload {
   centralUrl: string;
@@ -160,7 +161,7 @@ export class SidecarDaemon {
       })
     });
     if (!response.ok) {
-      throw new Error(`sidecar negotiate failed with HTTP ${response.status}`);
+      throw new Error(`sidecar negotiate failed with ${await describeNegotiateFailure(response)}`);
     }
     return await response.json() as RuntimeConnectionGrant;
   }
@@ -288,7 +289,8 @@ export class SidecarDaemon {
         const result = await this.options.agentProcessAdapter.send({
           sessionId: payload.sessionId,
           turnSeq: payload.turnSeq,
-          message: payload.input.message
+          message: payload.input.message,
+          ...(payload.input.delegationTarget !== undefined ? { delegationTarget: payload.input.delegationTarget } : {})
         }, async (event) => {
           if (event.type === 'interaction') {
             const active = this.activeRuns.get(payload.sessionId);

@@ -1,4 +1,4 @@
-import type { AgentOutputPayload, InteractionKind, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPartName } from '../shared';
+import type { AgentOutputPayload, DelegationTarget, InteractionKind, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPartName } from '../shared';
 
 export interface SidecarRuntimeTransport {
   connect(accessUrl: string): Promise<void>;
@@ -46,6 +46,10 @@ export interface SidecarAgentProcessInput {
   sessionId: string;
   turnSeq: number;
   message: string;
+  /** Operator-authoritative delegation target Central bound to this turn, forwarded so a delegating agent adapter
+   * may set the delegate tool's `target` to match it. Central still enforces it independently. Absent for ordinary
+   * turns and non-delegating agents. */
+  delegationTarget?: DelegationTarget;
 }
 
 export interface SidecarInteractionRequest {

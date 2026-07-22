@@ -18,6 +18,9 @@ export interface SessionSummary {
   status: SessionStatus;
   agentSpecId: string;
   owner: string;
+  /** The worker this session is currently assigned to, when running. The console matches it against a
+   * {@link CaseDeviceView.workerId} to attribute a delegated scan child to the paired device it landed on. */
+  currentWorkerId?: string;
   eventCursor: number;
   createdAt: string;
   updatedAt: string;
@@ -42,11 +45,56 @@ export interface StartSessionInput {
   };
 }
 
+/**
+ * The operator's device-routing intent for one turn, sent as structured control metadata alongside the message —
+ * never encoded in the message text. Central binds it to the accepted turn and enforces it authoritatively when the
+ * parent agent's delegate tool fires: the agent may echo it but cannot widen or redirect it. `scope: 'all'` fans out
+ * to every device on the case roster; `deviceRefs` names an explicit subset (e.g. a failed-only retry); `deviceRef`
+ * pins one device; `scope: 'any'` is an explicit stateless pool task (only meaningful for non-device delegates).
+ */
+export type DelegationTarget =
+  | { scope: 'all' }
+  | { scope: 'any' }
+  | { deviceRef: string }
+  | { deviceRefs: string[] };
+
 export interface SessionInput {
   message: string;
+  /** Optional operator-authoritative delegation target for this turn. Only meaningful for a parent session that
+   * delegates device scans; Central binds it to the turn and enforces it on the matching delegate call. */
+  delegationTarget?: DelegationTarget;
 }
 
 export type SessionStatus = 'unknown' | 'created' | 'queued' | 'starting' | 'running' | 'pausing' | 'paused' | 'resuming' | 'completed' | 'cancelled' | 'failed';
+
+/**
+ * A one-time, short-lived pairing invite minted by {@link CaseClient.createPairingInvite}. The `inviteSecret` is
+ * returned exactly once; the console places `inviteId.inviteSecret` only in the pair link's URL fragment. The
+ * device redeems it (via the edge SDK) into a durable binding — the invite itself never authorizes routing.
+ */
+export interface PairingInvite {
+  caseId: string;
+  inviteId: string;
+  inviteSecret: string;
+  expiresAt: string;
+}
+
+/**
+ * Safe, tenant- and case-scoped roster entry returned by {@link CaseClient.listDevices}. It joins a durable device
+ * binding with live worker state so a paired device shows as joined the moment it registers — before any delegation
+ * or observation. It exposes only the opaque `deviceRef` (never the raw deviceId or credential); the operator routes
+ * a scan to a device by its `deviceRef`.
+ */
+export interface CaseDeviceView {
+  deviceRef: string;
+  deviceLabel: string;
+  online: boolean;
+  ready: boolean;
+  busy: boolean;
+  workerId?: string;
+  lastHeartbeatAt?: string;
+  lastRedeemedAt: string;
+}
 
 export interface TurnEventOptions {
   signal?: AbortSignal;
@@ -142,6 +190,10 @@ export type SdkRuntimeEventType =
   | 'session.listed'
   | 'session.events.requested'
   | 'session.events.replayed'
+  | 'case.pairing.mint.requested'
+  | 'case.pairing.minted'
+  | 'case.devices.requested'
+  | 'case.devices.provided'
   | 'input.received'
   | 'input.accepted.ack'
   | 'input.accepted'

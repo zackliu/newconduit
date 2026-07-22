@@ -1,0 +1,20 @@
+{
+  "name": "@agent-runtime-sidecar/sample-edge-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5176",
+    "build": "tsc -p tsconfig.json && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4176",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-tests/test/*.test.js\""
+  },
+  "dependencies": {
+    "@agent-runtime-sidecar/sdk": "workspace:*",
+    "@agent-runtime-sidecar/edge-worker": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}

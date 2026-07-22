@@ -1,5 +1,5 @@
 import type { ResolvedAgentSpec } from './agent-spec';
-import type { JsonValue } from './delegation';
+import type { DelegationTarget, JsonValue } from './delegation';
 import type { InteractionKind, SessionStatus } from './session';
 import type { SnapshotCaptureRef, SnapshotPartName, SnapshotRestoreRef } from './snapshot';
 
@@ -13,6 +13,10 @@ export type RuntimeEventType =
   | 'session.listed'
   | 'session.events.requested'
   | 'session.events.replayed'
+  | 'case.pairing.mint.requested'
+  | 'case.pairing.minted'
+  | 'case.devices.requested'
+  | 'case.devices.provided'
   | 'session.assign'
   | 'session.input'
   | 'input.received'
@@ -81,6 +85,9 @@ export interface SessionInputCommandPayload {
   turnSeq: number;
   input: {
     message: string;
+    /** Operator-authoritative delegation target for this turn, forwarded verbatim so a delegating agent adapter can
+     * read it as structured control metadata. Central independently enforces it — the worker's copy is not trusted. */
+    delegationTarget?: DelegationTarget;
   };
 }
 

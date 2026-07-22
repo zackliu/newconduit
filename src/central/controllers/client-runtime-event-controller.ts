@@ -1,5 +1,5 @@
-import type { CreateSessionRequest, InteractionRespondedAckPayload, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeEventTransport, SessionInputRequest } from '../../shared';
-import { InteractionManager, SessionManager } from '../managers';
+import type { CreateSessionRequest, DelegationTarget, InteractionRespondedAckPayload, InteractionRespondRequestPayload, RequestContext, RuntimeEvent, RuntimeEventTransport, SessionInputRequest } from '../../shared';
+import { CasePairingError, CasePairingManager, InteractionManager, SessionManager } from '../managers';
 
 /**
  * Translates client-authored runtime events into durable session work, so application code talks to sessions instead of worker locations.
@@ -8,6 +8,7 @@ export class ClientRuntimeEventController {
   constructor(
     private readonly sessionManager: SessionManager,
     private readonly interactionManager: InteractionManager,
+    private readonly casePairingManager: CasePairingManager,
     private readonly eventTransport: RuntimeEventTransport
   ) {}
 
@@ -49,6 +50,18 @@ export class ClientRuntimeEventController {
         const payload = this.parseSessionEventsRequestedPayload(event.payload);
         const outcome = await this.sessionManager.readSessionEvents(context, sessionId, event.ackId, payload.afterSequence);
         await this.eventTransport.publish({ kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) }, outcome.responseEvent);
+        return true;
+      }
+      case 'case.pairing.mint.requested': {
+        const caseId = this.parseCaseId(event.payload);
+        const payload = await this.mintPairingPayload(caseId);
+        await this.publishCaseResponse(context, event.ackId, 'case.pairing.minted', payload);
+        return true;
+      }
+      case 'case.devices.requested': {
+        const caseId = this.parseCaseId(event.payload);
+        const payload = await this.listCaseDevicesPayload(caseId);
+        await this.publishCaseResponse(context, event.ackId, 'case.devices.provided', payload);
         return true;
       }
       case 'session.pause.requested': {
@@ -138,6 +151,58 @@ export class ClientRuntimeEventController {
     return context.connectionId;
   }
 
+  private async mintPairingPayload(caseId: string): Promise<Record<string, unknown>> {
+    try {
+      const result = await this.casePairingManager.mintPairingInvite(caseId);
+      return { caseId, invite: result };
+    } catch (error) {
+      return { caseId, error: this.toCaseError(error) };
+    }
+  }
+
+  private async listCaseDevicesPayload(caseId: string): Promise<Record<string, unknown>> {
+    try {
+      const devices = await this.casePairingManager.listCaseDevices(caseId);
+      return { caseId, devices };
+    } catch (error) {
+      return { caseId, error: this.toCaseError(error) };
+    }
+  }
+
+  private async publishCaseResponse(context: RequestContext, ackId: string | undefined, type: RuntimeEvent['type'], payload: Record<string, unknown>): Promise<void> {
+    await this.eventTransport.publish(
+      { kind: 'client-private-inbox', clientConnectionId: this.requireClientConnectionId(context) },
+      {
+        eventId: crypto.randomUUID(),
+        ackId,
+        sequence: 0,
+        type,
+        timestamp: new Date().toISOString(),
+        actor: 'central',
+        payload
+      }
+    );
+  }
+
+  private toCaseError(error: unknown): { code: string; message: string } {
+    if (error instanceof CasePairingError) {
+      return { code: error.code, message: error.message };
+    }
+    // Never leak an internal error's details to a client; the code is generic and the message is fixed.
+    return { code: 'case_pairing_failed', message: 'case pairing request failed' };
+  }
+
+  private parseCaseId(payload: unknown): string {
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('invalid case request payload');
+    }
+    const candidate = (payload as { caseId?: unknown }).caseId;
+    if (typeof candidate !== 'string' || !candidate) {
+      throw new Error('case request requires a caseId');
+    }
+    return candidate;
+  }
+
   private parseSessionCommandSessionId(sessionId: string | undefined, eventType: string): string {
     if (typeof sessionId !== 'string' || !sessionId) {
       throw new Error(`${eventType} requires sessionId in the runtime event envelope`);
@@ -200,6 +265,31 @@ export class ClientRuntimeEventController {
       return false;
     }
     const candidate = payload as Partial<SessionInputRequest>;
-    return typeof candidate.input?.message === 'string';
+    if (typeof candidate.input?.message !== 'string') {
+      return false;
+    }
+    if (candidate.input.delegationTarget !== undefined && !this.isDelegationTarget(candidate.input.delegationTarget)) {
+      return false;
+    }
+    return true;
+  }
+
+  /** A well-formed operator delegation target: an explicit scope, one deviceRef, or a non-empty deviceRef subset.
+   * Rejecting a malformed value here keeps a bad client from durably binding garbage to a turn. */
+  private isDelegationTarget(value: unknown): value is DelegationTarget {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return false;
+    }
+    const candidate = value as Record<string, unknown>;
+    if (candidate.scope === 'all' || candidate.scope === 'any') {
+      return true;
+    }
+    if (typeof candidate.deviceRef === 'string' && candidate.deviceRef.length > 0) {
+      return true;
+    }
+    if (Array.isArray(candidate.deviceRefs)) {
+      return candidate.deviceRefs.length > 0 && candidate.deviceRefs.every((entry) => typeof entry === 'string' && entry.length > 0);
+    }
+    return false;
   }
 }

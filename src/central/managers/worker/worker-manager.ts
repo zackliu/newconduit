@@ -29,6 +29,7 @@ export class WorkerManager {
       lifecycleState: 'registered',
       heartbeatAt: now,
       expiresAt: this.expiresAt(now),
+      registeredAt: now,
       currentSessionCount: 0,
       updatedAt: now
     };
@@ -230,6 +231,9 @@ export class WorkerManager {
     const next: WorkerRecord = {
       ...worker,
       allocatable: 0,
+      // A terminal worker holds no sessions: its leases are failed below, so its capacity accounting must
+      // reconcile to zero rather than retaining a stale count from a session it can no longer run.
+      currentSessionCount: 0,
       conditions: ['disconnected'],
       lifecycleState,
       terminalReason: reason,
@@ -328,11 +332,12 @@ export class WorkerManager {
   }
 
   private async appendHeartbeatRejected(worker: WorkerRecord, reason: string): Promise<void> {
-    await this.appendWorkerEvent(worker, 'worker.heartbeat.rejected', { reason });
+    const event = await this.appendWorkerEvent(worker, 'worker.heartbeat.rejected', { reason });
+    await this.notifyHeartbeatRejected(worker.workerId, event);
   }
 
   private async appendUnknownHeartbeatRejected(workerId: string): Promise<void> {
-    await this.storage.appendEvent({
+    const event: RuntimeEvent = {
       eventId: crypto.randomUUID(),
       workerId,
       sequence: 0,
@@ -340,7 +345,18 @@ export class WorkerManager {
       timestamp: this.clock.now(),
       actor: 'central',
       payload: { reason: 'unknown-worker' }
-    });
+    };
+    await this.storage.appendEvent(event);
+    await this.notifyHeartbeatRejected(workerId, event);
+  }
+
+  /**
+   * A heartbeat from a terminal or unknown worker means Central will never accept this worker id again. Deliver
+   * the rejection to the worker's own command channel (not only the append-only log) so the edge runtime can
+   * observe it and re-register a fresh worker instead of looking healthy while it is dead in Central.
+   */
+  private async notifyHeartbeatRejected(workerId: string, event: RuntimeEvent): Promise<void> {
+    await this.eventTransport?.publish({ kind: 'worker-commands', workerId }, event);
   }
 
   private expiresAt(timestamp: string): string {

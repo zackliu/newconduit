@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
+import { AgentSpecAdmissionManager, CasePairingManager } from '../../src/central/managers';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import type { RuntimeEvent } from '../../src/shared';
-import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
+import type { RuntimeEvent, SessionRecord } from '../../src/shared';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
 
 test('scenario: create session request creates durable session truth', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-slice1-'));
@@ -279,3 +280,107 @@ test('scenario: sidecar negotiate creates registered worker truth', async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('scenario: the case device roster surfaces a paired device before any task and hides other cases', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-case-roster-'));
+  try {
+    const transport = new InMemoryRuntimeTransportAdapter();
+    const storage = new LocalFileStorage(root);
+    const central = new CentralService({ storage, eventTransport: transport, connectionIssuer: transport });
+    await central.start();
+
+    // Two recovery cases each enroll their own phone via a Central-minted binding; both workers heartbeat ready.
+    const paired = await enrollReadyDevice(central, storage, transport, 'case-A', 'device-A');
+    const other = await enrollReadyDevice(central, storage, transport, 'case-B', 'device-B');
+
+    const acknowledgements: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'client-private-inbox', clientConnectionId: 'console-conn' }, async (envelope) => {
+      acknowledgements.push(envelope.event);
+    });
+    const consoleContext = {
+      principal: { principalId: 'recovery-console', type: 'user' as const },
+      connectionId: 'console-conn'
+    };
+
+    // The console lists the devices Central authorized for its own case.
+    await transport.publish({ kind: 'tenant-inbox' }, {
+      eventId: 'evt-devices-case-a',
+      ackId: 'ack-devices-case-a',
+      sequence: 0,
+      type: 'case.devices.requested',
+      timestamp: new Date().toISOString(),
+      actor: 'client',
+      payload: { caseId: 'case-A' }
+    }, consoleContext);
+
+    const provided = acknowledgements.find((event) => event.ackId === 'ack-devices-case-a');
+    assert.equal(provided?.type, 'case.devices.provided');
+    const devices = (provided?.payload as { devices: Array<Record<string, unknown>> }).devices;
+    // The case-A device is reported online/ready BEFORE any delegation is assigned to it, keyed by its deviceRef.
+    assert.equal(devices.length, 1);
+    assert.equal(devices[0].deviceRef, paired.deviceRef);
+    assert.equal(devices[0].online, true);
+    assert.equal(devices[0].ready, true);
+    assert.equal(devices[0].busy, false);
+    assert.equal(devices[0].workerId, paired.workerId);
+    // The other case's device is never exposed on this case's roster.
+    assert.ok(!devices.some((candidate) => candidate.deviceRef === other.deviceRef));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** Enroll a device into `caseId` via a real Central-minted binding, register its browser worker, and heartbeat ready. */
+async function enrollReadyDevice(
+  central: CentralService,
+  storage: LocalFileStorage,
+  transport: InMemoryRuntimeTransportAdapter,
+  caseId: string,
+  deviceId: string
+): Promise<{ deviceRef: string; workerId: string }> {
+  const now = new Date().toISOString();
+  const session: SessionRecord = {
+    sessionId: caseId,
+    tenantId: 'poc',
+    owner: 'recovery-console',
+    resolvedAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
+    status: 'running',
+    eventCursor: 0,
+    nextTurnSeq: 1,
+    workspaceRef: `ws-${caseId}`,
+    lastEventUpdatedAt: now,
+    createdAt: now,
+    updatedAt: now
+  };
+  await storage.createSession(session);
+  const pairing = new CasePairingManager('poc', storage, { now: () => new Date().toISOString() });
+  const invite = await pairing.mintPairingInvite(caseId);
+  const redeemed = await central.redeemPairingInviteForTenant(
+    'poc',
+    { principal: { principalId: 'recovery-console', type: 'user' }, connectionId: 'console-conn' },
+    { inviteId: invite.inviteId, inviteSecret: invite.inviteSecret, deviceId, deviceLabel: `device-${caseId}` }
+  );
+  const grant = await central.negotiateSidecarConnectionForTenant(
+    'poc',
+    { principal: { principalId: deviceId, type: 'service' } },
+    {
+      labels: { agent: 'browser-edge', role: 'device-scan-probe', storage: 'host-managed' },
+      storageClass: 'host-managed',
+      capacity: 1,
+      allocatable: 1,
+      edgeBinding: { caseId: redeemed.caseId, deviceId, deviceRef: redeemed.deviceRef, bindingCredential: redeemed.bindingCredential }
+    }
+  );
+  const workerId = grant.worker?.workerId;
+  assert.ok(workerId);
+  await transport.publish({ kind: 'tenant-inbox' }, {
+    eventId: `evt-heartbeat-${caseId}`,
+    workerId,
+    sequence: 0,
+    type: 'worker.heartbeat',
+    timestamp: new Date().toISOString(),
+    actor: 'sidecar',
+    payload: { workerId, capacity: 1, allocatable: 1, conditions: ['ready'] }
+  }, { principal: { principalId: workerId, type: 'service' } });
+  return { deviceRef: redeemed.deviceRef, workerId };
+}

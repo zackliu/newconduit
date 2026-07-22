@@ -1,5 +1,5 @@
 import { SystemClock, type Clock, type RequestContext, type RuntimeConnectionGrant, type RuntimeEventTransport, type RuntimeStorage, type TenantConnectionIssuer, type TenantContext, type WorkerPoolRecord, type WorkerRegisterPayload } from '../shared';
-import type { HostPoolAdapter, WorkerPoolManagerStatus } from './managers';
+import type { HostPoolAdapter, RedeemPairingInput, RedeemPairingResult, WorkerPoolManagerStatus } from './managers';
 import type { AgentSpecRegistry } from './registries/agent-spec-registry';
 import type { DelegateBindingIndex, ResolvedDelegateRegistry } from './registries/delegate-registry';
 import type { DelegateAdmissionManager } from './managers';
@@ -66,6 +66,10 @@ export class CentralService {
 
   async negotiateSidecarConnectionForTenant(tenantId: string | null, context: RequestContext, registration: WorkerRegisterPayload): Promise<RuntimeConnectionGrant> {
     return this.resolveTenantRuntime(tenantId, 'sidecar negotiate').negotiateSidecarConnection(context, registration);
+  }
+
+  async redeemPairingInviteForTenant(tenantId: string | null, context: RequestContext, input: RedeemPairingInput): Promise<RedeemPairingResult> {
+    return this.resolveTenantRuntime(tenantId, 'pairing redeem').redeemPairingInvite(input);
   }
 
   async reconcileSessionsForTenant(tenantId: string | null): Promise<void> {

@@ -62,7 +62,8 @@ function relation(delegationId: string, parentSessionId: string): DelegationReco
       maxInputBytes: 2048,
       maxResultBytes: 8192,
       deadlineMs: 120_000,
-      maxQueuedCalls: 2
+      maxQueuedCalls: 2,
+      targetPolicy: 'pool'
     },
     resolvedCalleeAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
     status: 'creating_child',

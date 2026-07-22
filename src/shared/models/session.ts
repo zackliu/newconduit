@@ -25,6 +25,11 @@ export interface SessionRecord {
   latestSnapshotRef?: string;
   lifecycleReason?: string;
   delegationBinding?: SessionDelegationBinding;
+  // Extra worker labels this session requires, AND-composed on top of the resolved AgentSpec's base
+  // workerSelector. Central-owned and narrowing-only: it can only shrink the set of eligible workers within
+  // the AgentSpec floor, never widen it or reach a different tenant. Used to pin a delegated child to one
+  // specific paired worker.
+  requiredWorkerLabels?: Record<string, string>;
   lastEventUpdatedAt: string;
   createdAt: string;
   updatedAt: string;

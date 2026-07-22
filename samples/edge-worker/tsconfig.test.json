@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": false,
+    "noEmit": false,
+    "outDir": "dist-tests",
+    "esModuleInterop": true,
+    "types": ["node"]
+  },
+  "include": ["src/ui.ts", "test/**/*.ts"]
+}

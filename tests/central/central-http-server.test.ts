@@ -91,6 +91,38 @@ test('scenario: central starts server with health and negotiate endpoints', asyn
     assert.equal(localSidecarNegotiateResponse.status, 200);
     const localWorker = await localSidecarNegotiateResponse.json() as { worker: { storageClass: string } };
     assert.equal(localWorker.worker.storageClass, 'host-managed');
+
+    // Regression: an untyped caller (e.g. the scripted-parent .mjs) that sends `description` as a bare
+    // string instead of a Record<string,string> must be rejected with a clear 400 body, not silently
+    // accepted. The daemon/edge negotiate paths surface this body so the caller sees why it failed.
+    const stringDescriptionResponse = await fetch(`http://localhost:${port}${POC_RUNTIME_HTTP_PATHS.sidecarNegotiate}?${POC_RUNTIME_HTTP_QUERY.tenantId}=poc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        labels: { agent: 'local', storage: 'host-managed' },
+        storageClass: 'host-managed',
+        description: 'scripted-parent-dev-standin',
+        capacity: 1,
+        allocatable: 1
+      })
+    });
+    assert.equal(stringDescriptionResponse.status, 400);
+    assert.deepEqual(await stringDescriptionResponse.json(), { error: 'invalid sidecar registration body' });
+
+    const structuredDescriptionResponse = await fetch(`http://localhost:${port}${POC_RUNTIME_HTTP_PATHS.sidecarNegotiate}?${POC_RUNTIME_HTTP_QUERY.tenantId}=poc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        labels: { agent: 'local', storage: 'host-managed' },
+        storageClass: 'host-managed',
+        description: { kind: 'scripted-parent', role: 'network-recovery-expert' },
+        capacity: 1,
+        allocatable: 1
+      })
+    });
+    assert.equal(structuredDescriptionResponse.status, 200);
+    const structuredWorker = await structuredDescriptionResponse.json() as { worker: { description?: Record<string, string> } };
+    assert.deepEqual(structuredWorker.worker.description, { kind: 'scripted-parent', role: 'network-recovery-expert' });
   } finally {
     await server.close();
     await rm(root, { recursive: true, force: true });

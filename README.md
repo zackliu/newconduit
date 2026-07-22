@@ -38,8 +38,10 @@ src/
     sidecar-daemon.ts # Receives worker commands; runs the per-turn agent loop; capture/restore on pause/resume
     adapters/         # Copilot SDK process wrapper, Docker workspace (mount + snapshot parts), Web PubSub client
 sdk/client/           # Customer-facing TypeScript SDK (talks to central; never imports src/)
+sdk/edge-worker/      # Browser edge-worker SDK: registers a web page as a Worker + local capture agent
 samples/webclient/    # Browser demo that drives durable sessions through the SDK
 samples/diagnostic-console/ # SignalOS end-user diagnostic application
+samples/edge-worker/  # Remote Network Recovery browser edge worker demo (operator console + phone edge-worker roles)
 containers/sidecar/   # Dockerfile baked into the sidecar worker image
 specs/                # POC workflow, runtime resource model, and implementation plan
 tests/                # Scenario-based tests (central, sidecar, recovery, webpubsub, workerpool)
@@ -329,7 +331,79 @@ pnpm test
 
 The verified browser E2E covers both paths: one device diagnosis completed after a single visible consent, and one public Microsoft documentation fetch completed without an approval dialog or local device inspection.
 
-## How Scaling and Recovery Work
+## Run the Remote Network Recovery Browser Edge Worker
+
+[samples/edge-worker/](samples/edge-worker/) turns a **phone browser into a temporary Worker** for a durable cloud recovery session, using the runtime's existing **Delegation** model. The scenario is a home-network fault: the user's internet is down and they reach a durable **Network Recovery Console** agent from a phone, often over a weak cellular link. The cloud agent (`network-recovery-expert`) holds the recovery ticket — the reported symptom, any carrier line-status notes, what has been tried, the next step. When it needs to see the real hardware (router / fiber modem / ONT), it calls the Central-defined delegate tool `scan_device_evidence`. Central resolves that delegate to the `device-scan-probe` callee, creates a **child session**, and — purely by capability labels — routes it to the phone's **Device Scan** tab. The browser edge worker asks the person to explicitly frame and capture one frame, analyses it **locally**, and returns **only structured optical observations** (brightness, exposure, glare, focus, dominant colour, detected indicator lights, decoded QR/barcode) plus a short summary. The raw frame never leaves the device.
+
+The browser worker reuses the same runtime protocol as the Node sidecar — the tab reverse-registers over `/sidecar/negotiate`, joins Web PubSub, heartbeats, and answers `session.assign` / `session.input` / `session.pause.requested` — via a dedicated [sdk/edge-worker/](sdk/edge-worker/) package. The end-to-end delegation chain is proven against a real `CentralService` in [tests/edge/delegation-network-recovery.integration.test.ts](tests/edge/delegation-network-recovery.integration.test.ts) (part of `pnpm test`).
+
+The one app serves two roles from `?role=`:
+
+- **Network Recovery Console** (`?role=console`) — the client SDK (`@agent-runtime-sidecar/sdk`) creates/resumes a `network-recovery-expert` parent session, sends it plain-language instructions, then discovers and observes the delegated child session (the child inherits the parent's owner). It renders the agent's diagnosis log, the routed scan steps, the structured evidence timeline, the connected device manifest, and a rolled-up diagnosis.
+- **Device Scan** (`?role=edge`) — the edge SDK (`@agent-runtime-sidecar/edge-worker`) registers the tab as a Worker, shows its capability manifest, and — only after an explicit user gesture — opens the camera, captures a frame, analyses it locally, and returns the structured observation. Results are queued in `localStorage` when the connection drops and replayed on reconnect.
+
+### 1. Build the SDKs and start Central
+
+The browser worker is a normal Worker, so it needs a running Central with Web PubSub (browsers speak Web PubSub, not the in-memory transport):
+
+```powershell
+pnpm install
+pnpm build
+pnpm --dir sdk/client build
+pnpm --dir sdk/edge-worker build
+az login
+$env:WEBPUBSUB_ENDPOINT = 'https://<your-wps>.webpubsub.azure.com'
+$env:WEBPUBSUB_HUB = 'agentruntimepoc'
+pnpm start:central
+```
+
+`network-recovery-expert`, `device-scan-probe`, and the `device-scan-capture` delegate are declarative documents in [config/](config/). The parent matches workers labelled `agent: copilot`; the browser callee matches `agent: browser-edge` with `storage: host-managed`, so any ready browser worker on the tenant is eligible with no extra registration.
+
+### 2. Provide the parent "brain"
+
+The parent `network-recovery-expert` session needs a worker to run its turns and fire the delegate tool. Two options:
+
+- **Real Copilot worker** — start a Copilot sidecar/pool (`az login` + Copilot provider config) so the durable agent reasons for itself. This is the production shape.
+- **Scripted dev stand-in** — for a no-Copilot demo, run the included harness, which registers a real `SidecarDaemon` worker over Web PubSub whose scripted agent fires `scan_device_evidence` on each instruction (it does not reason; it only exercises the delegation path):
+
+  ```powershell
+  $env:CENTRAL_URL = 'http://localhost:3000'
+  $env:TENANT_ID = 'poc'
+  node samples/edge-worker/dev/scripted-parent.mjs
+  ```
+
+### 3. Run the sample
+
+```powershell
+pnpm --dir samples/edge-worker dev   # http://127.0.0.1:5176
+```
+
+### 4. Two-device (or two-tab) demo
+
+1. Open the **console**: `http://127.0.0.1:5176/?role=console&central=<central-url>&tenant=poc`. If the connection pill shows an error, open **Connection** and point it at your Central URL. The console starts the `network-recovery-expert` parent session.
+2. In the console's **Pair an edge device** card, copy the edge link and open it on a **phone** (or a second tab): `http://127.0.0.1:5176/?role=edge&...`.
+3. On the **Device Scan** page, press **Join as edge device**. The lifecycle log shows `registered → session assigned → session running` once the agent delegates a scan. The camera stays off until you act.
+4. In the console, send an instruction (e.g. **Check indicator lights**). The parent agent calls `scan_device_evidence`; a **Capture requested** card appears on the phone.
+5. On the phone press **Open camera**, frame the subject, then **Capture frame** — or **Use sample frame** on a desktop with no camera. The frame is analysed locally; the structured observation appears in the edge **Last local analysis** card and flows back to the parent, showing up in the console's **Evidence timeline** and **Rolled-up diagnosis**.
+
+### 5. Validate
+
+```powershell
+pnpm --dir sdk/edge-worker typecheck
+pnpm --dir sdk/edge-worker test          # analyzer, camera-agent, weak-network runtime unit tests
+pnpm --dir samples/edge-worker test      # console/Device Scan UI helper unit tests
+pnpm --dir samples/edge-worker build     # tsc + vite build
+```
+
+### Honest browser limitations
+
+- **Not a daemon.** The worker *is* the browser tab. Closing it, or backgrounding it long enough for the runtime's orphan/idle timeout, suspends the worker; the durable session survives and can be re-served when a worker reconnects.
+- **Weak-network by design.** Structured JSON is the default (and only) payload; the raw frame stays on the device. If the connection drops mid-capture, the result is saved in a `localStorage` queue and replayed to the same session on reconnect — the edge UI shows connected / queued / synced state.
+- **Camera needs a secure context.** `getUserMedia` only works on `https://` or `localhost`. A phone opening the sample over plain LAN `http://` cannot open the live camera — use an https tunnel (e.g. `devtunnel`) or the built-in **sample-frame** fallback, which still runs the real local analysis.
+- **Consent is local and per-capture.** A routed task never auto-opens the camera. The task only produces a card; the frame is captured only after an explicit tap, and can be declined.
+- **Local probe, not a browser VLM.** The default analyzer computes real optical signals (brightness, exposure, contrast, colour temperature, Laplacian-variance focus, glare) plus LED-blob detection, and uses the native `BarcodeDetector` for QR/codes when present — with an honest degradation notice when it is not. Device-model semantics and the final diagnosis are the cloud agent's job. `FrameAnalyzer` is the seam where a future WebGPU/ONNX/WebNN model can be dropped in without changing the worker or console.
+
+
 
 - **Scale-out**: a queued session whose labels match the WorkerPool triggers the Docker host pool adapter to start a sidecar container. The container registers as a Worker; only after its first heartbeat does it become eligible for assignment.
 - **Assignment**: central writes a `sessionLeaseId` and routes `session.assign` (with any restore reference) to the worker. The lease is how a durable session is bound to replaceable compute; stale-lease writes are rejected.

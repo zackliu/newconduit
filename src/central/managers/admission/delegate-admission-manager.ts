@@ -11,20 +11,35 @@ export class DelegateAdmissionManager {
       maxInputBytes: delegate.maxInputBytes,
       maxResultBytes: delegate.maxResultBytes,
       deadlineMs: delegate.deadlineMs,
-      maxQueuedCalls: delegate.maxQueuedCalls
+      maxQueuedCalls: delegate.maxQueuedCalls,
+      targetPolicy: delegate.targetPolicy ?? 'pool'
     };
   }
 
   runtimeTool(delegate: ResolvedDelegate): AgentRuntimeToolDefinition {
+    const deviceScoped = delegate.targetPolicy === 'device';
+    const target: JsonValue = {
+      type: 'object',
+      additionalProperties: false,
+      description: deviceScoped
+        ? 'Required. Which paired device(s) on this recovery case to scan: { "deviceRef": "<id>" } for one device, { "deviceRefs": ["<id>", ...] } for several, or { "scope": "all" } for every paired device. Pool/any routing is not allowed for an on-device scan.'
+        : 'Optional. Routing target: omit or { "scope": "any" } for ordinary pool routing.',
+      properties: {
+        deviceRef: { type: 'string', minLength: 1 },
+        deviceRefs: { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1 },
+        scope: { type: 'string', enum: deviceScoped ? ['all'] : ['all', 'any'] }
+      }
+    };
     return {
       name: delegate.toolName,
       description: delegate.description,
       inputSchema: {
         type: 'object',
         additionalProperties: false,
-        required: ['message'],
+        required: deviceScoped ? ['message', 'target'] : ['message'],
         properties: {
-          message: { type: 'string', minLength: 1 }
+          message: { type: 'string', minLength: 1 },
+          target
         }
       },
       binding: { kind: 'delegate', delegateId: delegate.id }
