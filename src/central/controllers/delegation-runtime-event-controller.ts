@@ -1,5 +1,5 @@
 import type { DelegationTarget, JsonValue, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, RuntimeToolRequestedPayload, SessionRecord, SessionRuntimeToolResponseCommandPayload, TurnCompletedPayload, WorkerCommandAcceptedPayload } from '../../shared';
-import type { DelegationDispatcher, DelegationManager, CasePairingManager, FanoutManager, SessionLeaseManager, SessionManager, WorkerCommandOutput } from '../managers';
+import type { DelegationDispatcher, DelegationManager, FanoutManager, SessionLeaseManager, SessionManager, WorkerCommandOutput } from '../managers';
 
 /** A caller's resolved `target`: an explicit stateless pool task, one pinned device, or a fan-out to many devices. */
 type TargetSpec =
@@ -15,8 +15,7 @@ export class DelegationRuntimeEventController {
     private readonly delegationDispatcher: DelegationDispatcher,
     private readonly sessionManager: SessionManager,
     private readonly eventTransport: RuntimeEventTransport,
-    private readonly fanoutManager: FanoutManager,
-    private readonly casePairingManager: CasePairingManager
+    private readonly fanoutManager: FanoutManager
   ) {}
 
   async handleRuntimeEvent(event: RuntimeEvent): Promise<boolean> {
@@ -75,9 +74,9 @@ export class DelegationRuntimeEventController {
     for (const delegation of await this.storage.readDelegations()) {
       const parent = await this.storage.readSession(delegation.parentSessionId);
       if (parent && this.isTerminalSession(parent.status)) {
-        // The case (parent recovery session) is closed: revoke its device bindings so a lingering browser credential
-        // can no longer register or route into a finished case. Idempotent across the delegations of one case.
-        await this.casePairingManager.revokeCase(delegation.parentSessionId);
+        // The case (parent recovery session) is closed. Device-binding revocation is owned authoritatively by the
+        // session terminal hook (see TenantRuntime); here we only settle this delegation's own child/call state so the
+        // parent tool await cannot hang on a finished case.
         await this.delegationManager.failForParentTerminal(delegation.delegationId);
         await this.pauseChildForTerminalParent(delegation.childSessionId);
         continue;

@@ -113,7 +113,7 @@ export class TenantRuntime {
       new DelegatedSessionManager(options.storage, eventLogManager, sessionLifecycleManager, sessionStartManager)
     ) : undefined;
     const delegationRuntimeEventController = delegationManager && delegationDispatcher
-      ? new DelegationRuntimeEventController(options.storage, sessionLeaseManager, delegationManager, delegationDispatcher, sessionManager, options.eventTransport, new FanoutManager(options.tenant.tenantId, options.storage, options.clock), this.casePairingManager)
+      ? new DelegationRuntimeEventController(options.storage, sessionLeaseManager, delegationManager, delegationDispatcher, sessionManager, options.eventTransport, new FanoutManager(options.tenant.tenantId, options.storage, options.clock))
       : undefined;
     this.tenantInboxController = new TenantInboxController(
       options.tenant.tenantId,

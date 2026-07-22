@@ -33,7 +33,7 @@ test('scenario: the terminal session transition revokes a zero-delegation case a
       (error: unknown) => error instanceof CasePairingError
     );
 
-    // Idempotent: the delegation-reconcile safety net revoking the same closed case again is a no-op.
+    // Idempotent: revoking the same closed case again is a no-op.
     assert.equal(await manager.revokeCase('case-1'), 0);
   });
 });
@@ -48,8 +48,8 @@ test('scenario: re-running the terminal transition for an already-terminal case 
     const failed = await lifecycle.transition(session, 'failed', 'agent_failed');
     assert.equal((await manager.listCaseDevices('case-1')).length, 0);
 
-    // A second transition observed from the already-terminal record must NOT re-fire the hook (edge-triggered), and
-    // even if the safety net revokes again it stays a no-op. This proves repeated reconciliation is idempotent.
+    // A second transition observed from the already-terminal record must NOT re-fire the hook (edge-triggered);
+    // revoking the closed case again stays a no-op. This proves repeated terminal reconciliation is idempotent.
     await lifecycle.transition(failed, 'failed', 'agent_failed');
     assert.equal(await manager.revokeCase('case-1'), 0);
   });
