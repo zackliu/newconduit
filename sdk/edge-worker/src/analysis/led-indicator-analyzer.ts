@@ -7,14 +7,14 @@
  * not a single frame.
  */
 
-import type { EdgeFrame } from './frame-analyzer';
+import type { EdgeFrame } from './frame-analyzer.js';
 import type {
   DeviceObservation,
   LedIndicator,
   LedIndicatorObservation,
   LocalObserver,
   ObserverContext
-} from './local-observers';
+} from './local-observers.js';
 
 export interface LedIndicatorOptions {
   /** Minimum dominant channel value (0..255) for a pixel to count as "lit". Default 150. */

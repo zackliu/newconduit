@@ -105,8 +105,8 @@ export function buildWorkerRegistration({ centralUrl = DEFAULT_CENTRAL_URL, tena
   return {
     centralUrl,
     tenantId,
-    storageClass: 'host-managed',
-    labels: { agent: 'copilot', tier: 'foundry', role: 'network-recovery-expert', storage: 'host-managed' },
+    storageClass: 'volume-snapshot',
+    labels: { agent: 'copilot', tier: 'poc', role: 'network-recovery-expert', storage: 'volume-snapshot' },
     description: { kind: 'scripted-parent', role: 'network-recovery-expert' },
     capacity: 1,
     allocatable: 1

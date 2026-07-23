@@ -1,4 +1,4 @@
-import type { EdgeRuntimeChannel } from './protocol';
+import type { EdgeRuntimeChannel } from './protocol.js';
 
 /**
  * Maps an edge worker runtime channel to its Azure Web PubSub group name. The produced strings MUST be

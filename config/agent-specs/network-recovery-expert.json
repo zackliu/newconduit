@@ -2,7 +2,7 @@
   "agentSpecId": "network-recovery-expert",
   "labels": {
     "agent": "copilot",
-    "tier": "foundry",
+    "tier": "poc",
     "role": "network-recovery-expert"
   },
   "launch": {
@@ -18,7 +18,7 @@
   "workerSelector": {
     "matchLabels": {
       "agent": "copilot",
-      "storage": "host-managed"
+      "storage": "volume-snapshot"
     }
   },
   "pausePolicy": "stop-on-pause",

@@ -25,32 +25,35 @@ function recordingEncoder(): ImageEncoder & { last?: EdgeFrame } {
   return encoder;
 }
 
-test('image sharing: policy off never produces an image, even with consent', async () => {
-  const artifact = await maybeShareImage(solidFrame(20, 20), { consent: true }, { policy: 'off', encoder: recordingEncoder() });
+const LOCAL_APPROVAL = { granted: true as const, scope: 'router label', grantedAt: '2026-01-01T00:00:00Z' };
+
+test('image sharing: policy off never produces an image, even with local approval', async () => {
+  const artifact = await maybeShareImage(solidFrame(20, 20), {}, LOCAL_APPROVAL, { policy: 'off', encoder: recordingEncoder() });
   assert.equal(artifact, undefined);
 });
 
-test('image sharing: without explicit consent no image is produced', async () => {
+test('image sharing: a remote request cannot authorize its own upload', async () => {
   const artifact = await maybeShareImage(
     solidFrame(20, 20),
-    { consent: false },
+    { scope: 'router label' },
+    undefined,
     { policy: 'on-explicit-consent', encoder: recordingEncoder() }
   );
   assert.equal(artifact, undefined);
 });
 
 test('image sharing: with policy on but no encoder wired, nothing can be shared', async () => {
-  const artifact = await maybeShareImage(solidFrame(20, 20), { consent: true }, { policy: 'on-explicit-consent' });
+  const artifact = await maybeShareImage(solidFrame(20, 20), {}, LOCAL_APPROVAL, { policy: 'on-explicit-consent' });
   assert.equal(artifact, undefined);
 });
 
-test('image sharing: consent + encoder crops, masks, downscales, then encodes the processed frame', async () => {
+test('image sharing: local approval + encoder crops, masks, downscales, then encodes the processed frame', async () => {
   const encoder = recordingEncoder();
   const artifact = await maybeShareImage(
     solidFrame(400, 400),
-    { consent: true, scope: 'router label', crop: { x: 100, y: 100, width: 200, height: 200 }, mask: [{ x: 0, y: 0, width: 50, height: 50 }], maxEdge: 100 },
-    { policy: 'on-explicit-consent', encoder },
-    () => '2026-01-01T00:00:00Z'
+    { scope: 'cloud-requested label', crop: { x: 100, y: 100, width: 200, height: 200 }, mask: [{ x: 0, y: 0, width: 50, height: 50 }], maxEdge: 100 },
+    LOCAL_APPROVAL,
+    { policy: 'on-explicit-consent', encoder }
   );
   assert.ok(artifact);
   assert.equal(artifact.encoding, 'image/jpeg');
@@ -66,10 +69,11 @@ test('image sharing: consent + encoder crops, masks, downscales, then encodes th
   assert.equal(encoder.last?.width, 100);
 });
 
-test('image sharing: an untouched consented frame reports no crop/downscale when it already fits', async () => {
+test('image sharing: an untouched locally-approved frame reports no crop/downscale when it already fits', async () => {
   const artifact = await maybeShareImage(
     solidFrame(64, 64),
-    { consent: true },
+    {},
+    LOCAL_APPROVAL,
     { policy: 'on-explicit-consent', encoder: recordingEncoder(), defaultMaxEdge: 256 }
   );
   assert.ok(artifact);

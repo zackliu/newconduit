@@ -53,10 +53,7 @@ export class TenantRuntime {
       ));
     });
     this.casePairingManager = new CasePairingManager(options.tenant.tenantId, options.storage, options.clock);
-    // The authoritative device-binding revocation: whenever a session first crosses into a terminal status — from any
-    // path, including a case that never spawned a delegation — revoke that case's device bindings so a lingering edge
-    // credential can no longer register/route. Best-effort and idempotent; the terminal-case guard in
-    // resolveEdgeBinding is the correctness backstop that closes the window before this persists.
+    // The terminal edge revokes immediately; periodic reconciliation below retries any failed durable write.
     const sessionLifecycleManager = new SessionLifecycleManager(options.storage, options.clock, async (session) => {
       try {
         await this.casePairingManager.revokeCase(session.sessionId);
@@ -196,6 +193,7 @@ export class TenantRuntime {
 
   async reconcileSessions(): Promise<void> {
     await this.tenantInboxController.reconcileSessions();
+    await this.casePairingManager.reconcileTerminalCases();
   }
 
   async stop(): Promise<void> {

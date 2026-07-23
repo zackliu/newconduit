@@ -35,7 +35,7 @@ pnpm start:central          # CORS-open HTTP on :3000
 pnpm --dir samples/edge-worker dev   # http://127.0.0.1:5176
 ```
 
-`network-recovery-expert`, `device-scan-probe`, and the `device-scan-capture` delegate are declarative documents under `config/`. The parent matches workers labelled `agent: copilot`; the browser callee's base selector matches `agent: browser-edge` + `storage: host-managed`. A device is routed to only after it has **redeemed a pairing invite** and Central has minted its `{ case, deviceRef }` binding labels — a joined-but-unbound tab is never eligible for a case's scans.
+`network-recovery-expert`, `device-scan-probe`, and the `device-scan-capture` delegate are declarative documents under `config/`. The parent matches the existing `poc-docker-copilot` pool through `agent: copilot` + `storage: volume-snapshot`; the browser callee's base selector matches `agent: browser-edge` + `storage: host-managed`. A device is routed to only after it has **redeemed a pairing invite** and Central has minted its `{ case, deviceRef }` binding labels — a joined-but-unbound tab is never eligible for a case's scans.
 
 ### Identity, pairing & routing (Central-authoritative)
 
@@ -49,17 +49,33 @@ Device identity and authorization are separate, and neither travels in a query p
 
 > **Enrollment UX — fast-follow.** v1 ships the *one-time invite → explicit redeem* flow above: the operator hands out a short-lived single-use link and the device redeems it into a durable binding. A planned fast-follow is **operator-approval enrollment**, where a generic Device Scan tab registers itself as an *unbound* online device and the console operator approves it into the case directly (Central pushes the binding credential to the already-connected device), removing the copy-paste link step. It needs a Central→online-edge credential-push command that is not built in v1; the invite/redeem model is the supported path today and the roster/fan-out routing consumes an authoritative `deviceRef` either way, so adding approval later does not change the routing contract.
 
-### Provide the parent "brain"
+### Provide the parent "brain" (a real Copilot worker)
 
-The parent session needs a worker to run its turns and fire the delegate tool:
+The parent session needs a worker to run its turns and fire the delegate tool. The default local path is the existing **`poc-docker-copilot` WorkerPool**, selected by `{ agent: copilot, storage: volume-snapshot }`. Each queued case receives a no-reuse, session-pinned Docker worker running the real `CopilotProcessAdapter`; the scripted harness below remains deterministic test support only.
 
-- **Real Copilot worker** — start a Copilot sidecar/pool (`az login` + Copilot provider config) so the durable agent reasons for itself. This is the production shape.
-- **Scripted dev stand-in** — for a no-Copilot demo, run the included harness. It registers a real `SidecarDaemon` worker over Web PubSub whose scripted agent fires `scan_device_evidence` on each instruction (it does not reason; it only drives the delegation path):
+- **A. Local Docker WorkerPool — default.** In the Central shell, use placeholders for resource-specific values and build the sidecar image before starting the runtime:
+
+  ```powershell
+  az login
+  pnpm build:sidecar-image
+  $env:WEBPUBSUB_ENDPOINT = 'https://<your-wps>.webpubsub.azure.com'
+  $env:WEBPUBSUB_HUB = 'agentruntimepoc'
+  $env:COPILOT_MODEL = '<your-model-deployment>'
+  $env:COPILOT_PROVIDER_TYPE = 'azure' # or openai
+  $env:COPILOT_PROVIDER_BASE_URL = 'https://<your-provider-endpoint>'
+  pnpm start:central
+  ```
+
+  Central forwards the provider configuration to each sidecar container and mounts the host Azure CLI profile for `DefaultAzureCredential`; no connection string, provider token, or generated public URL belongs in the repo. A second console queues a second pool instance automatically.
+
+- **B. Standalone real Copilot worker — optional debugging path.** A manually started `copilot-process-wrapper` sidecar with labels `{"agent":"copilot","storage":"volume-snapshot"}` satisfies the same parent AgentSpec, but it has fixed manual capacity. The root README documents standalone workers; use the Docker pool above for the primary multi-console flow.
+
+- **C. Scripted offline harness (no Copilot provider) — test/demo only.** A deterministic stand-in for a no-Copilot two-tab demo. It is **not** a reasoning agent: it registers a real `SidecarDaemon` worker whose scripted adapter fires `scan_device_evidence` on each instruction, driving the exact delegation path without a model. Never use it as the production parent.
 
   ```powershell
   $env:CENTRAL_URL = 'http://localhost:3000'
   $env:TENANT_ID = 'poc'
-  node samples/edge-worker/dev/scripted-parent.mjs
+  pnpm --dir samples/edge-worker dev:offline-parent
   ```
 
 ## Two-device (or two-tab) demo
@@ -67,7 +83,7 @@ The parent session needs a worker to run its turns and fire the delegate tool:
 1. Open the **console**: `http://127.0.0.1:5176/?role=console&central=http://localhost:3000&tenant=poc`. If the connection pill shows `error`, open **Connection** and set the correct Central URL. Press **Start recovery session** to create the `network-recovery-expert` parent (the case).
 2. In the **Pair an edge device** card press **Create pairing invite**, then copy the one-time link and open it on a **phone** (or a second browser tab). The link carries `?role=edge` + connection settings in the query and the invite secret **only in the `#pair=…` fragment**.
 3. On the **Device Scan** page press **Enroll & join**. The tab mints its `deviceId`, redeems the invite into a durable binding, and registers as a Worker. The camera stays off. The console's **Paired edge devices** list shows it as `online · ready` right away — before any scan.
-4. To add a second device, mint **another** invite and open it on the next phone/tab; it joins the same case roster.
+4. To add a second device, mint **another** invite and open it on the next phone/tab; it joins the same case roster. Every device on a case must be minted from **the same console/case** — the console header shows the active **case id**, and each invite card repeats it. A tab that already holds a binding for one case will **not** silently switch when opened with a different case's invite: the Device Scan page shows an explicit **binding conflict** and blocks Join, offering to keep and reconnect its current case instead (see *Honest browser limitations*).
 5. In the console, choose a **Scan target** (a specific device, or **All paired devices**) and send an instruction (e.g. **Check indicator lights**). The parent agent calls `scan_device_evidence` with that target; Central routes one child scan per targeted device, and a **Capture requested** card appears on each.
 6. On each Device Scan page:
    - **Open camera → Capture frame** on a phone, or
@@ -82,7 +98,7 @@ The parent session needs a worker to run its turns and fire the delegate tool:
 - **Pairing and the roster are typed client APIs.** The console uses `client.cases.createPairingInvite(caseId)` and `client.cases.listDevices(caseId)` — tenant- and case-scoped read models that return only this case's authorized devices. It never scrapes worker labels or infers presence from child sessions.
 - **Registration is the real worker handshake, gated by the binding.** `EdgeWorkerRuntime.register()` POSTs a `WorkerRegisterPayload` (including the `edgeBinding`) to `/sidecar/negotiate?tenantId=...`, connects the returned Web PubSub URL, subscribes to its `worker-commands` group, and heartbeats `conditions: ['ready']`. Central validates the binding credential and mints the routing labels; the tab cannot self-assert its `case`/`deviceRef`.
 - **The edge agent is a local device probe.** `CameraDiagnosticAgent` parses the scan task, enforces capability scope, delegates capture to a user-gesture `CaptureProvider`, runs the local analyzers, and returns bounded structured evidence (`kind: 'device-evidence'`). It never raises a Central-mediated interaction — capture consent is resolved on the device inside the turn.
-- **Privacy is enforced in one place.** `createAnalyzerCaptureProvider` is the only bridge from a raw `EdgeFrame` to a `FrameAnalysis`; by construction it returns structured signals and media metadata, never pixels. Raw/cropped image upload only happens through an explicit consent gate (`maybeShareImage`), which is off by default.
+- **Privacy is enforced in one place.** `createAnalyzerCaptureProvider` is the only bridge from a raw `EdgeFrame` to a `FrameAnalysis`; by construction it returns structured signals and media metadata, never pixels. Raw/cropped image upload only happens through `maybeShareImage`, which is off in this sample and requires a separate per-capture authorization created by the phone UI. A remote task cannot grant its own consent.
 
 ## Local analysis (not a browser VLM)
 
@@ -103,8 +119,10 @@ The default analyzers compute real optical signals from RGBA pixels with bounded
 ## Honest browser limitations
 
 - **Not a daemon.** The worker *is* the tab. Closing it — or backgrounding it past the runtime's orphan/idle timeout — suspends the worker. The durable session survives; on reconnect the tab re-registers with its **stored binding credential** (not the one-time invite), so it rejoins the same case as the same `deviceRef` without re-pairing.
-- **Camera needs a secure context.** `getUserMedia` only works on `https://` or `localhost`. A phone opening this over plain LAN `http://` cannot open the live camera; use an https tunnel (e.g. `devtunnel host -p 5176`) or the **sample-frame** fallback, which still runs the real local analysis.
+- **Camera needs a secure context.** `getUserMedia` only works on `https://` or `localhost`. A phone opening this over plain LAN `http://` cannot open the live camera; use a temporary HTTPS reverse proxy without committing its generated public URL, or use the **sample-frame** fallback.
 - **Consent is local and per-capture.** A routed task never auto-opens the camera. It only shows a card; the frame is captured after an explicit tap and can be declined.
+- **A device belongs to one case at a time.** The Device Scan tab stores exactly one binding. Opening it with an invite for a *different* case surfaces an explicit **binding conflict** — current case/`deviceRef` vs invited case — and blocks Join rather than overwriting local storage and leaving an orphaned Central binding. v1 offers a safe **Keep current case & reconnect** action; an authenticated self-release/switch that first revokes the old Central binding is a documented fast-follow. To move a device between cases today, close the old case (which revokes its bindings) or clear the tab's storage, then redeem the new invite.
+- **The console won't let you instruct before there's a worker.** A parent turn fails with `no_current_worker` if it has no worker attached, so the console disables the instruction box until the case's parent is actually assigned and `running`, showing **waiting for parent capacity** meanwhile. A manually started sidecar or the offline scripted harness has fixed capacity; the default no-reuse Docker WorkerPool creates one session-pinned worker per queued case.
 - **Credential storage is only as strong as the browser.** The device's `deviceId` and its bearer binding credential live in `localStorage` — the narrowest durable store that survives a reload/reconnect. That means script running in the page origin (an XSS bug) could read the credential; treat it as a session-scoped secret, serve the page from a trusted origin over HTTPS, and rely on `revokeDevice`/case-close revocation to cut off a leaked credential. Hardware-backed keys (WebAuthn/`CryptoKey` with `extractable:false`) are the upgrade path, not implemented in v1.
 - **POC tenant scoping.** For demo convenience the sample passes `tenant=poc` in the query string, and the POC HTTP routes read `tenantId` from the query. This is **not** the authorization boundary: an invite is only redeemable with its one-time secret against the tenant/case it was minted for, and a binding only authorizes with its credential — a mismatched tenant simply fails as `invite_not_found`/`binding_not_found`. A production deployment would derive `tenantId` from an authenticated identity, not the query.
 
@@ -114,6 +132,7 @@ The default analyzers compute real optical signals from RGBA pixels with bounded
 pnpm --dir sdk/client build           # roster + pairing client APIs the console uses
 pnpm --dir sdk/edge-worker typecheck
 pnpm --dir sdk/edge-worker test        # analyzer, camera-agent, weak-network runtime unit tests
+pnpm --dir sdk/edge-worker test:package # CommonJS require + native Node ESM import
 pnpm --dir samples/edge-worker test    # console/Device Scan UI helper unit tests
 pnpm --dir samples/edge-worker build   # tsc + vite build
 ```

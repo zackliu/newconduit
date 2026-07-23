@@ -9,7 +9,6 @@ import { AgentSpecAdmissionManager, CasePairingError, CasePairingManager, EDGE_C
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import type { SessionRecord, WorkerRegisterPayload } from '../../src/shared';
 import { POC_AGENT_SPEC } from '../support/config-fixtures';
-
 /**
  * The negotiate enrollment seam is the point where a self-asserted device identity becomes an authorized,
  * Central-minted routing label. These tests prove — over a REAL `CentralService` — that the `case`/`deviceRef`
@@ -176,4 +175,3 @@ test('scenario: a forged deviceId with a real deviceRef but no matching binding 
     );
   });
 });
-

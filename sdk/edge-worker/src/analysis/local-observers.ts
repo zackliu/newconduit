@@ -7,8 +7,8 @@
  * emits things it can actually compute and verify on-device.
  */
 
-import type { EdgeFrame } from './frame-analyzer';
-import type { PixelRect } from './frame-processing';
+import type { EdgeFrame } from './frame-analyzer.js';
+import type { PixelRect } from './frame-processing.js';
 
 export interface LedIndicator {
   color: 'red' | 'amber' | 'green' | 'blue' | 'white' | 'unknown';

@@ -7,6 +7,8 @@ import {
   shortId,
   computeDeviceStages,
   computeScanRoute,
+  computeJoinGate,
+  computeInstructionGate,
   isTerminalChildStatus
 } from '../src/ui.js';
 
@@ -118,4 +120,51 @@ test('computeScanRoute distinguishes awaiting-device (offline, no fallback) from
   assert.equal(inFlight, 'in-flight');
   const idle = computeScanRoute({ scanActive: false, childTerminated: false, deviceOnline: true });
   assert.equal(idle, 'idle');
+});
+
+test('computeJoinGate blocks a cross-case invite on an already-bound device instead of silently ignoring it', () => {
+  // The reported failure: a phone already bound to case A opens an invite minted from a different console/case.
+  // The gate must surface a `conflict` so the tab neither silently reconnects case A (hiding the operator's new
+  // link) nor overwrites its binding client-side (which would orphan case A's Central binding).
+  assert.equal(computeJoinGate({ hasBinding: true, hasInvite: true }), 'conflict');
+});
+
+test('computeJoinGate resolves the non-conflicting join actions from binding + invite presence', () => {
+  assert.equal(computeJoinGate({ hasBinding: false, hasInvite: false }), 'unpaired');
+  assert.equal(computeJoinGate({ hasBinding: false, hasInvite: true }), 'invite', 'first join redeems the invite');
+  assert.equal(computeJoinGate({ hasBinding: true, hasInvite: false }), 'reconnect', 'reconnect uses the stored binding, no invite');
+});
+
+const CONNECTED_PARENT = { connected: true, hasParent: true, sending: false };
+
+test('computeInstructionGate only allows a send once the parent case has a worker attached (status running)', () => {
+  // Central fails input with `no_current_worker` while the parent has no worker; only `running` guarantees one, so
+  // that is the single state that enables instructions. This is the fix for send-before-parent-assignment.
+  assert.equal(computeInstructionGate({ ...CONNECTED_PARENT, parentStatus: 'running' }), 'ready');
+});
+
+test('computeInstructionGate holds instructions at waiting-capacity for every pre-worker / released parent state', () => {
+  for (const parentStatus of ['created', 'queued', 'starting', 'resuming', 'paused', 'pausing', 'unknown']) {
+    assert.equal(
+      computeInstructionGate({ ...CONNECTED_PARENT, parentStatus }),
+      'waiting-capacity',
+      `parent status ${parentStatus} must not accept a send (would be no_current_worker)`
+    );
+  }
+});
+
+test('computeInstructionGate reports the honest reason when a send is not yet possible', () => {
+  assert.equal(
+    computeInstructionGate({ connected: false, hasParent: false, parentStatus: 'unknown', sending: false }),
+    'disconnected'
+  );
+  assert.equal(
+    computeInstructionGate({ connected: true, hasParent: false, parentStatus: 'unknown', sending: false }),
+    'no-session',
+    'no parent yet — the operator must start a recovery session first, not auto-start on send'
+  );
+  assert.equal(
+    computeInstructionGate({ ...CONNECTED_PARENT, parentStatus: 'running', sending: true }),
+    'sending'
+  );
 });

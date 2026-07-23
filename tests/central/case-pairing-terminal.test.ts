@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { SessionRecord } from '../../src/shared';
+import type { CaseDeviceBindingRecord, CreateCaseDeviceBindingResult, SessionRecord } from '../../src/shared';
 import { AgentSpecAdmissionManager, CasePairingError, CasePairingManager, SessionLifecycleManager } from '../../src/central/managers';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
 import { POC_AGENT_SPEC } from '../support/config-fixtures';
@@ -90,6 +90,44 @@ test('scenario: a non-terminal transition (pause) retains the case bindings', as
   });
 });
 
+test('scenario: a redeem racing terminal transition is durably revoked before the hook completes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-case-pairing-terminal-race-'));
+  try {
+    const storage = new BlockingBindingStorage(root);
+    const clock = { now: () => NOW };
+    const manager = new CasePairingManager('poc', storage, clock);
+    const lifecycle = new SessionLifecycleManager(storage, clock, (session) => manager.revokeCase(session.sessionId).then(() => undefined));
+    await writeCase(storage, 'case-1');
+    const invite = await manager.mintPairingInvite('case-1');
+
+    const redeem = manager.redeemPairingInvite({
+      inviteId: invite.inviteId,
+      inviteSecret: invite.inviteSecret,
+      deviceId: 'device-A',
+      deviceLabel: 'iOS device'
+    });
+    await storage.bindingWriteStarted;
+
+    const terminal = lifecycle.transition(await requireSession(storage, 'case-1'), 'failed', 'agent_failed');
+    await waitForStatus(storage, 'case-1', 'failed');
+    storage.releaseBindingWrite();
+
+    const [redeemed] = await Promise.all([redeem, terminal]);
+    assert.equal((await manager.listCaseDevices('case-1')).length, 0);
+    await assert.rejects(
+      () => manager.resolveEdgeBinding({
+        caseId: 'case-1',
+        deviceId: 'device-A',
+        deviceRef: redeemed.deviceRef,
+        bindingCredential: redeemed.bindingCredential
+      }),
+      (error: unknown) => error instanceof CasePairingError
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 interface Harness {
   storage: LocalFileStorage;
   manager: CasePairingManager;
@@ -131,4 +169,41 @@ async function writeCase(storage: LocalFileStorage, caseId: string, tenantId = '
     updatedAt: NOW
   };
   await storage.createSession(session);
+}
+
+class BlockingBindingStorage extends LocalFileStorage {
+  private releaseWrite: () => void = () => undefined;
+  private markWriteStarted: () => void = () => undefined;
+  readonly bindingWriteStarted: Promise<void>;
+  private readonly waitForRelease: Promise<void>;
+
+  constructor(root: string) {
+    super(root);
+    this.bindingWriteStarted = new Promise<void>((resolve) => {
+      this.markWriteStarted = resolve;
+    });
+    this.waitForRelease = new Promise<void>((resolve) => {
+      this.releaseWrite = resolve;
+    });
+  }
+
+  override async createCaseDeviceBinding(binding: CaseDeviceBindingRecord): Promise<CreateCaseDeviceBindingResult> {
+    this.markWriteStarted();
+    await this.waitForRelease;
+    return super.createCaseDeviceBinding(binding);
+  }
+
+  releaseBindingWrite(): void {
+    this.releaseWrite();
+  }
+}
+
+async function waitForStatus(storage: LocalFileStorage, sessionId: string, status: SessionRecord['status']): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if ((await storage.readSession(sessionId))?.status === status) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`session ${sessionId} did not reach ${status}`);
 }

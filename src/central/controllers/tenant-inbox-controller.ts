@@ -28,8 +28,13 @@ export class TenantInboxController {
       if (await this.delegationRuntimeEventController?.handleRuntimeEvent(event)) {
         return;
       }
-      if (await this.agentRuntimeEventController.handleRuntimeEvent(event)) {
+      const agentOutcome = await this.agentRuntimeEventController.handleRuntimeEvent(event);
+      if (agentOutcome.handled) {
+        // Projection is deliberately re-driven for duplicate event ids. The session event append, cursor update,
+        // delegation projection, and worker acknowledgement are separate durable steps; replay must repair a crash
+        // between any two of them. Delegation projection is idempotent and acknowledgement happens only after it.
         await this.delegationRuntimeEventController?.observeAgentEvent(event);
+        await this.agentRuntimeEventController.acknowledgeWorkerResultIfNeeded(event);
         return;
       }
       await this.clientRuntimeEventController.handleRuntimeEvent(context, event);

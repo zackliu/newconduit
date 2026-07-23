@@ -43,6 +43,7 @@ export type RuntimeEventType =
   | 'worker.heartbeat.rejected'
   | 'worker.command.accepted'
   | 'worker.command.rejected'
+  | 'worker.result.acknowledged'
   | 'session.lease.lost'
   | 'agent.interaction.requested'
   | 'interaction.requested'
@@ -176,6 +177,10 @@ export interface WorkerCommandRejectedPayload {
 export interface WorkerCommandAcceptedPayload {
   commandEventId: string;
   turnSeq: number;
+}
+
+export interface WorkerResultAcknowledgedPayload {
+  resultEventId: string;
 }
 
 /** Sidecar ingress for an agent-runtime pending request. Not exposed as a public Session event. */

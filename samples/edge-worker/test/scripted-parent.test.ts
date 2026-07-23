@@ -38,8 +38,8 @@ test('scripted-parent buildWorkerRegistration produces a central-valid registrat
   assert.ok(isStringRecord(registration.description), 'description must be a Record<string,string>, never a bare string');
   assert.ok(isStringRecord(registration.labels), 'labels must be a Record<string,string>');
   assert.equal(registration.labels.role, 'network-recovery-expert');
-  assert.equal(registration.labels.storage, 'host-managed');
-  assert.equal(registration.storageClass, 'host-managed');
+  assert.equal(registration.labels.storage, 'volume-snapshot');
+  assert.equal(registration.storageClass, 'volume-snapshot');
   assert.equal(typeof registration.capacity, 'number');
   assert.equal(typeof registration.allocatable, 'number');
 });

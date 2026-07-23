@@ -92,7 +92,7 @@ test('capture detect filter: only the requested observer kind runs', async () =>
   assert.equal(observations[0].kind, 'code');
 });
 
-test('consent gate: no image is shared by default, even when the task asks, if the device policy is off', async () => {
+test('consent gate: no image is shared by default, even when the remote task claims consent', async () => {
   const encoderCalls = { count: 0 };
   const encoder: ImageEncoder = {
     mimeType: 'image/jpeg',
@@ -105,7 +105,7 @@ test('consent gate: no image is shared by default, even when the task asks, if t
   const provider = createAnalyzerCaptureProvider(
     new CanvasHeuristicAnalyzer(),
     async () => ({ status: 'captured', captured: { frame: frameWithRedBlob(), source: 'environment', sampleSource: 'camera' } }),
-    { imageSharing: undefined }
+    { imageSharing: { policy: 'on-explicit-consent', encoder } }
   );
   const agent = new CameraDiagnosticAgent({ captureProvider: provider, manifestProvider: () => manifest() });
 
@@ -121,7 +121,7 @@ test('consent gate: no image is shared by default, even when the task asks, if t
   void encoder;
 });
 
-test('consent gate: an explicitly consented capture attaches a processed image and flags the privacy change', async () => {
+test('consent gate: a locally approved capture attaches a processed image and flags the privacy change', async () => {
   const encoder: ImageEncoder = {
     mimeType: 'image/jpeg',
     async encode(frame) {
@@ -130,7 +130,19 @@ test('consent gate: an explicitly consented capture attaches a processed image a
   };
   const provider = createAnalyzerCaptureProvider(
     new CanvasHeuristicAnalyzer(),
-    async () => ({ status: 'captured', captured: { frame: frameWithRedBlob(), source: 'environment', sampleSource: 'camera' } }),
+    async () => ({
+      status: 'captured',
+      captured: {
+        frame: frameWithRedBlob(),
+        source: 'environment',
+        sampleSource: 'camera',
+        imageShareAuthorization: {
+          granted: true,
+          scope: 'device label',
+          grantedAt: '2026-01-01T00:00:00Z'
+        }
+      }
+    }),
     { imageSharing: { policy: 'on-explicit-consent', encoder, defaultMaxEdge: 256 } }
   );
   const agent = new CameraDiagnosticAgent({
@@ -142,7 +154,7 @@ test('consent gate: an explicitly consented capture attaches a processed image a
     {
       sessionId: 's1',
       turnSeq: 4,
-      message: JSON.stringify({ task: 'capture', target: 'label', share: { consent: true, scope: 'device label' } })
+      message: JSON.stringify({ task: 'capture', target: 'label', share: { scope: 'device label' } })
     },
     noopContext()
   );

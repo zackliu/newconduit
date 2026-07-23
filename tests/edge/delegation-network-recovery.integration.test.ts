@@ -125,9 +125,10 @@ class CaptureDelegatingAgentProcessAdapter implements SidecarAgentProcessAdapter
 // --- Edge side: the browser callee runtime over the same in-memory runtime transport -----------------------
 
 class InMemoryEdgeWorkerTransport implements EdgeWorkerTransport {
-  constructor(private readonly transport: RuntimeEventTransport) {}
+  constructor(private readonly transport: RuntimeEventTransport, readonly publishedEvents: EdgeRuntimeEvent[] = []) {}
   async connect(): Promise<void> {}
   async publish(channel: EdgeRuntimeChannel, event: EdgeRuntimeEvent): Promise<void> {
+    this.publishedEvents.push(event);
     await this.transport.publish(channel as RuntimeChannel, event as unknown as RuntimeEvent, {
       principal: { principalId: event.workerId ?? 'edge-worker', type: 'service' }
     });
@@ -173,8 +174,8 @@ function frameWithRedBlob(): EdgeFrame {
 
 function parentWorkerRegistration(): WorkerRegisterPayload {
   return {
-    labels: { agent: 'copilot', tier: 'foundry', role: 'network-recovery-expert', storage: 'host-managed' },
-    storageClass: 'host-managed',
+    labels: { agent: 'copilot', tier: 'foundry', role: 'network-recovery-expert', storage: 'volume-snapshot' },
+    storageClass: 'volume-snapshot',
     capacity: 1,
     allocatable: 1
   };
@@ -317,8 +318,9 @@ test('scenario: a cloud recovery agent delegates a scan step to the browser edge
       { observers: [new LedIndicatorAnalyzer(), createCodeObserver(new BrowserBarcodeScanner())] }
     );
     const edgeEvents: EdgeWorkerLifecycleEvent[] = [];
+    const edgeTransport = new InMemoryEdgeWorkerTransport(runtimeTransport);
     const edgeRuntime = new EdgeWorkerRuntime({
-      transport: new InMemoryEdgeWorkerTransport(runtimeTransport),
+      transport: edgeTransport,
       agent: new CameraDiagnosticAgent({ captureProvider, manifestProvider: () => BROWSER_MANIFEST }),
       observer: (event) => edgeEvents.push(event)
     });
@@ -382,6 +384,19 @@ test('scenario: a cloud recovery agent delegates a scan step to the browser edge
     assert.equal(childOutput?.kind, 'device-evidence');
     assert.equal(childOutput?.privacy, 'raw-frame-retained-on-device');
     assert.equal(childOutput?.imageShared, false);
+    assert.equal(await edgeRuntime.pendingResultCount(), 0, 'Central must acknowledge the exact durable result event');
+
+    // If the acknowledgement is lost, the edge retries the same stable event id. Central accepts that replay
+    // idempotently instead of appending a second terminal fact or completing the delegation twice.
+    const deliveredResult = edgeTransport.publishedEvents.find((event) => event.type === 'turn.completed');
+    assert.ok(deliveredResult);
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      deliveredResult as unknown as RuntimeEvent,
+      { principal: { principalId: edgeWorker.workerId, type: 'service' as const } }
+    );
+    const afterReplay = await storage.readEvents(child.sessionId, 0);
+    assert.equal(afterReplay.filter((event) => event.eventId === deliveredResult.eventId).length, 1);
 
     await edgeRuntime.stop();
     await parentSidecar.stop();
@@ -551,6 +566,204 @@ function edgeRuntimeFor(runtimeTransport: InMemoryRuntimeTransportAdapter): Edge
     observer: () => undefined
   });
 }
+
+function edgeRuntimeWaitingOn(
+  runtimeTransport: InMemoryRuntimeTransportAdapter,
+  gate: Promise<void>
+): EdgeWorkerRuntime {
+  const captureProvider = createAnalyzerCaptureProvider(
+    new CanvasHeuristicAnalyzer(),
+    async (request) => {
+      await gate;
+      return {
+        status: 'captured',
+        captured: {
+          frame: frameWithRedBlob(),
+          source: request.source,
+          sampleSource: 'simulated',
+          facingMode: request.source
+        }
+      };
+    }
+  );
+  return new EdgeWorkerRuntime({
+    transport: new InMemoryEdgeWorkerTransport(runtimeTransport),
+    agent: new CameraDiagnosticAgent({ captureProvider, manifestProvider: () => BROWSER_MANIFEST })
+  });
+}
+
+test('scenario: replay repairs a status event whose cursor advanced before its terminal transition and re-drives case revocation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-session-status-replay-'));
+  try {
+    const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+    const storage = new LocalFileStorage(root);
+    const central = new CentralService({ storage, eventTransport: runtimeTransport, connectionIssuer: runtimeTransport });
+    await central.start();
+
+    const parentGrant = await central.negotiateSidecarConnectionForTenant('poc', parentContext, parentWorkerRegistration());
+    const parentWorker = parentGrant.worker;
+    assert.ok(parentWorker);
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      workerHeartbeatEvent(parentWorker.workerId),
+      { principal: { principalId: parentWorker.workerId, type: 'service' as const } }
+    );
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      sessionCreateEvent('network-recovery-expert', 'Open a recovery ticket.'),
+      clientContext
+    );
+    const parent = (await storage.readSessions()).find((session) => session.resolvedAgentSpec.agentSpecId === 'network-recovery-expert');
+    assert.ok(parent?.sessionLeaseId);
+    await enrollBoundDevice(central, storage, runtimeTransport, parent.sessionId, 'device-terminal', 'Terminal phone', 'edge-terminal');
+
+    const failedEvent: RuntimeEvent = {
+      eventId: 'stable-parent-failed-event',
+      type: 'status.changed',
+      timestamp: new Date().toISOString(),
+      actor: 'sidecar',
+      sequence: parent.eventCursor + 1,
+      sessionId: parent.sessionId,
+      workerId: parentWorker.workerId,
+      sessionLeaseId: parent.sessionLeaseId,
+      payload: { status: 'failed', reason: 'agent process failed' }
+    };
+    await storage.appendEvent(failedEvent);
+    // Fault injection: the old two-write path advanced the cursor before it persisted status + terminal-hook effects.
+    await storage.writeSession({
+      ...parent,
+      eventCursor: failedEvent.sequence,
+      lastEventUpdatedAt: failedEvent.timestamp
+    });
+
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      failedEvent,
+      { principal: { principalId: parentWorker.workerId, type: 'service' as const } }
+    );
+    const recovered = await storage.readSession(parent.sessionId);
+    assert.equal(recovered?.status, 'failed');
+    assert.equal(recovered?.lifecycleReason, 'agent process failed');
+    assert.ok((await storage.readCaseDeviceBindings(parent.sessionId)).every((binding) => binding.status === 'revoked'));
+
+    // Replaying the latest terminal status is safe and re-drives the idempotent terminal hook.
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      failedEvent,
+      { principal: { principalId: parentWorker.workerId, type: 'service' as const } }
+    );
+    assert.ok((await storage.readCaseDeviceBindings(parent.sessionId)).every((binding) => binding.status === 'revoked'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scenario: replay repairs a child result recorded before Central projected it, then acknowledges the stable event id', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-delegation-result-replay-'));
+  try {
+    const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+    const storage = new LocalFileStorage(root);
+    const central = new CentralService({ storage, eventTransport: runtimeTransport, connectionIssuer: runtimeTransport });
+    await central.start();
+
+    const parentGrant = await central.negotiateSidecarConnectionForTenant('poc', parentContext, parentWorkerRegistration());
+    const parentWorker = parentGrant.worker;
+    assert.ok(parentWorker);
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      workerHeartbeatEvent(parentWorker.workerId),
+      { principal: { principalId: parentWorker.workerId, type: 'service' as const } }
+    );
+
+    const turnSpecs: { task: unknown; target?: unknown }[] = [];
+    const parentAgent = new MultiTargetCaptureAgentProcessAdapter(turnSpecs, 1);
+    const parentSidecar = new SidecarDaemon({
+      runtimeTransport: new SidecarInMemoryTransport(runtimeTransport),
+      workspaceAdapter: new PassthroughWorkspaceAdapter(),
+      agentProcessAdapter: parentAgent
+    });
+    await parentSidecar.subscribeWorkerCommands(parentWorker.workerId);
+
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      sessionCreateEvent('network-recovery-expert', 'Open a recovery ticket.'),
+      clientContext
+    );
+    const parent = (await storage.readSessions()).find((session) => session.resolvedAgentSpec.agentSpecId === 'network-recovery-expert');
+    assert.ok(parent);
+    const device = await enrollBoundDevice(central, storage, runtimeTransport, parent.sessionId, 'device-replay', 'Replay phone', 'edge-replay');
+
+    turnSpecs.push({
+      task: { task: 'capture', target: 'status LEDs', source: 'environment' },
+      target: { deviceRef: device.deviceRef }
+    });
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      inputReceivedEvent(parent.sessionId, 'diagnose-replay', 'Scan the target device.', { deviceRef: device.deviceRef }),
+      clientContext
+    );
+    await waitFor(async () => {
+      const [delegation] = await storage.readDelegations();
+      return delegation?.calls.some((call) => call.status === 'active' && call.dispatch?.childTurnSeq !== undefined) ?? false;
+    }, 'delegated child call to start');
+
+    const [delegation] = await storage.readDelegations();
+    const activeCall = delegation?.calls.find((call) => call.status === 'active');
+    const child = delegation ? await storage.readSession(delegation.childSessionId) : undefined;
+    assert.ok(activeCall?.dispatch?.childTurnSeq);
+    assert.ok(child?.currentWorkerId);
+    assert.ok(child.sessionLeaseId);
+
+    const resultEvent: RuntimeEvent = {
+      eventId: 'stable-child-result-event',
+      type: 'turn.completed',
+      timestamp: new Date().toISOString(),
+      actor: 'sidecar',
+      sequence: child.eventCursor + 1,
+      sessionId: child.sessionId,
+      workerId: child.currentWorkerId,
+      sessionLeaseId: child.sessionLeaseId,
+      turnSeq: activeCall.dispatch.childTurnSeq,
+      payload: { result: { message: '{"kind":"device-evidence","status":"completed"}' } }
+    };
+    // Fault injection: model a crash after the append reached durable storage but before the Session cursor,
+    // DelegationCall projection, or worker acknowledgement was persisted/delivered.
+    await storage.appendEvent(resultEvent);
+    const acknowledgements: RuntimeEvent[] = [];
+    const ackSubscription = await runtimeTransport.subscribe(
+      { kind: 'worker-commands', workerId: child.currentWorkerId },
+      async ({ event }) => {
+        if (event.type === 'worker.result.acknowledged') acknowledgements.push(event);
+      }
+    );
+
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      resultEvent,
+      { principal: { principalId: child.currentWorkerId, type: 'service' as const } }
+    );
+    const parentResult = await withTimeout(parentAgent.toolResponses[0], 5000, 'replayed child result');
+    assert.match((parentResult as { result?: string }).result ?? '', /device-evidence/);
+    assert.equal((await storage.readSession(child.sessionId))?.eventCursor, resultEvent.sequence);
+    assert.equal(acknowledgements.length, 1);
+    assert.equal((acknowledgements[0].payload as { resultEventId: string }).resultEventId, resultEvent.eventId);
+
+    // A later network retry is harmless: projection remains terminal/idempotent and Central acknowledges again.
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      resultEvent,
+      { principal: { principalId: child.currentWorkerId, type: 'service' as const } }
+    );
+    const replayedDelegation = await storage.readDelegation(delegation!.delegationId);
+    assert.equal(replayedDelegation?.calls.filter((call) => call.status === 'completed').length, 1);
+    assert.equal(acknowledgements.length, 2);
+
+    await ackSubscription.close();
+    await parentSidecar.stop();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('scenario: a targeted device lost mid-scan fails the child deterministically, unblocks the parent, and a retry routes to the same rejoined device', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-delegation-reconnect-'));
@@ -1033,6 +1246,95 @@ test('scenario: target all fans one child out to every rostered device and aggre
     // The unrelated device C (on case 2) never received any work.
     const cAfter = await storage.readWorker(deviceC.workerId);
     assert.equal(cAfter?.currentSessionCount, 0);
+
+    await runtimeA.stop();
+    await runtimeB.stop();
+    await parentSidecar.stop();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scenario: a settled fan-out stays pending while the parent has no worker and is delivered after the parent returns', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-delegation-fanout-delivery-retry-'));
+  try {
+    const runtimeTransport = new InMemoryRuntimeTransportAdapter();
+    const storage = new LocalFileStorage(root);
+    const central = new CentralService({ storage, eventTransport: runtimeTransport, connectionIssuer: runtimeTransport });
+    await central.start();
+
+    const parentGrant = await central.negotiateSidecarConnectionForTenant('poc', parentContext, parentWorkerRegistration());
+    const parentWorker = parentGrant.worker;
+    assert.ok(parentWorker);
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      workerHeartbeatEvent(parentWorker.workerId),
+      { principal: { principalId: parentWorker.workerId, type: 'service' as const } }
+    );
+
+    const captureTask = { task: 'capture', target: 'status LEDs', source: 'environment', detect: ['led-indicator'] };
+    const turnSpecs: { task: unknown; target?: unknown }[] = [{ task: captureTask }];
+    const parentAgent = new MultiTargetCaptureAgentProcessAdapter(turnSpecs, 1);
+    const parentSidecar = new SidecarDaemon({
+      runtimeTransport: new SidecarInMemoryTransport(runtimeTransport),
+      workspaceAdapter: new PassthroughWorkspaceAdapter(),
+      agentProcessAdapter: parentAgent
+    });
+    await parentSidecar.subscribeWorkerCommands(parentWorker.workerId);
+
+    await runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      sessionCreateEvent('network-recovery-expert', 'Open a recovery ticket.'),
+      clientContext
+    );
+    const parent = (await storage.readSessions()).find((session) => session.resolvedAgentSpec.agentSpecId === 'network-recovery-expert');
+    assert.ok(parent);
+
+    const deviceA = await enrollBoundDevice(central, storage, runtimeTransport, parent.sessionId, 'device-A', 'iOS device', 'edge-A');
+    const deviceB = await enrollBoundDevice(central, storage, runtimeTransport, parent.sessionId, 'device-B', 'Android device', 'edge-B');
+    let releaseCaptures!: () => void;
+    const captureGate = new Promise<void>((resolve) => { releaseCaptures = resolve; });
+    const runtimeA = edgeRuntimeFor(runtimeTransport);
+    const runtimeB = edgeRuntimeWaitingOn(runtimeTransport, captureGate);
+    await runtimeA.connectWithGrant(deviceA.grant);
+    await runtimeB.connectWithGrant(deviceB.grant);
+    await settle();
+
+    const inputDelivery = runtimeTransport.publish(
+      { kind: 'tenant-inbox' },
+      inputReceivedEvent(parent.sessionId, 'diagnose-all', 'Scan both devices.', {
+        deviceRefs: [deviceA.deviceRef, deviceB.deviceRef]
+      }),
+      clientContext
+    );
+    await waitFor(
+      async () => (await storage.readSessions()).filter((session) =>
+        session.resolvedAgentSpec.agentSpecId === 'device-scan-probe'
+        && session.delegationBinding?.parentSessionId === parent.sessionId).length === 2,
+      'both fan-out children to start'
+    );
+
+    const beforeWorkerLoss = await storage.readSession(parent.sessionId);
+    assert.ok(beforeWorkerLoss?.currentWorkerId);
+    await storage.writeSession({ ...beforeWorkerLoss, currentWorkerId: undefined });
+    releaseCaptures();
+
+    await waitFor(async () => {
+      const [group] = await storage.readFanoutGroups();
+      return group?.status === 'settled' && group.deliveryStatus === 'pending';
+    }, 'settled aggregate to remain pending without a parent worker');
+
+    const workerless = await storage.readSession(parent.sessionId);
+    assert.ok(workerless);
+    await storage.writeSession({ ...workerless, currentWorkerId: parentWorker.workerId });
+    await central.reconcileSessionsForTenant('poc');
+
+    const aggregateResult = await withTimeout(parentAgent.toolResponses[0], 8000, 'retried fan-out aggregate delivery');
+    await inputDelivery;
+    const aggregate = JSON.parse((aggregateResult as { result?: string }).result ?? '{}');
+    assert.deepEqual(aggregate.summary, { total: 2, completed: 2, failed: 0 });
+    const [delivered] = await storage.readFanoutGroups();
+    assert.equal(delivered?.deliveryStatus, 'delivered');
 
     await runtimeA.stop();
     await runtimeB.stop();

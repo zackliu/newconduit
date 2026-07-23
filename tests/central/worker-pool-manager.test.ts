@@ -6,9 +6,10 @@ import { test } from 'node:test';
 import { InMemoryRuntimeTransportAdapter } from '../../src/central/adapters';
 import { CentralService } from '../../src/central/central-service';
 import { LocalFileStorage } from '../../src/central/storage/local-file-storage';
-import type { Clock, HostPoolInstanceRecord, RuntimeEvent, WorkerPoolRecord, WorkerRecord } from '../../src/shared';
-import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS } from '../support/config-fixtures';
-import type { HostPoolAdapter, HostPoolEnsureRunningInput, HostPoolEnsureRunningResult, HostPoolEnsureStoppedInput } from '../../src/central/managers';
+import type { Clock, HostPoolInstanceRecord, RuntimeEvent, SessionRecord, WorkerPoolRecord, WorkerRecord } from '../../src/shared';
+import { COPILOT_STORAGE_CLASS, COPILOT_WORKER_LABELS, POC_AGENT_SPEC } from '../support/config-fixtures';
+import { AgentSpecAdmissionManager, WorkerPoolManager } from '../../src/central/managers';
+import type { HostPoolAdapter, HostPoolEnsureRunningInput, HostPoolEnsureRunningResult, HostPoolEnsureStoppedInput, WorkerManager } from '../../src/central/managers';
 
 class FixedClock implements Clock {
   constructor(private currentTime: string) {}
@@ -127,6 +128,75 @@ test('scenario: queued session causes worker pool to scale out, assign provision
     assert.equal(closedWorker?.lifecycleState, 'closed');
     assert.equal(closedWorker?.terminalReason, 'worker_closed');
   });
+});
+
+test('scenario: a no-reuse Copilot pool provisions one worker per queued console (multi-console capacity)', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-pool-capacity-'));
+  try {
+    const clock = new FixedClock('2026-06-25T00:00:00.000Z');
+    const storage = new LocalFileStorage(root);
+    const adapter = new DeterministicHostPoolAdapter();
+    // The pool manager only touches the worker manager on the report-timeout / fresh-report paths, which this
+    // no-worker scale-out scenario never reaches, so a minimal stand-in keeps the scale decision isolated.
+    const workerManager = { awaitFreshReport: async () => {}, expire: async () => {} } as unknown as WorkerManager;
+    const resolvedAgentSpec = new AgentSpecAdmissionManager(clock).resolve(POC_AGENT_SPEC);
+    const pool: WorkerPoolRecord = {
+      poolId: 'poc-docker-copilot',
+      tenantId: 'poc',
+      template: { labels: COPILOT_WORKER_LABELS, capacity: 1 },
+      hostPoolControllerClass: 'docker',
+      reuse: false,
+      scalePolicy: { scaleOutMaxPendingPerTick: 2, scaleInIdleMs: 5000, workerReportTimeoutMs: 60_000 },
+      centralUrlForWorkers: 'http://host.docker.internal:3000'
+    };
+
+    // Two operator consoles each start their own parent recovery session; both queue for the same Copilot pool.
+    const consoleSession = (sessionId: string): SessionRecord => ({
+      sessionId,
+      tenantId: 'poc',
+      owner: 'operator',
+      resolvedAgentSpec,
+      status: 'queued',
+      sessionLeaseId: undefined,
+      eventCursor: 0,
+      nextTurnSeq: 1,
+      workspaceRef: `workspace-${sessionId}`,
+      lastEventUpdatedAt: clock.now(),
+      createdAt: clock.now(),
+      updatedAt: clock.now()
+    });
+    await storage.writeSession(consoleSession('console-a'));
+    await storage.writeSession(consoleSession('console-b'));
+
+    const manager = new WorkerPoolManager(storage, clock, workerManager, [pool], { docker: adapter }, 'test-controller');
+    await manager.reconcile();
+
+    // The canonical pool scales by unmet PER-SESSION demand: one pinned host-pool instance (→ a real
+    // CopilotProcessAdapter worker) per queued console, NOT a single shared worker. This is what gives a second
+    // console its own real parent capacity without manually launching a process per console.
+    assert.equal(adapter.ensureRunningInputs.length, 2, 'expected one provisioned instance per queued console');
+    const boundSessions = adapter.ensureRunningInputs.map((input) => input.instance.boundSessionId).sort();
+    assert.deepEqual(boundSessions, ['console-a', 'console-b'], 'each instance is pinned to its own console session');
+    assert.notEqual(
+      adapter.ensureRunningInputs[0].instance.instanceId,
+      adapter.ensureRunningInputs[1].instance.instanceId,
+      'each console gets a distinct provisioned host, not one shared worker'
+    );
+    const instances = await storage.readHostPoolInstances();
+    assert.equal(instances.length, 2);
+    assert.ok(instances.every((instance) => instance.state === 'pending' && instance.poolId === 'poc-docker-copilot'));
+    assert.deepEqual(instances.map((instance) => instance.boundSessionId).sort(), ['console-a', 'console-b']);
+
+    // A second reconcile does not double-provision: each queued console already has a pending pinned instance, so no
+    // NEW host is created (the adapter's ensureRunning is idempotently re-invoked for the existing instances, which is
+    // why the instance COUNT — not the raw ensureRunning call count — is the real capacity invariant).
+    await manager.reconcile();
+    const afterSecond = await storage.readHostPoolInstances();
+    assert.equal(afterSecond.length, 2, 'a settled per-session demand is not re-scaled (no new instances)');
+    assert.deepEqual(afterSecond.map((instance) => instance.boundSessionId).sort(), ['console-a', 'console-b']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('scenario: a no-reuse pool pins each instance to its session and retains the durable workspace across an idle pause', async () => {

@@ -6,7 +6,7 @@
  * areas redacted. Nothing here decides *whether* to share; that gate lives in `image-sharing.ts`.
  */
 
-import type { EdgeFrame } from './frame-analyzer';
+import type { EdgeFrame } from './frame-analyzer.js';
 
 export interface PixelRect {
   x: number;

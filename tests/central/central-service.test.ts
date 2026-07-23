@@ -281,6 +281,61 @@ test('scenario: sidecar negotiate creates registered worker truth', async () => 
   }
 });
 
+test('scenario: concurrent client inputs allocate distinct turn sequences', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ars-concurrent-inputs-'));
+  try {
+    const transport = new InMemoryRuntimeTransportAdapter();
+    const storage = new LocalFileStorage(root);
+    const central = new CentralService({ storage, eventTransport: transport, connectionIssuer: transport });
+    const now = new Date().toISOString();
+    await storage.createSession({
+      sessionId: 'concurrent-case',
+      tenantId: 'poc',
+      owner: 'operator',
+      resolvedAgentSpec: new AgentSpecAdmissionManager({ now: () => now }).resolve(POC_AGENT_SPEC),
+      status: 'running',
+      eventCursor: 0,
+      nextTurnSeq: 1,
+      workspaceRef: 'ws-concurrent-case',
+      lastEventUpdatedAt: now,
+      createdAt: now,
+      updatedAt: now
+    });
+    await central.start();
+    const context = {
+      principal: { principalId: 'operator', type: 'user' as const },
+      connectionId: 'operator-connection'
+    };
+    const input = (id: string, message: string): RuntimeEvent => ({
+      eventId: id,
+      ackId: `ack-${id}`,
+      sessionId: 'concurrent-case',
+      sequence: 0,
+      type: 'input.received',
+      timestamp: now,
+      actor: 'client',
+      payload: { input: { message, delegationTarget: { deviceRef: `device-${id}` } } }
+    });
+
+    await Promise.all([
+      transport.publish({ kind: 'tenant-inbox' }, input('one', 'first'), context),
+      transport.publish({ kind: 'tenant-inbox' }, input('two', 'second'), context)
+    ]);
+
+    const accepted = (await storage.readEvents('concurrent-case', 0))
+      .filter((event) => event.type === 'input.accepted')
+      .sort((left, right) => left.turnSeq! - right.turnSeq!);
+    assert.deepEqual(accepted.map((event) => event.turnSeq), [1, 2]);
+    assert.deepEqual(
+      accepted.map((event) => (event.payload as { input: { delegationTarget: { deviceRef: string } } }).input.delegationTarget.deviceRef).sort(),
+      ['device-one', 'device-two']
+    );
+    assert.equal((await storage.readSession('concurrent-case'))?.nextTurnSeq, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('scenario: the case device roster surfaces a paired device before any task and hides other cases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ars-case-roster-'));
   try {
@@ -325,6 +380,37 @@ test('scenario: the case device roster surfaces a paired device before any task 
     assert.equal(devices[0].workerId, paired.workerId);
     // The other case's device is never exposed on this case's roster.
     assert.ok(!devices.some((candidate) => candidate.deviceRef === other.deviceRef));
+
+    const foreignAcknowledgements: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'client-private-inbox', clientConnectionId: 'foreign-conn' }, async (envelope) => {
+      foreignAcknowledgements.push(envelope.event);
+    });
+    const foreignContext = {
+      principal: { principalId: 'other-console', type: 'user' as const },
+      connectionId: 'foreign-conn'
+    };
+    await transport.publish({ kind: 'tenant-inbox' }, {
+      eventId: 'evt-foreign-devices-case-a',
+      ackId: 'ack-foreign-devices-case-a',
+      sequence: 0,
+      type: 'case.devices.requested',
+      timestamp: new Date().toISOString(),
+      actor: 'client',
+      payload: { caseId: 'case-A' }
+    }, foreignContext);
+    await transport.publish({ kind: 'tenant-inbox' }, {
+      eventId: 'evt-foreign-mint-case-a',
+      ackId: 'ack-foreign-mint-case-a',
+      sequence: 0,
+      type: 'case.pairing.mint.requested',
+      timestamp: new Date().toISOString(),
+      actor: 'client',
+      payload: { caseId: 'case-A' }
+    }, foreignContext);
+    for (const response of foreignAcknowledgements) {
+      assert.equal((response.payload as { error: { code: string } }).error.code, 'case_not_found');
+    }
+    assert.equal(foreignAcknowledgements.length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

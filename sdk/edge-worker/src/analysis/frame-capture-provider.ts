@@ -4,10 +4,10 @@ import type {
   CaptureProvider,
   CaptureRequest,
   CaptureSource
-} from './camera-diagnostic-agent';
-import type { EdgeFrame, FrameAnalyzer } from './frame-analyzer';
-import type { DeviceObservation, LocalObserver } from './local-observers';
-import { maybeShareImage, type ImageSharingConfig } from './image-sharing';
+} from './camera-diagnostic-agent.js';
+import type { EdgeFrame, FrameAnalyzer } from './frame-analyzer.js';
+import type { DeviceObservation, LocalObserver } from './local-observers.js';
+import { maybeShareImage, type ImageSharingConfig, type LocalImageShareAuthorization } from './image-sharing.js';
 
 /**
  * Bridges a device-specific frame source (browser camera, sample image, simulated buffer) into a
@@ -22,6 +22,8 @@ export interface CapturedFrame {
   source: CaptureSource;
   sampleSource: 'camera' | 'sample-image' | 'simulated';
   facingMode?: string;
+  /** Local, per-capture approval. A remote `request.share` can request processing but cannot populate this. */
+  imageShareAuthorization?: LocalImageShareAuthorization;
 }
 
 export type FrameProviderResult =
@@ -66,11 +68,11 @@ export function createAnalyzerCaptureProvider(
       if (result.status !== 'captured') {
         return { status: result.status, reason: result.reason };
       }
-      const { frame, source, sampleSource, facingMode } = result.captured;
+      const { frame, source, sampleSource, facingMode, imageShareAuthorization } = result.captured;
       const capturedAt = new Date().toISOString();
       const analysis = analyzer.analyze(frame, { capturedAt });
       const observations = await runObservers(observers, request, frame, capturedAt);
-      const sharedImage = await maybeShareImage(frame, request.share, options.imageSharing);
+      const sharedImage = await maybeShareImage(frame, request.share, imageShareAuthorization, options.imageSharing);
       return {
         status: 'captured',
         source,

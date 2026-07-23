@@ -8,10 +8,15 @@ async function main(): Promise<void> {
   const hostAdapter = resolveSidecarHostAdapter(hostClassId);
   await hostAdapter.run(async (bootstrap: SidecarBootstrap) => {
     const profile = resolveWorkerType(bootstrap.workerTypeId);
+    const agentProcessAdapter = profile.createAgentProcessAdapter();
+    // Merge the concrete runtime's non-secret identity (e.g. real Copilot process + model/provider host) into the
+    // Worker registration description so Central positively records what is behind the Worker, not just its labels.
+    const runtimeIdentity = agentProcessAdapter.describeRuntime?.() ?? {};
+    const description = { ...bootstrap.description, ...runtimeIdentity };
     const daemon = new SidecarDaemon({
       runtimeTransport: new WebPubSubClientAdapter({ tenantId: bootstrap.tenantId }),
       workspaceAdapter: profile.createWorkspaceAdapter({ workRoot: bootstrap.workRoot }),
-      agentProcessAdapter: profile.createAgentProcessAdapter()
+      agentProcessAdapter
     });
     await daemon.startStandaloneWorker({
       centralUrl: bootstrap.centralUrl,
@@ -19,7 +24,7 @@ async function main(): Promise<void> {
       hostPoolInstanceId: bootstrap.hostPoolInstanceId,
       storageClass: profile.storageClass,
       labels: bootstrap.labels,
-      description: bootstrap.description,
+      description: Object.keys(description).length > 0 ? description : undefined,
       capacity: bootstrap.capacity,
       allocatable: bootstrap.capacity
     });

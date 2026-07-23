@@ -6,13 +6,13 @@
  * is bundled.
  */
 
-import type { EdgeFrame } from './frame-analyzer';
+import type { EdgeFrame } from './frame-analyzer.js';
 import type {
   CodeObservation,
   DetectedCode,
   LocalObserver,
   ObserverContext
-} from './local-observers';
+} from './local-observers.js';
 
 export interface CodeScanResult {
   supported: boolean;

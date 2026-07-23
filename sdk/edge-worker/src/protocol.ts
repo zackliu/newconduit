@@ -114,6 +114,11 @@ export interface WorkerHeartbeatRejectedPayload {
   reason: string;
 }
 
+/** Central confirms that the exact durable terminal result event was accepted. */
+export interface WorkerResultAcknowledgedPayload {
+  resultEventId: string;
+}
+
 // ---------------------------------------------------------------------------
 // Commands (central -> worker)
 // ---------------------------------------------------------------------------

@@ -66,6 +66,8 @@ class FakeWebStorage implements WebStorageLike {
 class ScriptableTransport implements EdgeWorkerTransport {
   readonly published: EdgeRuntimeEvent[] = [];
   online = true;
+  autoAcknowledgeResults = true;
+  stopped = false;
   private handler: EdgeRuntimeEventHandler | undefined;
   private readonly connectionListeners = new Set<(state: 'connected' | 'disconnected') => void>();
 
@@ -76,6 +78,9 @@ class ScriptableTransport implements EdgeWorkerTransport {
       throw new Error('transport offline');
     }
     this.published.push(event);
+    if (this.autoAcknowledgeResults && (event.type === 'turn.completed' || event.type === 'turn.failed')) {
+      await this.handler?.(resultAcknowledged(event));
+    }
   }
 
   async subscribe(_channel: EdgeRuntimeChannel, handler: EdgeRuntimeEventHandler): Promise<EdgeWorkerSubscription> {
@@ -83,7 +88,9 @@ class ScriptableTransport implements EdgeWorkerTransport {
     return { close: async () => {} };
   }
 
-  async stop(): Promise<void> {}
+  async stop(): Promise<void> {
+    this.stopped = true;
+  }
 
   onConnectionStateChanged(listener: (state: 'connected' | 'disconnected') => void): void {
     this.connectionListeners.add(listener);
@@ -160,6 +167,35 @@ function inputCmd(sessionId: string, lease: string, turnSeq: number, message: st
   } as EdgeRuntimeEvent;
 }
 
+function pauseCmd(sessionId: string, lease: string, workerId: string): EdgeRuntimeEvent {
+  return {
+    eventId: randomUUID(),
+    type: 'session.pause.requested',
+    timestamp: new Date().toISOString(),
+    actor: 'central',
+    sequence: 0,
+    sessionId,
+    workerId,
+    sessionLeaseId: lease,
+    payload: { sessionId, workerId, sessionLeaseId: lease, reason: 'client_requested' }
+  } as EdgeRuntimeEvent;
+}
+
+function resultAcknowledged(result: EdgeRuntimeEvent): EdgeRuntimeEvent {
+  return {
+    eventId: randomUUID(),
+    type: 'worker.result.acknowledged',
+    timestamp: new Date().toISOString(),
+    actor: 'central',
+    sequence: 0,
+    sessionId: result.sessionId,
+    workerId: result.workerId,
+    sessionLeaseId: result.sessionLeaseId,
+    turnSeq: result.turnSeq,
+    payload: { resultEventId: result.eventId }
+  };
+}
+
 const captureTask = JSON.stringify({ task: 'capture', target: 'router status LEDs', source: 'environment' });
 
 async function settle(): Promise<void> {
@@ -231,6 +267,7 @@ test('weak-network: after a reload the saved result is replayed under a new leas
   await transportA.deliver(inputCmd('sess-1', 'lease-1', 2, captureTask, 'w-A'));
   assert.equal(await runtimeA.pendingResultCount(), 1);
   assert.equal(captureA, 1);
+  transportA.online = true; // allow an orderly worker.close without triggering a result flush
   await runtimeA.stop(); // the tab is closed before it could reconnect
 
   // Tab B: reloaded tab -> new worker + new lease, same durable session + same on-device localStorage queue.
@@ -273,14 +310,16 @@ test('weak-network: after a reload the saved result is replayed under a new leas
  */
 class ReconnectRecordingTransport implements EdgeWorkerTransport {
   connectCount = 0;
+  readonly accessUrls: string[] = [];
   closedSubscriptions = 0;
   readonly subscribedWorkerIds: string[] = [];
   readonly heartbeats: EdgeRuntimeEvent[] = [];
   online = true;
   private handler: EdgeRuntimeEventHandler | undefined;
 
-  async connect(): Promise<void> {
+  async connect(accessUrl: string): Promise<void> {
     this.connectCount++;
+    this.accessUrls.push(accessUrl);
   }
 
   async publish(_channel: EdgeRuntimeChannel, event: EdgeRuntimeEvent): Promise<void> {
@@ -311,9 +350,9 @@ class ReconnectRecordingTransport implements EdgeWorkerTransport {
   }
 }
 
-function grantFor(workerId: string, labels: Record<string, string>): RuntimeConnectionGrant {
+function grantFor(workerId: string, labels: Record<string, string>, url = 'mem://central'): RuntimeConnectionGrant {
   return {
-    url: 'mem://central',
+    url,
     worker: {
       workerId,
       tenantId: 'poc',
@@ -345,18 +384,20 @@ test('reconnect: a rejected heartbeat re-registers a fresh worker under the same
   const negotiator = async (input: EdgeWorkerRegistration): Promise<RuntimeConnectionGrant> => {
     negotiated.push(input);
     issued++;
-    return grantFor(`w-${issued}`, input.labels);
+    return grantFor(`w-${issued}`, input.labels, `mem://central/grant-${issued}`);
   };
   const events: EdgeWorkerLifecycleEvent[] = [];
+  const stoppedSessions: string[] = [];
   const runtime = new EdgeWorkerRuntime({
     transport,
-    agent: new CameraDiagnosticAgent({
-      captureProvider: createAnalyzerCaptureProvider(new CanvasHeuristicAnalyzer(), async (request) => ({
-        status: 'captured',
-        captured: { frame: warmFrame(), source: request.source, sampleSource: 'simulated', facingMode: request.source }
-      })),
-      manifestProvider: () => MANIFEST
-    }),
+    agent: {
+      start: async () => undefined,
+      stop: async ({ sessionId }) => {
+        stoppedSessions.push(sessionId);
+        throw new Error('simulated teardown failure');
+      },
+      runTurn: async () => ({ message: 'structured result', output: { kind: 'device-evidence' } })
+    },
     observer: (event) => events.push(event),
     negotiator
   });
@@ -375,6 +416,11 @@ test('reconnect: a rejected heartbeat re-registers a fresh worker under the same
   assert.equal(transport.connectCount, 1);
   assert.deepEqual(transport.subscribedWorkerIds, ['w-1']);
 
+  await transport.deliver(assignCmd('sess-replaced', 'lease-1', 'w-1'));
+  await transport.deliver(inputCmd('sess-replaced', 'lease-1', 1, captureTask, 'w-1'));
+  await settle();
+  assert.equal(await runtime.pendingResultCount(), 1);
+
   // The tab was suspended past its keepalive TTL; central rejects the resume heartbeat because w-1 is dead.
   await transport.deliver(heartbeatRejected('w-1', 'worker-expired'));
   await settle();
@@ -384,8 +430,10 @@ test('reconnect: a rejected heartbeat re-registers a fresh worker under the same
   assert.equal(negotiated.length, 2);
   assert.deepEqual(negotiated[1].labels, registration.labels);
 
-  // The transport was NOT reconnected; only the worker identity/subscription/heartbeat rotated.
-  assert.equal(transport.connectCount, 1);
+  // The fresh grant carries a fresh short-lived access URL, so the transport reconnects before subscribing
+  // the new worker command channel. Reusing the old grant would leave the new worker unauthorized.
+  assert.equal(transport.connectCount, 2);
+  assert.deepEqual(transport.accessUrls, ['mem://central/grant-1', 'mem://central/grant-2']);
   assert.deepEqual(transport.subscribedWorkerIds, ['w-1', 'w-2']);
   assert.equal(transport.closedSubscriptions, 1);
 
@@ -394,8 +442,112 @@ test('reconnect: a rejected heartbeat re-registers a fresh worker under the same
   const registered = events.filter((event) => event.type === 'registered');
   assert.equal(registered.length, 2);
   assert.equal((registered[1] as { type: 'registered'; worker: WorkerRecord }).worker.workerId, 'w-2');
+  assert.deepEqual(stoppedSessions, ['sess-replaced']);
+  assert.equal(await runtime.pendingResultCount(), 0);
+  assert.ok(events.some((event) => event.type === 'error' && event.message.includes('worker identity was replaced')));
+  assert.ok(events.some((event) => event.type === 'error' && event.message.includes('simulated teardown failure')));
 
   await runtime.stop();
+});
+
+test('shutdown: an agent teardown failure is surfaced without blocking subscription and transport cleanup', async () => {
+  const transport = new ScriptableTransport();
+  const events: EdgeWorkerLifecycleEvent[] = [];
+  const runtime = new EdgeWorkerRuntime({
+    transport,
+    agent: {
+      runTurn: async () => ({ message: 'unused' }),
+      stop: async () => { throw new Error('simulated shutdown teardown failure'); }
+    },
+    observer: (event) => events.push(event)
+  });
+  await runtime.connectWithGrant(grant('w-shutdown-failure'));
+  await transport.deliver(assignCmd('sess-shutdown-failure', 'lease-shutdown-failure', 'w-shutdown-failure'));
+
+  await runtime.stop();
+
+  assert.equal(transport.stopped, true);
+  assert.ok(events.some((event) => event.type === 'error' && event.message.includes('simulated shutdown teardown failure')));
+  assert.ok(events.some((event) => event.type === 'stopped'));
+});
+
+test('pause: an unacknowledged terminal result is discarded after agent teardown instead of orphaning the durable queue', async () => {
+  const transport = new ScriptableTransport();
+  transport.autoAcknowledgeResults = false;
+  const events: EdgeWorkerLifecycleEvent[] = [];
+  const stoppedSessions: string[] = [];
+  const runtime = new EdgeWorkerRuntime({
+    transport,
+    agent: {
+      stop: async ({ sessionId }) => { stoppedSessions.push(sessionId); },
+      runTurn: async () => ({ message: 'structured result', output: { kind: 'device-evidence' } })
+    },
+    observer: (event) => events.push(event)
+  });
+  await runtime.connectWithGrant(grant('w-pause'));
+  await transport.deliver(assignCmd('sess-pause', 'lease-pause', 'w-pause'));
+  await transport.deliver(inputCmd('sess-pause', 'lease-pause', 1, captureTask, 'w-pause'));
+  await settle();
+  assert.equal(await runtime.pendingResultCount(), 1);
+
+  await transport.deliver(pauseCmd('sess-pause', 'lease-pause', 'w-pause'));
+
+  assert.deepEqual(stoppedSessions, ['sess-pause']);
+  assert.equal(await runtime.pendingResultCount(), 0);
+  assert.ok(events.some((event) => event.type === 'error' && event.message.includes('session was paused')));
+  await runtime.stop();
+});
+
+test('weak-network: a published result stays queued until Central acknowledges its stable event id', async () => {
+  const transport = new ScriptableTransport();
+  transport.autoAcknowledgeResults = false;
+  const runtime = new EdgeWorkerRuntime({
+    transport,
+    agent: new CameraDiagnosticAgent({
+      captureProvider: createAnalyzerCaptureProvider(new CanvasHeuristicAnalyzer(), async (request) => ({
+        status: 'captured',
+        captured: { frame: warmFrame(), source: request.source, sampleSource: 'simulated', facingMode: request.source }
+      })),
+      manifestProvider: () => MANIFEST
+    })
+  });
+  await runtime.connectWithGrant(grant('w-ack'));
+  await transport.deliver(assignCmd('sess-ack', 'lease-ack', 'w-ack'));
+  await transport.deliver(inputCmd('sess-ack', 'lease-ack', 1, captureTask, 'w-ack'));
+
+  const first = transport.completed()[0];
+  assert.ok(first);
+  assert.equal(await runtime.pendingResultCount(), 1, 'transport publish is not an application-level acknowledgement');
+
+  await runtime.flushPendingResults();
+  const retried = transport.completed()[1];
+  assert.ok(retried);
+  assert.equal(retried.eventId, first.eventId, 'every retry must preserve the same durable result event id');
+  assert.equal(await runtime.pendingResultCount(), 1);
+
+  await transport.deliver(resultAcknowledged(retried));
+  assert.equal(await runtime.pendingResultCount(), 0);
+  await runtime.stop();
+});
+
+test('shutdown: an orderly stop asks Central to close the active worker before disconnecting', async () => {
+  const transport = new ScriptableTransport();
+  const runtime = new EdgeWorkerRuntime({
+    transport,
+    agent: new CameraDiagnosticAgent({
+      captureProvider: createAnalyzerCaptureProvider(new CanvasHeuristicAnalyzer(), async (request) => ({
+        status: 'captured',
+        captured: { frame: warmFrame(), source: request.source, sampleSource: 'simulated', facingMode: request.source }
+      })),
+      manifestProvider: () => MANIFEST
+    })
+  });
+  await runtime.connectWithGrant(grant('w-close'));
+  await runtime.stop();
+
+  const close = transport.published.find((event) => event.type === 'worker.close.requested');
+  assert.equal(close?.workerId, 'w-close');
+  assert.deepEqual(close?.payload, { workerId: 'w-close' });
 });
 
 test('reconnect: a grant-only connect with no stored registration surfaces an honest disconnect on rejection instead of looking healthy', async () => {

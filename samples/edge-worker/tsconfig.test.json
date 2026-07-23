@@ -9,5 +9,5 @@
     "esModuleInterop": true,
     "types": ["node"]
   },
-  "include": ["src/ui.ts", "test/**/*.ts"]
+  "include": ["src/camera.ts", "src/ui.ts", "test/**/*.ts"]
 }

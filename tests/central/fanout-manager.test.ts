@@ -23,16 +23,18 @@ async function withManager(run: (manager: FanoutManager, storage: LocalFileStora
 
 test('scenario: a fan-out group settles only once every member call terminalizes', async () => {
   await withManager(async (manager) => {
-    await manager.openGroup({
+    const opened = await manager.openGroup({
       parentSessionId: 'parent-1',
       parentTurnSeq: 4,
       parentRequestId: 'req-1',
       caseId: 'parent-1',
-      members: [
-        { deviceRef: 'ref-a', delegationCallId: 'call-a' },
-        { deviceRef: 'ref-b', delegationCallId: 'call-b' }
-      ]
+      delegateId: 'scan-device',
+      input: 'scan lights',
+      deviceRefs: ['ref-a', 'ref-b']
     });
+    assert.equal(opened.created, true);
+    await manager.attachMemberCall(opened.group.groupId, 'ref-a', 'call-a');
+    await manager.attachMemberCall(opened.group.groupId, 'ref-b', 'call-b');
 
     const first = await manager.recordOutcome('call-a', { status: 'completed', result: '{"led":"green"}' });
     assert.equal(first?.settledAggregate, undefined, 'group is not settled while a sibling is still pending');
@@ -48,21 +50,25 @@ test('scenario: a fan-out group settles only once every member call terminalizes
       [{ deviceRef: 'ref-a', status: 'completed' }, { deviceRef: 'ref-b', status: 'completed' }]
     );
     assert.deepEqual(aggregate.devices[0].observation, { led: 'green' });
+    assert.equal(second!.group.deliveryStatus, 'pending');
+    const delivered = await manager.markDelivered(second!.group.groupId);
+    assert.equal(delivered.deliveryStatus, 'delivered');
   });
 });
 
 test('scenario: a partial failure is reported honestly and settlement is idempotent', async () => {
   await withManager(async (manager) => {
-    await manager.openGroup({
+    const opened = await manager.openGroup({
       parentSessionId: 'parent-1',
       parentTurnSeq: 4,
       parentRequestId: 'req-1',
       caseId: 'parent-1',
-      members: [
-        { deviceRef: 'ref-a', delegationCallId: 'call-a' },
-        { deviceRef: 'ref-b', delegationCallId: 'call-b' }
-      ]
+      delegateId: 'scan-device',
+      input: 'scan lights',
+      deviceRefs: ['ref-a', 'ref-b']
     });
+    await manager.attachMemberCall(opened.group.groupId, 'ref-a', 'call-a');
+    await manager.attachMemberCall(opened.group.groupId, 'ref-b', 'call-b');
 
     await manager.recordOutcome('call-a', { status: 'completed', result: '{"led":"green"}' });
     const settled = await manager.recordOutcome('call-b', { status: 'failed', code: 'child_session_lost', message: 'device dropped mid-scan' });
@@ -83,5 +89,33 @@ test('scenario: recording an outcome for an unknown member call is a no-op', asy
   await withManager(async (manager) => {
     const result = await manager.recordOutcome('call-missing', { status: 'completed', result: '{}' });
     assert.equal(result, undefined);
+  });
+});
+
+test('scenario: redelivery keeps the first durable fan-out membership immutable', async () => {
+  await withManager(async (manager) => {
+    const first = await manager.openGroup({
+      parentSessionId: 'parent-1',
+      parentTurnSeq: 4,
+      parentRequestId: 'req-1',
+      caseId: 'parent-1',
+      delegateId: 'scan-device',
+      input: 'scan lights',
+      deviceRefs: ['ref-a']
+    });
+    const replay = await manager.openGroup({
+      parentSessionId: 'parent-1',
+      parentTurnSeq: 4,
+      parentRequestId: 'req-1',
+      caseId: 'parent-1',
+      delegateId: 'scan-device',
+      input: 'scan lights',
+      deviceRefs: ['ref-a', 'newly-paired-ref-b']
+    });
+
+    assert.equal(first.created, true);
+    assert.equal(replay.created, false);
+    assert.equal(replay.group.groupId, first.group.groupId);
+    assert.deepEqual(replay.group.members.map((member) => member.deviceRef), ['ref-a']);
   });
 });

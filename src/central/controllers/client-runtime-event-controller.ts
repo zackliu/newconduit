@@ -54,13 +54,13 @@ export class ClientRuntimeEventController {
       }
       case 'case.pairing.mint.requested': {
         const caseId = this.parseCaseId(event.payload);
-        const payload = await this.mintPairingPayload(caseId);
+        const payload = await this.mintPairingPayload(context, caseId);
         await this.publishCaseResponse(context, event.ackId, 'case.pairing.minted', payload);
         return true;
       }
       case 'case.devices.requested': {
         const caseId = this.parseCaseId(event.payload);
-        const payload = await this.listCaseDevicesPayload(caseId);
+        const payload = await this.listCaseDevicesPayload(context, caseId);
         await this.publishCaseResponse(context, event.ackId, 'case.devices.provided', payload);
         return true;
       }
@@ -151,8 +151,9 @@ export class ClientRuntimeEventController {
     return context.connectionId;
   }
 
-  private async mintPairingPayload(caseId: string): Promise<Record<string, unknown>> {
+  private async mintPairingPayload(context: RequestContext, caseId: string): Promise<Record<string, unknown>> {
     try {
+      await this.casePairingManager.authorizeCaseAccess(caseId, context.principal.principalId);
       const result = await this.casePairingManager.mintPairingInvite(caseId);
       return { caseId, invite: result };
     } catch (error) {
@@ -160,8 +161,9 @@ export class ClientRuntimeEventController {
     }
   }
 
-  private async listCaseDevicesPayload(caseId: string): Promise<Record<string, unknown>> {
+  private async listCaseDevicesPayload(context: RequestContext, caseId: string): Promise<Record<string, unknown>> {
     try {
+      await this.casePairingManager.authorizeCaseAccess(caseId, context.principal.principalId);
       const devices = await this.casePairingManager.listCaseDevices(caseId);
       return { caseId, devices };
     } catch (error) {

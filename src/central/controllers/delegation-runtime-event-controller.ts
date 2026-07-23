@@ -45,13 +45,19 @@ export class DelegationRuntimeEventController {
       return;
     }
     if (event.type === 'turn.completed' && event.turnSeq !== undefined) {
+      const delegation = await this.storage.readDelegation(session.delegationBinding.delegationId);
+      const existingCall = delegation?.calls.find((call) => call.dispatch?.childTurnSeq === event.turnSeq);
       let callId: string | undefined;
-      try {
-        callId = (await this.delegationManager.completeTurn(session.sessionId, event.turnSeq, this.completedMessage(event.payload))).delegationCallId;
-      } catch (error) {
-        await this.delegationManager.failTurn(session.sessionId, event.turnSeq, error instanceof Error ? error.message : String(error));
-        const active = (await this.storage.readDelegation(session.delegationBinding.delegationId))?.calls.find((call) => call.dispatch?.childTurnSeq === event.turnSeq);
-        callId = active?.delegationCallId;
+      if (existingCall?.status === 'completed' || existingCall?.status === 'failed') {
+        callId = existingCall.delegationCallId;
+      } else {
+        try {
+          callId = (await this.delegationManager.completeTurn(session.sessionId, event.turnSeq, this.completedMessage(event.payload))).delegationCallId;
+        } catch (error) {
+          await this.delegationManager.failTurn(session.sessionId, event.turnSeq, error instanceof Error ? error.message : String(error));
+          const active = (await this.storage.readDelegation(session.delegationBinding.delegationId))?.calls.find((call) => call.dispatch?.childTurnSeq === event.turnSeq);
+          callId = active?.delegationCallId;
+        }
       }
       if (callId) {
         await this.progressRelation(session.delegationBinding.delegationId);
@@ -61,11 +67,14 @@ export class DelegationRuntimeEventController {
       return;
     }
     if (event.type === 'turn.failed' && event.turnSeq !== undefined) {
-      const active = (await this.storage.readDelegation(session.delegationBinding.delegationId))?.calls.find((call) => call.dispatch?.childTurnSeq === event.turnSeq);
-      await this.delegationManager.failTurn(session.sessionId, event.turnSeq, this.failureMessage(event.payload));
-      if (active) {
-        await this.deliverAwaitResponses(active.delegationCallId);
-        await this.deliverFanoutMember(active.delegationCallId);
+      const delegation = await this.storage.readDelegation(session.delegationBinding.delegationId);
+      const call = delegation?.calls.find((candidate) => candidate.dispatch?.childTurnSeq === event.turnSeq);
+      if (call?.status !== 'completed' && call?.status !== 'failed') {
+        await this.delegationManager.failTurn(session.sessionId, event.turnSeq, this.failureMessage(event.payload));
+      }
+      if (call) {
+        await this.deliverAwaitResponses(call.delegationCallId);
+        await this.deliverFanoutMember(call.delegationCallId);
       }
     }
   }
@@ -103,18 +112,8 @@ export class DelegationRuntimeEventController {
         }
       }
     }
-    // Recover fan-out members whose terminal outcome (including a lost paired device) never reached the group — e.g.
-    // after a central restart mid-fan-out — so the parent's one aggregated tool response is still delivered exactly
-    // once when every member has settled.
     for (const group of await this.storage.readFanoutGroups()) {
-      if (group.status === 'settled') {
-        continue;
-      }
-      for (const member of group.members) {
-        if (member.status === 'pending') {
-          await this.deliverFanoutMember(member.delegationCallId);
-        }
-      }
+      await this.progressFanoutGroup(group.groupId);
     }
   }
 
@@ -187,6 +186,11 @@ export class DelegationRuntimeEventController {
     targetSpec: Extract<TargetSpec, { kind: 'fanout' }>
   ): Promise<void> {
     const turnSeq = this.requireTurnSeq(event);
+    const existing = await this.fanoutManager.readGroupByRequest(parent.sessionId, payload.requestId);
+    if (existing) {
+      await this.progressFanoutGroup(existing.groupId);
+      return;
+    }
     let deviceRefs: string[];
     try {
       deviceRefs = await this.resolveFanoutDeviceRefs(parent, targetSpec);
@@ -198,41 +202,16 @@ export class DelegationRuntimeEventController {
       await this.publishToolResponse(parent, payload.requestId, 'Subagent failed [delegation_rejected]: no devices are paired to this case to scan');
       return;
     }
-    const members: { deviceRef: string; delegationCallId: string }[] = [];
-    const preFailed: { deviceRef: string; delegationCallId: string; message: string }[] = [];
-    const startedDelegationIds = new Set<string>();
-    for (const deviceRef of deviceRefs) {
-      try {
-        const started = await this.delegationManager.startCall({
-          parentSession: parent,
-          callerTurnSeq: turnSeq,
-          callerToolRequestId: `${payload.requestId}#${deviceRef}`,
-          delegateId,
-          input: message,
-          targetRef: deviceRef
-        });
-        members.push({ deviceRef, delegationCallId: started.call.delegationCallId });
-        startedDelegationIds.add(started.delegation.delegationId);
-      } catch (error) {
-        preFailed.push({ deviceRef, delegationCallId: `prefail:${payload.requestId}#${deviceRef}`, message: error instanceof Error ? error.message : String(error) });
-      }
-    }
-    await this.fanoutManager.openGroup({
+    const opened = await this.fanoutManager.openGroup({
       parentSessionId: parent.sessionId,
       parentTurnSeq: turnSeq,
       parentRequestId: payload.requestId,
       caseId: parent.sessionId,
-      members: [...members, ...preFailed.map((entry) => ({ deviceRef: entry.deviceRef, delegationCallId: entry.delegationCallId }))]
+      delegateId,
+      input: message,
+      deviceRefs
     });
-    for (const entry of preFailed) {
-      await this.settleFanoutMember(entry.delegationCallId, { status: 'failed', code: 'delegation_rejected', message: entry.message });
-    }
-    for (const delegationId of startedDelegationIds) {
-      await this.progressRelation(delegationId);
-    }
-    for (const member of members) {
-      await this.deliverFanoutMember(member.delegationCallId);
-    }
+    await this.progressFanoutGroup(opened.group.groupId);
   }
 
   private async deliverAwaitResponses(delegationCallId: string): Promise<void> {
@@ -271,13 +250,71 @@ export class DelegationRuntimeEventController {
 
   private async settleFanoutMember(delegationCallId: string, outcome: Parameters<FanoutManager['recordOutcome']>[1]): Promise<void> {
     const settled = await this.fanoutManager.recordOutcome(delegationCallId, outcome);
-    if (!settled?.settledAggregate) {
+    if (!settled) {
       return;
     }
-    const parent = await this.storage.readSession(settled.group.parentSessionId);
-    if (parent?.currentWorkerId && parent.sessionLeaseId) {
-      await this.publishToolResponse(parent, settled.group.parentRequestId, settled.settledAggregate);
+    await this.deliverFanoutResult(settled.group.groupId);
+  }
+
+  private async progressFanoutGroup(groupId: string): Promise<void> {
+    let group = await this.storage.readFanoutGroup(groupId);
+    if (!group) {
+      return;
     }
+    if (group.status === 'open') {
+      const parent = await this.storage.readSession(group.parentSessionId);
+      if (!parent) {
+        return;
+      }
+      for (const member of group.members.filter((candidate) => candidate.status === 'starting')) {
+        try {
+          const started = await this.delegationManager.startCall({
+            parentSession: parent,
+            callerTurnSeq: group.parentTurnSeq,
+            callerToolRequestId: `${group.parentRequestId}#${member.deviceRef}`,
+            delegateId: group.delegateId,
+            input: group.input,
+            targetRef: member.deviceRef
+          });
+          await this.fanoutManager.attachMemberCall(group.groupId, member.deviceRef, started.call.delegationCallId);
+          await this.progressRelation(started.delegation.delegationId);
+        } catch (error) {
+          await this.fanoutManager.recordStartupFailure(
+            group.groupId,
+            member.deviceRef,
+            'delegation_rejected',
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      }
+      group = await this.storage.readFanoutGroup(groupId) ?? group;
+      for (const member of group.members) {
+        if (member.status === 'pending' && member.delegationCallId) {
+          await this.deliverFanoutMember(member.delegationCallId);
+        }
+      }
+    }
+    await this.deliverFanoutResult(groupId);
+  }
+
+  private async deliverFanoutResult(groupId: string): Promise<void> {
+    const group = await this.storage.readFanoutGroup(groupId);
+    if (!group || group.status !== 'settled' || group.deliveryStatus === 'delivered' || group.aggregate === undefined) {
+      return;
+    }
+    const parent = await this.storage.readSession(group.parentSessionId);
+    if (!parent) {
+      return;
+    }
+    if (this.isTerminalSession(parent.status)) {
+      await this.fanoutManager.markDelivered(group.groupId);
+      return;
+    }
+    if (!parent.currentWorkerId || !parent.sessionLeaseId) {
+      return;
+    }
+    await this.publishToolResponse(parent, group.parentRequestId, group.aggregate);
+    await this.fanoutManager.markDelivered(group.groupId);
   }
 
   private async publishDispatch(dispatch: Awaited<ReturnType<DelegationDispatcher['dispatchNext']>>): Promise<void> {

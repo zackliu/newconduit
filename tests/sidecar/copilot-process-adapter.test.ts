@@ -83,6 +83,40 @@ class FakeCopilotClient {
   }
 }
 
+test('scenario: Copilot client is stopped when session configuration fails after process startup', async () => {
+  FakeCopilotClient.instances.length = 0;
+  const originalModel = process.env.COPILOT_MODEL;
+  const originalProviderType = process.env.COPILOT_PROVIDER_TYPE;
+  const originalProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  delete process.env.COPILOT_MODEL;
+  process.env.COPILOT_PROVIDER_TYPE = 'azure';
+  process.env.COPILOT_PROVIDER_BASE_URL = 'https://example.openai.azure.com';
+
+  const adapter = new CopilotProcessAdapter(async () => ({
+    CopilotClient: FakeCopilotClient,
+    RuntimeConnection: {
+      forStdio: (input: { path: string }) => ({ kind: 'stdio', ...input }),
+      forTcp: (input?: { path?: string }) => ({ kind: 'tcp', ...input })
+    },
+    approveAll: async () => true
+  }));
+
+  try {
+    await assert.rejects(
+      adapter.start(startInput()),
+      /COPILOT_MODEL is required when COPILOT_PROVIDER_BASE_URL is set/
+    );
+    const [client] = FakeCopilotClient.instances;
+    assert.ok(client);
+    assert.equal(client.started, true);
+    assert.equal(client.stopped, true);
+  } finally {
+    restoreEnv('COPILOT_MODEL', originalModel);
+    restoreEnv('COPILOT_PROVIDER_TYPE', originalProviderType);
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalProviderBaseUrl);
+  }
+});
+
 test('scenario: Copilot provider env is passed to SDK with Azure Identity bearer token', async () => {
   FakeCopilotClient.instances.length = 0;
   const requestedScopes: string[] = [];
@@ -157,6 +191,125 @@ test('scenario: Copilot provider env is passed to SDK with Azure Identity bearer
     restoreEnv('COPILOT_PROVIDER_WIRE_API', originalCopilotProviderWireApi);
     restoreEnv('COPILOT_PROVIDER_AZURE_API_VERSION', originalCopilotProviderAzureApiVersion);
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('scenario: session config never sends both gitHubToken and a custom provider (Copilot SDK rejects the pair)', async () => {
+  // Regression guard for the real provider-path bug: `session.create` throws
+  // "Cannot specify both gitHubToken and provider" when both are present. A custom
+  // provider authenticates the model with its own bearer token, so the GitHub token
+  // must be dropped from the session config whenever a provider is configured.
+  FakeCopilotClient.instances.length = 0;
+  const originalGitHubToken = process.env.COPILOT_GITHUB_TOKEN;
+  const originalModel = process.env.COPILOT_MODEL;
+  const originalProviderType = process.env.COPILOT_PROVIDER_TYPE;
+  const originalProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  process.env.COPILOT_GITHUB_TOKEN = 'gh-token-abc';
+  process.env.COPILOT_MODEL = 'demo-deployment';
+  process.env.COPILOT_PROVIDER_TYPE = 'openai';
+  process.env.COPILOT_PROVIDER_BASE_URL = 'https://provider.example/openai/v1';
+
+  const adapter = new CopilotProcessAdapter(async () => ({
+    CopilotClient: FakeCopilotClient,
+    RuntimeConnection: {
+      forStdio: (loc: { path: string }) => ({ kind: 'stdio', ...loc }),
+      forTcp: (loc?: { path?: string }) => ({ kind: 'tcp', ...loc })
+    },
+    approveAll: async () => true
+  }), async () => ({ token: 'provider-bearer', expiresOnTimestamp: Date.now() + 3600_000 }));
+
+  try {
+    await adapter.start(startInput());
+    const [client] = FakeCopilotClient.instances;
+    assert.ok(client);
+    // Session config: provider present, gitHubToken absent.
+    assert.equal('gitHubToken' in (client.createSessionOptions ?? {}), false);
+    assert.deepEqual(client.createSessionOptions?.provider, {
+      type: 'openai',
+      baseUrl: 'https://provider.example/openai/v1',
+      bearerToken: 'provider-bearer'
+    });
+    assert.equal(client.createSessionOptions?.model, 'demo-deployment');
+    // The client/runtime connection still carries the GitHub token (that channel is separate).
+    assert.equal(client.options.gitHubToken, 'gh-token-abc');
+  } finally {
+    await adapter.stop({ sessionId: 'session-1' });
+    restoreEnv('COPILOT_GITHUB_TOKEN', originalGitHubToken);
+    restoreEnv('COPILOT_MODEL', originalModel);
+    restoreEnv('COPILOT_PROVIDER_TYPE', originalProviderType);
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalProviderBaseUrl);
+  }
+});
+
+test('scenario: session config sends gitHubToken for a GitHub-hosted model when no custom provider is configured', async () => {
+  FakeCopilotClient.instances.length = 0;
+  const originalGitHubToken = process.env.COPILOT_GITHUB_TOKEN;
+  const originalProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  process.env.COPILOT_GITHUB_TOKEN = 'gh-token-xyz';
+  delete process.env.COPILOT_PROVIDER_BASE_URL;
+
+  const adapter = new CopilotProcessAdapter(async () => ({
+    CopilotClient: FakeCopilotClient,
+    RuntimeConnection: {
+      forStdio: (loc: { path: string }) => ({ kind: 'stdio', ...loc }),
+      forTcp: (loc?: { path?: string }) => ({ kind: 'tcp', ...loc })
+    },
+    approveAll: async () => true
+  }));
+
+  try {
+    await adapter.start(startInput());
+    const [client] = FakeCopilotClient.instances;
+    assert.ok(client);
+    assert.equal(client.createSessionOptions?.gitHubToken, 'gh-token-xyz');
+    assert.equal('provider' in (client.createSessionOptions ?? {}), false);
+    assert.equal('model' in (client.createSessionOptions ?? {}), false);
+  } finally {
+    await adapter.stop({ sessionId: 'session-1' });
+    restoreEnv('COPILOT_GITHUB_TOKEN', originalGitHubToken);
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalProviderBaseUrl);
+  }
+});
+
+test('scenario: describeRuntime reports the real Copilot runtime identity (model + provider host) without secrets', async () => {
+  const originalModel = process.env.COPILOT_MODEL;
+  const originalProviderType = process.env.COPILOT_PROVIDER_TYPE;
+  const originalProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  process.env.COPILOT_MODEL = 'gpt-5.4-mini';
+  process.env.COPILOT_PROVIDER_TYPE = 'openai';
+  process.env.COPILOT_PROVIDER_BASE_URL = 'https://provider.example/openai/v1';
+
+  try {
+    const identity = new CopilotProcessAdapter().describeRuntime();
+    assert.deepEqual(identity, {
+      runtime: 'copilot-process',
+      model: 'gpt-5.4-mini',
+      provider: 'openai',
+      providerHost: 'provider.example'
+    });
+    // Non-secret contract: no bearer token or provider path leaks into the Worker description.
+    assert.equal(Object.values(identity).some((value) => value.includes('/openai/v1')), false);
+  } finally {
+    restoreEnv('COPILOT_MODEL', originalModel);
+    restoreEnv('COPILOT_PROVIDER_TYPE', originalProviderType);
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalProviderBaseUrl);
+  }
+});
+
+test('scenario: describeRuntime reports a GitHub-hosted Copilot runtime when no custom provider is configured', async () => {
+  const originalModel = process.env.COPILOT_MODEL;
+  const originalProviderBaseUrl = process.env.COPILOT_PROVIDER_BASE_URL;
+  delete process.env.COPILOT_MODEL;
+  delete process.env.COPILOT_PROVIDER_BASE_URL;
+
+  try {
+    assert.deepEqual(new CopilotProcessAdapter().describeRuntime(), {
+      runtime: 'copilot-process',
+      provider: 'github'
+    });
+  } finally {
+    restoreEnv('COPILOT_MODEL', originalModel);
+    restoreEnv('COPILOT_PROVIDER_BASE_URL', originalProviderBaseUrl);
   }
 });
 

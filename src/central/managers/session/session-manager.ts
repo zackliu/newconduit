@@ -34,6 +34,8 @@ export interface ResumeSessionOutcome {
  * Runs the tenant's session command workflow, turning app requests into durable session facts and worker-routable commands.
  */
 export class SessionManager {
+  private readonly inputSequences = new Map<string, Promise<void>>();
+
   constructor(
     private readonly tenant: TenantContext,
     private readonly storage: RuntimeStorage,
@@ -79,70 +81,72 @@ export class SessionManager {
   }
 
   async acceptInput(context: RequestContext, sessionId: string, ackId: string | undefined, request: SessionInputRequest): Promise<AcceptInputOutcome> {
-    const session = await this.storage.readSession(sessionId);
-    this.assertPublicSession(session, context, sessionId);
-    const allocation = await this.sessionLifecycleManager.allocateNextTurn(session);
-    const event = await this.eventLogManager.append({
-      type: 'input.accepted',
-      actor: 'central',
-      payload: {
-        input: request.input,
-        status: 'accepted',
-        acceptedBy: context.principal.principalId
-      },
-      ackId,
-      turnSeq: allocation.turnSeq,
-      sequence: allocation.session.eventCursor + 1,
-      sessionId
-    });
-    const nextSession = await this.sessionLifecycleManager.advanceEventCursor(allocation.session, event.sequence);
-    if (!nextSession.currentWorkerId) {
-      const failedEvent = await this.eventLogManager.append<TurnFailedPayload>({
-        type: 'turn.failed',
+    return this.serializeInput(sessionId, async () => {
+      const session = await this.storage.readSession(sessionId);
+      this.assertPublicSession(session, context, sessionId);
+      const allocation = await this.sessionLifecycleManager.allocateNextTurn(session);
+      const event = await this.eventLogManager.append({
+        type: 'input.accepted',
         actor: 'central',
         payload: {
-          error: {
-            message: `session ${sessionId} has no current worker for input.received`,
-            code: 'no_current_worker'
-          }
+          input: request.input,
+          status: 'accepted',
+          acceptedBy: context.principal.principalId
         },
+        ackId,
         turnSeq: allocation.turnSeq,
-        sequence: nextSession.eventCursor + 1,
+        sequence: allocation.session.eventCursor + 1,
         sessionId
       });
-      const failedSession = await this.sessionLifecycleManager.advanceEventCursor(nextSession, failedEvent.sequence);
-      return {
-        session: failedSession,
-        inputAcceptedEvent: event,
-        turnFailedEvent: failedEvent
-      };
-    }
-    const workerCommand = {
-      workerId: nextSession.currentWorkerId,
-      event: {
-        eventId: crypto.randomUUID(),
-        sessionId,
+      const nextSession = await this.sessionLifecycleManager.advanceEventCursor(allocation.session, event.sequence);
+      if (!nextSession.currentWorkerId) {
+        const failedEvent = await this.eventLogManager.append<TurnFailedPayload>({
+          type: 'turn.failed',
+          actor: 'central',
+          payload: {
+            error: {
+              message: `session ${sessionId} has no current worker for input.received`,
+              code: 'no_current_worker'
+            }
+          },
+          turnSeq: allocation.turnSeq,
+          sequence: nextSession.eventCursor + 1,
+          sessionId
+        });
+        const failedSession = await this.sessionLifecycleManager.advanceEventCursor(nextSession, failedEvent.sequence);
+        return {
+          session: failedSession,
+          inputAcceptedEvent: event,
+          turnFailedEvent: failedEvent
+        };
+      }
+      const workerCommand = {
         workerId: nextSession.currentWorkerId,
-        turnSeq: allocation.turnSeq,
-        sequence: event.sequence,
-        type: 'session.input' as const,
-        timestamp: event.timestamp,
-        actor: 'central' as const,
-        sessionLeaseId: nextSession.sessionLeaseId,
-        payload: {
+        event: {
+          eventId: crypto.randomUUID(),
           sessionId,
           workerId: nextSession.currentWorkerId,
-          sessionLeaseId: nextSession.sessionLeaseId!,
           turnSeq: allocation.turnSeq,
-          input: request.input
+          sequence: event.sequence,
+          type: 'session.input' as const,
+          timestamp: event.timestamp,
+          actor: 'central' as const,
+          sessionLeaseId: nextSession.sessionLeaseId,
+          payload: {
+            sessionId,
+            workerId: nextSession.currentWorkerId,
+            sessionLeaseId: nextSession.sessionLeaseId!,
+            turnSeq: allocation.turnSeq,
+            input: request.input
+          }
         }
-      }
-    };
-    return {
-      session: nextSession,
-      inputAcceptedEvent: event,
-      workerCommand
-    };
+      };
+      return {
+        session: nextSession,
+        inputAcceptedEvent: event,
+        workerCommand
+      };
+    });
   }
 
   async listSessions(context: RequestContext, ackId: string | undefined): Promise<ListSessionsOutcome> {
@@ -261,6 +265,19 @@ export class SessionManager {
     if (!session || session.owner !== context.principal.principalId) {
       throw new Error(`session ${sessionId} was not found`);
     }
+  }
+
+  private serializeInput<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.inputSequences.get(sessionId) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.inputSequences.set(sessionId, tail);
+    void tail.finally(() => {
+      if (this.inputSequences.get(sessionId) === tail) {
+        this.inputSequences.delete(sessionId);
+      }
+    });
+    return result;
   }
 
   private async requireDelegatedSession(sessionId: string): Promise<SessionRecord> {

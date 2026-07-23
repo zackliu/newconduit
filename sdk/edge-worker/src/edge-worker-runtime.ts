@@ -1,4 +1,4 @@
-import type { EdgeAgent, EdgeAgentContext } from './edge-agent';
+import type { EdgeAgent, EdgeAgentContext } from './edge-agent.js';
 import {
   EDGE_WORKER_HTTP_PATHS,
   EDGE_WORKER_HTTP_QUERY,
@@ -17,18 +17,19 @@ import {
   type WorkerCondition,
   type WorkerHeartbeatPayload,
   type WorkerHeartbeatRejectedPayload,
+  type WorkerResultAcknowledgedPayload,
   type WorkerRecord,
   type WorkerRegisterPayload,
   type EdgeBindingPayload
-} from './protocol';
-import type { EdgeWorkerSubscription, EdgeWorkerTransport } from './transport';
-import { describeNegotiateFailure } from './negotiate-error';
+} from './protocol.js';
+import type { EdgeWorkerSubscription, EdgeWorkerTransport } from './transport.js';
+import { describeNegotiateFailure } from './negotiate-error.js';
 import {
   InMemoryOutboundQueueStore,
   newQueuedResult,
   type OutboundQueueStore,
   type QueuedResult
-} from './outbound-queue';
+} from './outbound-queue.js';
 
 /**
  * The browser edge worker runtime. It is the browser peer of the Node `SidecarDaemon`: it registers a tab
@@ -151,8 +152,8 @@ export class EdgeWorkerRuntime {
 
   /**
    * Bind this runtime to a (freshly granted) worker id: (re)subscribe to that worker's command channel and
-   * (re)start heartbeating. Used by the first connect and by re-registration, where the transport is already
-   * connected and only the worker identity changes.
+   * (re)start heartbeating. Re-registration reconnects with the newly issued access URL before changing worker
+   * identity; an old short-lived grant is not assumed to authorize the new worker command channel.
    */
   private async activateWorker(worker: WorkerRecord): Promise<void> {
     await this.commandSubscription?.close();
@@ -220,6 +221,9 @@ export class EdgeWorkerRuntime {
       case 'worker.heartbeat.rejected':
         await this.handleHeartbeatRejected(event as EdgeRuntimeEvent<WorkerHeartbeatRejectedPayload>);
         return;
+      case 'worker.result.acknowledged':
+        await this.handleResultAcknowledged(event as EdgeRuntimeEvent<WorkerResultAcknowledgedPayload>);
+        return;
       default:
         throw new Error(`unexpected edge worker command: ${event.type}`);
     }
@@ -254,10 +258,9 @@ export class EdgeWorkerRuntime {
       this.stopHeartbeat();
       // The prior worker id is terminal in central; any runs leased to it are already failed by worker loss.
       // Abandon them locally so a fresh delegated child assigns cleanly onto the re-registered worker.
-      this.dropActiveRuns();
+      await this.dropActiveRuns('worker identity was replaced');
       const grant = await this.negotiator(this.registration);
-      const worker = this.requireGrantedWorker(grant);
-      await this.activateWorker(worker);
+      await this.connectWithGrant(grant);
     } catch (error) {
       this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -265,9 +268,11 @@ export class EdgeWorkerRuntime {
     }
   }
 
-  private dropActiveRuns(): void {
+  private async dropActiveRuns(reason: string): Promise<void> {
     for (const run of this.activeRuns.values()) {
       run.currentTurn?.abort();
+      await this.stopAgentSession(run.sessionId, reason);
+      await this.discardQueuedResults(run.sessionId, reason);
     }
     this.activeRuns.clear();
     this.completedPauses.clear();
@@ -275,16 +280,27 @@ export class EdgeWorkerRuntime {
 
   async stop(): Promise<void> {
     this.stopHeartbeat();
-    for (const run of this.activeRuns.values()) {
-      run.currentTurn?.abort();
-      await this.agent.stop?.({ sessionId: run.sessionId });
+    try {
+      if (this.heartbeatState) {
+        await this.publishTenantEvent({
+          type: 'worker.close.requested',
+          workerId: this.heartbeatState.workerId,
+          payload: { workerId: this.heartbeatState.workerId }
+        });
+      }
+    } finally {
+      for (const run of this.activeRuns.values()) {
+        run.currentTurn?.abort();
+        await this.stopAgentSession(run.sessionId, 'stopping the worker runtime');
+      }
+      this.activeRuns.clear();
+      this.completedPauses.clear();
+      await this.commandSubscription?.close();
+      this.commandSubscription = undefined;
+      this.heartbeatState = undefined;
+      await this.transport.stop();
+      this.emit({ type: 'stopped' });
     }
-    this.activeRuns.clear();
-    this.completedPauses.clear();
-    await this.commandSubscription?.close();
-    this.commandSubscription = undefined;
-    await this.transport.stop();
-    this.emit({ type: 'stopped' });
   }
 
   private async handleAssign(event: EdgeRuntimeEvent<SessionAssignPayload>): Promise<void> {
@@ -460,6 +476,7 @@ export class EdgeWorkerRuntime {
     for (const item of pending) {
       try {
         await this.publishTenantEvent({
+          eventId: item.queueId,
           type: item.type,
           sessionId: item.sessionId,
           workerId: active.workerId,
@@ -472,9 +489,25 @@ export class EdgeWorkerRuntime {
         this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) });
         return;
       }
-      await this.outboundQueue.remove(item.queueId);
-      this.emit({ type: 'result.synced', sessionId: item.sessionId, turnSeq: item.turnSeq, pending: await this.pendingResultCount() });
     }
+  }
+
+  private async handleResultAcknowledged(event: EdgeRuntimeEvent<WorkerResultAcknowledgedPayload>): Promise<void> {
+    const resultEventId = event.payload?.resultEventId;
+    if (typeof resultEventId !== 'string' || resultEventId.length === 0) {
+      throw new Error('invalid worker.result.acknowledged payload');
+    }
+    const queued = (await this.outboundQueue.list()).find((item) => item.queueId === resultEventId);
+    if (!queued) {
+      return;
+    }
+    await this.outboundQueue.remove(queued.queueId);
+    this.emit({
+      type: 'result.synced',
+      sessionId: queued.sessionId,
+      turnSeq: queued.turnSeq,
+      pending: await this.pendingResultCount()
+    });
   }
 
   private async replayQueuedResult(active: ActiveRun, turnSeq: number, digest: string): Promise<boolean> {
@@ -487,6 +520,30 @@ export class EdgeWorkerRuntime {
     this.emit({ type: 'turn.replayed', sessionId: active.sessionId, turnSeq });
     await this.flushRun(active);
     return true;
+  }
+
+  private async discardQueuedResults(sessionId: string, reason: string): Promise<void> {
+    const queued = (await this.outboundQueue.list()).filter((item) => item.sessionId === sessionId);
+    for (const item of queued) {
+      await this.outboundQueue.remove(item.queueId);
+    }
+    if (queued.length > 0) {
+      this.emit({
+        type: 'error',
+        message: `discarded ${queued.length} undelivered result(s) for session ${sessionId}: ${reason}`
+      });
+    }
+  }
+
+  private async stopAgentSession(sessionId: string, reason: string): Promise<void> {
+    try {
+      await this.agent.stop?.({ sessionId });
+    } catch (error) {
+      this.emit({
+        type: 'error',
+        message: `agent teardown failed for session ${sessionId} while ${reason}: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
   }
 
   private async handlePause(event: EdgeRuntimeEvent<SessionPauseCommandPayload>): Promise<void> {
@@ -506,7 +563,8 @@ export class EdgeWorkerRuntime {
       return;
     }
     active.currentTurn?.abort();
-    await this.agent.stop?.({ sessionId: payload.sessionId });
+    await this.stopAgentSession(payload.sessionId, 'pausing the session');
+    await this.discardQueuedResults(payload.sessionId, 'session was paused');
     this.activeRuns.delete(payload.sessionId);
     this.completedPauses.add(pauseKey);
     await this.publishPaused(payload);
@@ -625,6 +683,7 @@ export class EdgeWorkerRuntime {
   }
 
   private async publishTenantEvent<TPayload>(input: {
+    eventId?: string;
     type: string;
     sessionId?: string;
     workerId?: string;
@@ -633,7 +692,7 @@ export class EdgeWorkerRuntime {
     payload: TPayload;
   }): Promise<void> {
     await this.transport.publish({ kind: 'tenant-inbox' }, {
-      eventId: crypto.randomUUID(),
+      eventId: input.eventId ?? crypto.randomUUID(),
       sessionId: input.sessionId,
       workerId: input.workerId,
       sequence: 0,

@@ -108,6 +108,7 @@ code, .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo,
 .pill.conn-error, .pill.st-failed, .pill.st-error, .pill.st-cancelled { color: var(--issue); background: rgba(255,107,107,0.14); border-color: rgba(255,107,107,0.35); }
 .pill.st-paused, .pill.st-pausing, .pill.st-reregistering { color: var(--warn); background: rgba(242,181,68,0.14); border-color: rgba(242,181,68,0.35); }
 .pill.st-idle, .pill.conn-idle, .pill.st-unknown { color: var(--ink-mute); }
+.pill.casePill { text-transform: none; color: var(--ink); background: rgba(148,163,184,0.14); border-color: var(--line-2); letter-spacing: 0.3px; }
 
 .badge { font: 600 11px 'IBM Plex Mono', monospace; padding: 4px 10px; border-radius: 8px; }
 .badge.sev-ok { color: #062018; background: rgba(53,214,160,0.25); }

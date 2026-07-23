@@ -60,7 +60,7 @@ await runtime.register({
 - **`FrameAnalyzer`** / `CanvasHeuristicAnalyzer` — the local optical-inference seam. The default computes real optical signals (brightness, exposure, contrast, colour temperature, Laplacian-variance focus, glare) with bounded arithmetic and no model download. A future WebGPU/ONNX/WebNN analyzer implements the same interface.
 - **`LocalObserver`** / `LedIndicatorAnalyzer` / `createCodeObserver` — the additive observation seam. Observers run **inside** the capture provider (where the frame legitimately exists) and emit small, image-free structured observations. `LedIndicatorAnalyzer` does real connected-component blob detection + colour classification (red/amber/green/blue); `LedBlinkTracker` classifies steady vs. blinking across successive captures. `createCodeObserver(new BrowserBarcodeScanner())` decodes barcodes/QR via the browser-native `BarcodeDetector`, reporting `supported: false` honestly where the API is absent.
 - **`cropFrame` / `downscaleFrame` / `maskRegions`** — pure on-device frame processing used to crop to the relevant region, redact sensitive rectangles, and reduce size before any consented upload.
-- **`maybeShareImage` / `createBrowserImageEncoder`** — the consent gate. No default encoder exists, so the share path cannot fire by accident; an image is produced only with `policy: 'on-explicit-consent'` + a request that carries `consent: true` + a wired encoder.
+- **`maybeShareImage` / `createBrowserImageEncoder`** — the consent gate. No default encoder exists, so the share path cannot fire by accident; an image is produced only with `policy: 'on-explicit-consent'` + a wired encoder + a `LocalImageShareAuthorization` returned by the device-side frame provider after the holder approves that specific capture. Remote task data can request processing, but cannot authorize its own upload.
 - **`createAnalyzerCaptureProvider`** — the single privacy boundary that turns an `EdgeFrame` into a `FrameAnalysis`, runs observers, applies the consent gate, and returns only structured media metadata (plus a consented artifact when explicitly granted).
 
 ## Task shape
@@ -72,11 +72,11 @@ The console routes ordinary session turns whose message is a small JSON task:
 { "task": "capture", "source": "environment", "target": "device panel", "reason": "check glare and focus" }
 // run only specific local observers
 { "task": "capture", "target": "status LEDs", "detect": ["led-indicator", "code"] }
-// explicitly consent to sharing a cropped, masked, downscaled image
-{ "task": "capture", "target": "rating label", "share": { "consent": true, "scope": "rating label", "crop": { "x": 120, "y": 80, "width": 240, "height": 160 }, "mask": [{ "x": 0, "y": 0, "width": 60, "height": 24 }], "maxEdge": 1024 } }
+// request a cropped, masked, downscaled image; the phone must still approve this capture locally
+{ "task": "capture", "target": "rating label", "share": { "scope": "rating label", "crop": { "x": 120, "y": 80, "width": 240, "height": 160 }, "mask": [{ "x": 0, "y": 0, "width": 60, "height": 24 }], "maxEdge": 1024 } }
 ```
 
-`source` is `environment` (rear) or `user` (front). A non-JSON message is treated as a capture with the text used as the reason. `detect` filters which configured observers run (all when omitted). `share` is ignored unless `consent === true` **and** the device manifest advertises an `on-explicit-consent` image-sharing policy.
+`source` is `environment` (rear) or `user` (front). A non-JSON message is treated as a capture with the text used as the reason. `detect` filters which configured observers run (all when omitted). `share` only requests processing parameters. It is ignored unless the device manifest advertises `on-explicit-consent` **and** the local frame provider returns a per-capture `imageShareAuthorization`; a cloud-authored `consent` field has no authority.
 
 ## Build & test
 

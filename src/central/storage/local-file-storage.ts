@@ -373,6 +373,11 @@ export class LocalFileStorage implements RuntimeStorage {
       if (current.parentSessionId !== group.parentSessionId || current.parentRequestId !== group.parentRequestId) {
         throw new Error(`Fan-out group ${group.groupId} immutable parent key changed`);
       }
+      if (current.delegateId !== group.delegateId
+        || current.input !== group.input
+        || JSON.stringify(current.members.map((member) => member.deviceRef)) !== JSON.stringify(group.members.map((member) => member.deviceRef))) {
+        throw new Error(`Fan-out group ${group.groupId} immutable routing intent changed`);
+      }
       await this.writeJson(this.fanoutGroupPath(group.groupId), group);
       return true;
     });

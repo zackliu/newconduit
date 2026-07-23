@@ -11,6 +11,7 @@ import type { EdgeDeviceManifest, FrameAnalysis, FrameFinding } from '@agent-run
 import { buildEdgeInviteLink, persist, type DemoConfig } from './config';
 import {
   computeDeviceStages,
+  computeInstructionGate,
   computeScanRoute,
   errorMessage,
   esc,
@@ -19,6 +20,7 @@ import {
   severityClass,
   shortId,
   type DeviceStage,
+  type InstructionGate,
   type ScanTarget
 } from './ui';
 
@@ -247,16 +249,45 @@ function observeParent(session: SessionHandle): void {
   })();
 }
 
+/**
+ * Central only accepts a turn once the parent case has a worker attached (status `running`); handing it an
+ * instruction while it is still `queued`/`created`/`starting`/`paused` is accepted-then-failed with
+ * `no_current_worker`. So the console derives one gate for the whole instruction surface and enables input only when
+ * the agent is genuinely ready to route a scan.
+ */
+function instructionGate(): InstructionGate {
+  return computeInstructionGate({
+    connected: state.connection === 'connected',
+    hasParent: Boolean(state.parent),
+    parentStatus: state.parentStatus,
+    sending: state.sending
+  });
+}
+
+function canInstruct(): boolean {
+  return instructionGate() === 'ready';
+}
+
 async function sendInstruction(text: string, targetOverride?: ScanTarget): Promise<void> {
   const message = text.trim();
   if (!message) return;
+  // Do not silently start a session or send into a worker-less parent: both surface as an immediate
+  // `no_current_worker` turn failure. Require an explicit, ready parent first and say why when it is not.
+  if (!state.parent) {
+    state.error = 'Start a recovery session before sending instructions.';
+    render();
+    return;
+  }
+  if (!canInstruct()) {
+    state.error = `The recovery agent is ${esc(state.parentStatus)} and has no worker attached yet — waiting for parent capacity. Instructions are enabled once the session is running.`;
+    render();
+    return;
+  }
   state.error = '';
   state.sending = true;
   state.lastScanInstruction = message;
   render();
   try {
-    if (!state.parent) await startSession();
-    if (!state.parent) throw new Error('No recovery session is active yet.');
     // Send the operator's device-routing intent as the turn's structured `delegationTarget` — trusted control
     // metadata, NOT text in the instruction. Central binds it to this accepted turn and enforces it when the parent
     // agent's `scan_device_evidence` delegate fires: the agent may echo it but cannot widen or redirect it. A retry
@@ -399,16 +430,31 @@ function startChildPolling(): void {
   void discoverChildren();
 }
 
+let childDiscoveryInFlight: Promise<void> | undefined;
+
 async function discoverChildren(): Promise<void> {
-  if (!state.client || !state.caseId) return;
+  if (childDiscoveryInFlight) {
+    return childDiscoveryInFlight;
+  }
+  childDiscoveryInFlight = discoverChildrenOnce().finally(() => {
+    childDiscoveryInFlight = undefined;
+  });
+  return childDiscoveryInFlight;
+}
+
+async function discoverChildrenOnce(): Promise<void> {
+  const client = state.client;
+  const caseId = state.caseId;
+  if (!client || !caseId) return;
   let sessions: SessionSummary[];
   try {
-    sessions = await state.client.sessions.list();
+    sessions = await client.sessions.list();
   } catch {
     return;
   }
+  if (client !== state.client || caseId !== state.caseId) return;
   for (const summary of sessions) {
-    if (summary.parentSessionId !== state.caseId || summary.agentSpecId !== CHILD_SPEC_ID) continue;
+    if (summary.parentSessionId !== caseId || summary.agentSpecId !== CHILD_SPEC_ID) continue;
     if (state.retiredChildIds.has(summary.sessionId)) continue;
     const existing = state.children.get(summary.sessionId);
     if (existing) {
@@ -423,7 +469,8 @@ async function discoverChildren(): Promise<void> {
       continue;
     }
     try {
-      const handle = await state.client.sessions.open(summary.sessionId);
+      const handle = await client.sessions.open(summary.sessionId);
+      if (client !== state.client || caseId !== state.caseId) return;
       const device = deviceForWorker(summary.currentWorkerId);
       const view: ChildView = {
         childId: handle.id,
@@ -591,6 +638,7 @@ function render(): void {
           </div>
         </div>
         <div class="topActions">
+          ${state.caseId ? `<span class="pill casePill" title="Recovery case (parent session)">Case ${esc(shortId(state.caseId))}</span>` : ''}
           ${connectionPill()}
           <button class="ghostBtn" id="toggleSettings">Connection</button>
         </div>
@@ -636,13 +684,18 @@ function pairCard(): string {
   const canPair = Boolean(state.parent);
   const link = state.inviteLink;
   const expiry = state.invite ? new Date(state.invite.expiresAt).toLocaleTimeString() : undefined;
+  const caseLine = state.caseId
+    ? `<div class="kv"><span>Pairing into case</span><code>${esc(shortId(state.caseId))}</code></div>`
+    : '';
   return `
     <div class="card pairCard">
       <div class="cardHead"><h2>Pair an edge device</h2>${pairStatusPill()}</div>
-      <p class="muted">Mint a <b>one-time invite</b> for this case, then open its link on the phone that will scan
-        the hardware (needs https or localhost for the camera). The device redeems the invite once into a durable
-        Central binding; the invite is not a routing secret and never authorizes on its own. Mint another invite for
-        each additional device.</p>
+      ${caseLine}
+      <p class="muted">Mint a <b>one-time invite</b> for <b>this case</b>, then open its link on the phone that will
+        scan the hardware (needs https or localhost for the camera). The device redeems the invite once into a durable
+        Central binding; the invite is not a routing secret and never authorizes on its own. <b>Every device for this
+        recovery must be paired from this same console/case</b> — an invite minted from a different console binds the
+        phone to a different case and it will not appear here. Mint another invite for each additional device.</p>
       <div class="row">
         <button class="primaryBtn" id="mintInvite" ${canPair && !state.mintingInvite ? '' : 'disabled'}>${state.mintingInvite ? 'Minting…' : 'Create pairing invite'}</button>
       </div>
@@ -651,24 +704,34 @@ function pairCard(): string {
              <input id="edgeLink" readonly value="${esc(link)}" />
              <button class="secondaryBtn" id="copyLink">Copy</button>
            </div>
-           <div class="qrHint">One-time invite${expiry ? ` · expires ${esc(expiry)}` : ''}. The secret rides only in the URL fragment (<code>#pair=…</code>) and is stripped on the phone after redemption. Same machine? Open the link in a second tab to simulate a phone.</div>`
+           <div class="qrHint">One-time invite for case <code>${esc(shortId(state.caseId))}</code>${expiry ? ` · expires ${esc(expiry)}` : ''}. The secret rides only in the URL fragment (<code>#pair=…</code>) and is stripped on the phone after redemption. Same machine? Open the link in a second tab to simulate a phone.</div>`
         : `<div class="qrHint">${canPair ? 'No invite yet — create one to pair a device.' : 'Start a recovery session first, then create a pairing invite.'}</div>`}
     </div>`;
 }
 
 function instructCard(): string {
+  const gate = instructionGate();
+  const ready = gate === 'ready';
+  const hint = ready
+    ? 'Instructions go to the durable agent. It decides when to delegate a scan step, routed to the selected device — or fanned out to every paired device.'
+    : gate === 'disconnected'
+      ? 'Reconnect to Central to instruct the agent.'
+      : gate === 'no-session'
+        ? 'Start a recovery session first — instructions enable once the agent is running.'
+        : `Waiting for parent capacity — the agent is ${esc(state.parentStatus)} with no worker attached. Instructions enable once the session is running.`;
+  const waitingPill = !ready && state.parent ? '<span class="pill st-idle">waiting for capacity</span>' : '';
   return `
     <div class="card taskCard">
-      <div class="cardHead"><h2>Instruct the agent</h2></div>
+      <div class="cardHead"><h2>Instruct the agent</h2>${waitingPill}</div>
       ${targetSelector()}
       <div class="taskList">
         ${presets.map(presetButton).join('')}
       </div>
       <div class="instrRow">
-        <input id="instruction" placeholder="Type an instruction for the recovery agent…" value="${esc(state.instruction)}" ${state.parent ? '' : 'disabled'} />
-        <button class="secondaryBtn" id="sendBtn" ${state.parent && !state.sending ? '' : 'disabled'}>${state.sending ? 'Sending…' : 'Send'}</button>
+        <input id="instruction" placeholder="Type an instruction for the recovery agent…" value="${esc(state.instruction)}" ${ready ? '' : 'disabled'} />
+        <button class="secondaryBtn" id="sendBtn" ${ready ? '' : 'disabled'}>${state.sending ? 'Sending…' : 'Send'}</button>
       </div>
-      <p class="muted small">Instructions go to the durable agent. It decides when to delegate a scan step, routed to the selected device — or fanned out to every paired device.</p>
+      <p class="muted small">${esc(hint)}</p>
     </div>`;
 }
 
@@ -701,14 +764,18 @@ function routingBanner(): string {
       silently routing it to another device. Bring the phone back to the foreground so it reconnects (it re-registers
       with its stored binding — no new invite needed), then retry: the new scan re-targets only the failed device(s),
       never a sibling that already returned evidence.</div>
-    <button class="primaryBtn" id="retryScan" ${state.sending ? 'disabled' : ''}>${state.sending ? 'Retrying…' : 'Retry scan'}</button>
+    <button class="primaryBtn" id="retryScan" ${state.sending || !canInstruct() ? 'disabled' : ''}>${state.sending ? 'Retrying…' : 'Retry scan'}</button>
   </div>`;
 }
 
 function queueHint(): string {
   if (state.connection !== 'connected' || !state.parent) return '';
-  if (state.parentStatus === 'queued') {
-    return `<div class="banner warn">Session is <b>queued</b> — waiting for a <code>${PARENT_SPEC_ID}</code> agent worker. Start a Copilot pool for that spec, or run the scripted parent harness (see the sample README) to drive the delegation locally.</div>`;
+  const gate = instructionGate();
+  if (gate === 'waiting-capacity') {
+    if (state.parentStatus === 'queued') {
+      return `<div class="banner warn"><b>Waiting for parent capacity.</b> The recovery session is <b>queued</b> — waiting for a <code>${PARENT_SPEC_ID}</code> Copilot worker. The default local <code>poc-docker-copilot</code> pool creates one session-pinned worker per queued case; a manually started sidecar or the offline scripted harness has fixed capacity. Instructions stay disabled until this case is running.</div>`;
+    }
+    return `<div class="banner warn"><b>Waiting for parent capacity.</b> The recovery agent is <b>${esc(state.parentStatus)}</b> and has no worker attached yet. Instructions stay disabled until the session is <b>running</b>, so a turn is never sent into a <code>no_current_worker</code> failure.</div>`;
   }
   const pending = [...state.children.values()].some(
     (view) => !view.lost && view.status === 'queued' && !deviceFor(view.deviceRef)?.online
@@ -752,7 +819,7 @@ function settingsPanel(): string {
 }
 
 function presetButton(def: InstructionPreset): string {
-  const disabled = state.connection !== 'connected' || state.sending ? 'disabled' : '';
+  const disabled = canInstruct() ? '' : 'disabled';
   return `
     <button class="taskBtn" data-preset="${esc(def.id)}" ${disabled}>
       <div class="taskBtnTitle">${esc(def.label)}</div>

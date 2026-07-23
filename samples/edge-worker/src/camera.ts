@@ -67,6 +67,7 @@ export class BrowserCamera {
   private stream: MediaStream | undefined;
   private canvas: HTMLCanvasElement | undefined;
   private activeFacing: 'environment' | 'user' | undefined;
+  private generation = 0;
 
   constructor() {
     this.video = document.createElement('video');
@@ -85,24 +86,34 @@ export class BrowserCamera {
   }
 
   /** Opens the camera. MUST be called from a user gesture; throws NotAllowedError if the user denies. */
-  async open(source: CaptureSource): Promise<void> {
+  async open(source: CaptureSource, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error('Camera request was cancelled.');
     const facingMode = facingFor(source);
     if (this.stream && this.activeFacing === facingMode) return;
     this.stop();
+    const generation = ++this.generation;
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false
     });
+    if (signal?.aborted || generation !== this.generation) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error('Camera request was cancelled.');
+    }
     this.stream = stream;
     this.activeFacing = facingMode;
     this.video.srcObject = stream;
     await this.video.play().catch(() => undefined);
-    await this.waitForFrame();
+    await this.waitForFrame(signal, generation);
+    if (signal?.aborted || generation !== this.generation) {
+      this.stop();
+      throw new Error('Camera request was cancelled.');
+    }
   }
 
-  private async waitForFrame(): Promise<void> {
+  private async waitForFrame(signal: AbortSignal | undefined, generation: number): Promise<void> {
     const deadline = Date.now() + 4000;
-    while (this.video.videoWidth === 0 && Date.now() < deadline) {
+    while (this.video.videoWidth === 0 && Date.now() < deadline && !signal?.aborted && generation === this.generation) {
       await new Promise((resolve) => setTimeout(resolve, 60));
     }
   }
@@ -120,6 +131,7 @@ export class BrowserCamera {
   }
 
   stop(): void {
+    this.generation++;
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = undefined;
     this.activeFacing = undefined;

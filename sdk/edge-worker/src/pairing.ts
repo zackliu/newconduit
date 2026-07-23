@@ -1,5 +1,5 @@
-import { EDGE_WORKER_HTTP_PATHS, EDGE_WORKER_HTTP_QUERY, type PairingRedeemRequest, type PairingRedeemResult } from './protocol';
-import { describeNegotiateFailure } from './negotiate-error';
+import { EDGE_WORKER_HTTP_PATHS, EDGE_WORKER_HTTP_QUERY, type PairingRedeemRequest, type PairingRedeemResult } from './protocol.js';
+import { describeNegotiateFailure } from './negotiate-error.js';
 
 /**
  * Input for the device enrollment step. `central`/`tenantId` are non-secret transport config; the `invite`

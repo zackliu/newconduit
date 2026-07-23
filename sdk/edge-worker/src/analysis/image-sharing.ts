@@ -1,14 +1,15 @@
 /**
  * The consent gate for sharing an actual image off the device. By default the phone returns structured results
  * only and no pixels ever leave. An image is produced ONLY when all of these hold: the manifest policy is
- * `on-explicit-consent`, the specific capture request carries `consent: true`, and an `ImageEncoder` is wired in.
+ * `on-explicit-consent`, the frame provider records a local per-capture authorization, and an `ImageEncoder`
+ * is wired in. A remote task may request a crop or scope, but it can never authorize its own upload.
  * Even then the frame is first cropped to the relevant region, sensitive rectangles are masked, and it is
  * downscaled before encoding. There is deliberately no default encoder, so the "share" path cannot fire by
  * accident. This makes "raw/cropped image only with explicit consent" a real, testable mechanism, not a promise.
  */
 
-import type { EdgeFrame } from './frame-analyzer';
-import { cropFrame, downscaleFrame, maskRegions, type PixelRect } from './frame-processing';
+import type { EdgeFrame } from './frame-analyzer.js';
+import { cropFrame, downscaleFrame, maskRegions, type PixelRect } from './frame-processing.js';
 
 export interface ImageEncoder {
   readonly mimeType: string;
@@ -16,14 +17,19 @@ export interface ImageEncoder {
 }
 
 export interface ShareRequest {
-  /** Must be explicitly true; anything else keeps the frame on-device. */
-  consent: boolean;
-  /** Human-readable scope the user consented to (e.g. "router label crop"). */
+  /** Human-readable scope requested by the cloud task (e.g. "router label crop"). */
   scope?: string;
   crop?: PixelRect;
   mask?: PixelRect[];
   maskMode?: 'blackout' | 'pixelate';
   maxEdge?: number;
+}
+
+/** Authorization produced locally by the device UI after the holder approves this specific capture. */
+export interface LocalImageShareAuthorization {
+  granted: true;
+  scope: string;
+  grantedAt: string;
 }
 
 export type ImageSharingPolicy = 'off' | 'on-explicit-consent';
@@ -52,11 +58,11 @@ export interface SharedImageArtifact {
 export async function maybeShareImage(
   frame: EdgeFrame,
   request: ShareRequest | undefined,
-  config: ImageSharingConfig | undefined,
-  now: () => string = () => new Date().toISOString()
+  authorization: LocalImageShareAuthorization | undefined,
+  config: ImageSharingConfig | undefined
 ): Promise<SharedImageArtifact | undefined> {
   if (!config || config.policy !== 'on-explicit-consent') return undefined;
-  if (!request || request.consent !== true) return undefined;
+  if (!request || !authorization || authorization.granted !== true) return undefined;
   if (!config.encoder) return undefined;
 
   let processed = frame;
@@ -86,7 +92,7 @@ export async function maybeShareImage(
     height: processed.height,
     bytes: encoded.bytes,
     processing: { cropped, downscaled, maskedRegions },
-    consent: { consented: true, scope: request.scope ?? 'device-view', grantedAt: now() }
+    consent: { consented: true, scope: authorization.scope, grantedAt: authorization.grantedAt }
   };
 }
 

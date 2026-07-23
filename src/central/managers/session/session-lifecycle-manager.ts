@@ -1,8 +1,8 @@
 import type { Clock, ResolvedAgentSpec, RuntimeStorage, SessionDelegationBinding, SessionRecord, SessionStatus } from '../../../shared';
 
 /**
- * Invoked exactly once when a session first crosses into a terminal status, from any transition path. Lets an owner
- * (e.g. case-pairing binding revocation) react to session closure without the lifecycle writer knowing that concern.
+ * Invoked when a session crosses into a terminal status and may be re-driven while recovering its latest terminal
+ * event. Lets an owner (e.g. case-pairing binding revocation) react without coupling that concern to lifecycle writes.
  * Must be idempotent and self-contained: it is best-effort and its failure never rolls back the durable transition.
  */
 export type SessionTerminalHook = (session: SessionRecord) => Promise<void>;
@@ -104,6 +104,12 @@ export class SessionLifecycleManager {
     const next = { ...session, eventCursor: sequence, lastEventUpdatedAt: now, updatedAt: now };
     await this.storage.writeSession(next);
     return next;
+  }
+
+  async reconcileTerminalHook(session: SessionRecord): Promise<void> {
+    if (this.onTerminal && TERMINAL_STATUSES.has(session.status)) {
+      await this.onTerminal(session);
+    }
   }
 
   /**

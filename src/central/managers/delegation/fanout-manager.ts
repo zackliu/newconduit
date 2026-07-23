@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import type { Clock, FanoutGroupMember, FanoutGroupRecord, RuntimeStorage } from '../../../shared';
+import type { Clock, CreateFanoutGroupResult, FanoutGroupMember, FanoutGroupRecord, RuntimeStorage } from '../../../shared';
 
 export interface OpenFanoutGroupInput {
   parentSessionId: string;
   parentTurnSeq: number;
   parentRequestId: string;
   caseId: string;
-  members: { deviceRef: string; delegationCallId: string }[];
+  delegateId: string;
+  input: string;
+  deviceRefs: string[];
 }
 
 export type FanoutMemberOutcome =
@@ -32,7 +34,7 @@ export class FanoutManager {
     private readonly clock: Clock
   ) {}
 
-  async openGroup(input: OpenFanoutGroupInput): Promise<FanoutGroupRecord> {
+  async openGroup(input: OpenFanoutGroupInput): Promise<CreateFanoutGroupResult> {
     const now = this.clock.now();
     const group: FanoutGroupRecord = {
       groupId: randomUUID(),
@@ -41,18 +43,25 @@ export class FanoutManager {
       parentTurnSeq: input.parentTurnSeq,
       parentRequestId: input.parentRequestId,
       caseId: input.caseId,
-      members: input.members.map((member) => ({
-        deviceRef: member.deviceRef,
-        delegationCallId: member.delegationCallId,
-        status: 'pending' as const,
+      delegateId: input.delegateId,
+      input: input.input,
+      members: input.deviceRefs.map((deviceRef) => ({
+        deviceRef,
+        status: 'starting' as const,
         updatedAt: now
       })),
       status: 'open',
+      deliveryStatus: 'pending',
       revision: 1,
       createdAt: now,
       updatedAt: now
     };
-    return (await this.storage.createFanoutGroup(group)).group;
+    return this.storage.createFanoutGroup(group);
+  }
+
+  async readGroupByRequest(parentSessionId: string, parentRequestId: string): Promise<FanoutGroupRecord | undefined> {
+    return (await this.storage.readFanoutGroups()).find((group) =>
+      group.parentSessionId === parentSessionId && group.parentRequestId === parentRequestId);
   }
 
   async readGroupByMember(delegationCallId: string): Promise<FanoutGroupRecord | undefined> {
@@ -60,26 +69,95 @@ export class FanoutManager {
       group.members.some((member) => member.delegationCallId === delegationCallId));
   }
 
-  async recordOutcome(delegationCallId: string, outcome: FanoutMemberOutcome): Promise<RecordFanoutOutcomeResult | undefined> {
+  async attachMemberCall(groupId: string, deviceRef: string, delegationCallId: string): Promise<FanoutGroupRecord> {
     for (;;) {
-      const group = await this.readGroupByMember(delegationCallId);
-      if (!group) {
-        return undefined;
+      const group = await this.requireGroup(groupId);
+      const member = group.members.find((candidate) => candidate.deviceRef === deviceRef);
+      if (!member) {
+        throw new Error(`Fan-out group ${groupId} has no member ${deviceRef}`);
       }
+      if (member.delegationCallId === delegationCallId && member.status !== 'starting') {
+        return group;
+      }
+      if (member.status !== 'starting') {
+        throw new Error(`Fan-out member ${groupId}/${deviceRef} is already attached to another call`);
+      }
+      const now = this.clock.now();
+      const next: FanoutGroupRecord = {
+        ...group,
+        members: group.members.map((candidate) => candidate.deviceRef === deviceRef
+          ? { ...candidate, delegationCallId, status: 'pending', updatedAt: now }
+          : candidate),
+        revision: group.revision + 1,
+        updatedAt: now
+      };
+      if (await this.storage.compareAndSetFanoutGroup(group.revision, next)) {
+        return next;
+      }
+    }
+  }
+
+  async recordStartupFailure(groupId: string, deviceRef: string, code: string, message: string): Promise<RecordFanoutOutcomeResult> {
+    return this.recordOutcomeInGroup(
+      groupId,
+      (member) => member.deviceRef === deviceRef,
+      { status: 'failed', code, message }
+    );
+  }
+
+  async recordOutcome(delegationCallId: string, outcome: FanoutMemberOutcome): Promise<RecordFanoutOutcomeResult | undefined> {
+    const group = await this.readGroupByMember(delegationCallId);
+    if (!group) {
+      return undefined;
+    }
+    return this.recordOutcomeInGroup(
+      group.groupId,
+      (member) => member.delegationCallId === delegationCallId,
+      outcome
+    );
+  }
+
+  async markDelivered(groupId: string): Promise<FanoutGroupRecord> {
+    for (;;) {
+      const group = await this.requireGroup(groupId);
+      if (group.deliveryStatus === 'delivered') {
+        return group;
+      }
+      if (group.status !== 'settled' || group.aggregate === undefined) {
+        throw new Error(`Fan-out group ${groupId} cannot be delivered before settlement`);
+      }
+      const next: FanoutGroupRecord = {
+        ...group,
+        deliveryStatus: 'delivered',
+        revision: group.revision + 1,
+        updatedAt: this.clock.now()
+      };
+      if (await this.storage.compareAndSetFanoutGroup(group.revision, next)) {
+        return next;
+      }
+    }
+  }
+
+  private async recordOutcomeInGroup(
+    groupId: string,
+    matches: (member: FanoutGroupMember) => boolean,
+    outcome: FanoutMemberOutcome
+  ): Promise<RecordFanoutOutcomeResult> {
+    for (;;) {
+      const group = await this.requireGroup(groupId);
       if (group.status === 'settled') {
         return { group };
       }
-      const member = group.members.find((candidate) => candidate.delegationCallId === delegationCallId);
+      const member = group.members.find(matches);
       if (!member) {
-        return undefined;
+        throw new Error(`Fan-out group ${groupId} does not contain the requested member`);
       }
       const now = this.clock.now();
-      const members = member.status === 'pending'
-        ? group.members.map((candidate) => candidate.delegationCallId === delegationCallId ? this.applyOutcome(candidate, outcome, now) : candidate)
+      const members = member.status === 'starting' || member.status === 'pending'
+        ? group.members.map((candidate) => matches(candidate) ? this.applyOutcome(candidate, outcome, now) : candidate)
         : group.members;
-      const allTerminal = members.every((candidate) => candidate.status !== 'pending');
-      // Nothing to persist: this member was already recorded and the group still has pending siblings.
-      if (member.status !== 'pending' && !allTerminal) {
+      const allTerminal = members.every((candidate) => candidate.status === 'completed' || candidate.status === 'failed');
+      if (member.status === 'completed' || member.status === 'failed') {
         return { group };
       }
       const aggregate = allTerminal ? this.aggregate(members) : undefined;
@@ -95,6 +173,14 @@ export class FanoutManager {
         return { group: next, ...(aggregate !== undefined ? { settledAggregate: aggregate } : {}) };
       }
     }
+  }
+
+  private async requireGroup(groupId: string): Promise<FanoutGroupRecord> {
+    const group = await this.storage.readFanoutGroup(groupId);
+    if (!group || group.tenantId !== this.tenantId) {
+      throw new Error(`Fan-out group ${groupId} was not found`);
+    }
+    return group;
   }
 
   private applyOutcome(member: FanoutGroupMember, outcome: FanoutMemberOutcome, now: string): FanoutGroupMember {

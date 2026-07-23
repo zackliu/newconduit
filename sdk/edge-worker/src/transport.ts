@@ -1,6 +1,6 @@
 import { WebPubSubClient } from '@azure/web-pubsub-client';
-import { EdgeWorkerChannelMapper } from './worker-channel-map';
-import type { EdgeRuntimeChannel, EdgeRuntimeEvent } from './protocol';
+import { EdgeWorkerChannelMapper } from './worker-channel-map.js';
+import type { EdgeRuntimeChannel, EdgeRuntimeEvent } from './protocol.js';
 
 export type EdgeRuntimeEventHandler = (event: EdgeRuntimeEvent) => Promise<void> | void;
 
@@ -55,6 +55,8 @@ export class WebPubSubEdgeWorkerTransport implements EdgeWorkerTransport {
     if (!accessUrl) {
       throw new Error('accessUrl is required');
     }
+    this.client?.stop();
+    this.client = undefined;
     const client = new WebPubSubClient(accessUrl, {
       autoReconnect: true,
       autoRejoinGroups: true,

@@ -22,7 +22,7 @@ export class DelegateAdmissionManager {
       type: 'object',
       additionalProperties: false,
       description: deviceScoped
-        ? 'Required. Which paired device(s) on this recovery case to scan: { "deviceRef": "<id>" } for one device, { "deviceRefs": ["<id>", ...] } for several, or { "scope": "all" } for every paired device. Pool/any routing is not allowed for an on-device scan.'
+        ? 'Optional echo of the operator-selected paired device target. Central already binds the authoritative target to the turn; omit this field unless echoing the exact same target. A different target is rejected.'
         : 'Optional. Routing target: omit or { "scope": "any" } for ordinary pool routing.',
       properties: {
         deviceRef: { type: 'string', minLength: 1 },
@@ -36,7 +36,7 @@ export class DelegateAdmissionManager {
       inputSchema: {
         type: 'object',
         additionalProperties: false,
-        required: deviceScoped ? ['message', 'target'] : ['message'],
+        required: ['message'],
         properties: {
           message: { type: 'string', minLength: 1 },
           target

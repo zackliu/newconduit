@@ -28,7 +28,7 @@ import {
   storeBinding,
   type DeviceBinding
 } from './device-identity';
-import { errorMessage, esc, fmtPct, severityClass, shortId, timestamp } from './ui';
+import { errorMessage, esc, fmtPct, severityClass, shortId, timestamp, computeJoinGate } from './ui';
 
 type WorkerStatus = 'idle' | 'registering' | 'reregistering' | 'ready' | 'assigned' | 'running' | 'paused' | 'error';
 type TransportState = 'unknown' | 'connected' | 'disconnected';
@@ -36,6 +36,7 @@ type TransportState = 'unknown' | 'connected' | 'disconnected';
 interface PendingCapture {
   request: CaptureRequest;
   resolve: (result: FrameProviderResult) => void;
+  signal: AbortSignal;
   cameraOpen: boolean;
   cameraError?: string;
 }
@@ -104,7 +105,7 @@ export function mountEdge(mountRoot: HTMLElement, config: DemoConfig): void {
 
 const frameProvider: FrameProvider = (request, context) =>
   new Promise<FrameProviderResult>((resolve) => {
-    const pending: PendingCapture = { request, resolve, cameraOpen: false };
+    const pending: PendingCapture = { request, resolve, signal: context.signal, cameraOpen: false };
     state.pending = pending;
     const onAbort = (): void => {
       if (state.pending === pending) {
@@ -245,14 +246,25 @@ function applyLocalAnalysis(output: unknown): void {
 
 async function join(): Promise<void> {
   if (state.status === 'ready' || state.status === 'running' || state.connection === 'connecting') return;
+  const gate = computeJoinGate({ hasBinding: Boolean(state.binding), hasInvite: Boolean(state.invite) });
+  // A device that is already bound AND holding a fresh invite is an explicit conflict: the invite was minted from a
+  // different console/case. Never silently drop it and reconnect the old case, and never overwrite the binding
+  // client-side (that orphans the old Central binding). Force an explicit operator choice via the conflict card.
+  if (gate === 'conflict') {
+    state.error =
+      `This device is already paired to recovery case ${shortId(state.binding!.caseId)}. The pairing invite you opened is for a different console/case and was not applied. ` +
+      `Choose “Keep case ${shortId(state.binding!.caseId)} & reconnect” to stay on the current case, or close/complete that case from its console before re-pairing this device elsewhere.`;
+    render();
+    return;
+  }
   state.connection = 'connecting';
   state.status = 'registering';
   state.error = '';
   render();
   try {
     // Redeem a one-time invite into a durable Central binding on first join (needs a user gesture / explicit Join).
-    if (!state.binding && state.invite) {
-      await enroll(state.invite);
+    if (gate === 'invite') {
+      await enroll(state.invite!);
     }
     if (!state.binding) {
       throw new Error(
@@ -311,6 +323,20 @@ async function enroll(invite: PairingInvite): Promise<void> {
   log('good', `Enrolled into case ${shortId(result.caseId)} as device ${shortId(result.deviceRef)}`);
 }
 
+/**
+ * Resolve a binding conflict by KEEPING the current case: discard the freshly opened invite (it was for a different
+ * console/case) and reconnect this device to the case it is already bound to. We deliberately do NOT switch cases
+ * client-side — that would leave the old Central binding active and orphaned — so moving a device to a different
+ * case remains an operator close-case flow, not a silent local swap.
+ */
+function keepCurrentCase(): void {
+  if (!state.binding) return;
+  state.invite = undefined;
+  state.error = '';
+  log('warn', `Discarded a new pairing invite — this device stays bound to case ${shortId(state.binding.caseId)}.`);
+  void join();
+}
+
 async function leave(): Promise<void> {
   camera.stop();
   state.pending = undefined;
@@ -332,9 +358,14 @@ async function openCamera(): Promise<void> {
   if (!pending) return;
   pending.cameraError = undefined;
   try {
-    await camera.open(pending.request.source);
+    await camera.open(pending.request.source, pending.signal);
+    if (state.pending !== pending) {
+      camera.stop();
+      return;
+    }
     pending.cameraOpen = true;
   } catch (error) {
+    if (state.pending !== pending) return;
     pending.cameraError = errorMessage(error);
     pending.cameraOpen = false;
   }
@@ -441,6 +472,10 @@ function privacyBanner(): string {
 }
 
 function pairingBanner(): string {
+  const gate = computeJoinGate({ hasBinding: Boolean(state.binding), hasInvite: Boolean(state.invite) });
+  if (gate === 'conflict') {
+    return `<div class="banner warn small"><b>Binding conflict.</b> This device is already paired to recovery case ${esc(shortId(state.binding!.caseId))}, and the pairing link you just opened is for a different case — so it was <b>not</b> applied. Reconnect to case ${esc(shortId(state.binding!.caseId))} below, or close that case from its console first to re-pair this device.</div>`;
+  }
   if (state.binding) return '';
   if (state.invite) {
     return '<div class="banner small">Pairing invite detected. Press “Join as edge device” to enroll this device into the recovery case.</div>';
@@ -450,12 +485,26 @@ function pairingBanner(): string {
 
 function joinCard(): string {
   const joined = state.status !== 'idle' && state.status !== 'error';
+  const gate = computeJoinGate({ hasBinding: Boolean(state.binding), hasInvite: Boolean(state.invite) });
+  const conflict = gate === 'conflict';
   const hb = state.lastHeartbeat ? `<div class="kv"><span>Last heartbeat</span><code>${esc(state.lastHeartbeat)}</code></div>` : '';
   const bindingRows = state.binding
     ? `<div class="kv"><span>Recovery case</span><code>${esc(shortId(state.binding.caseId))}</code></div>
        <div class="kv"><span>Device ref</span><code>${esc(shortId(state.binding.deviceRef))}</code></div>`
     : `<div class="kv"><span>Pairing</span><code>${state.invite ? 'invite ready — Join to enroll' : 'not paired'}</code></div>`;
   const joinLabel = state.binding ? 'Join as edge device' : state.invite ? 'Enroll & join' : 'Join as edge device';
+  const busyConnecting = state.connection === 'connecting';
+  let actionRow: string;
+  if (joined) {
+    actionRow = '<button class="dangerBtn" id="leaveBtn">Leave session</button>';
+  } else if (conflict) {
+    actionRow = `<button class="primaryBtn" id="keepCaseBtn" ${busyConnecting ? 'disabled' : ''}>${busyConnecting ? 'Joining…' : `Keep case ${esc(shortId(state.binding!.caseId))} &amp; reconnect`}</button>`;
+  } else {
+    actionRow = `<button class="primaryBtn" id="joinBtn" ${busyConnecting ? 'disabled' : ''}>${busyConnecting ? 'Joining…' : joinLabel}</button>`;
+  }
+  const footNote = conflict
+    ? `<p class="muted small">The invite you opened is for a <b>different</b> case and was not applied. To move this device to that case, close/complete case <code>${esc(shortId(state.binding!.caseId))}</code> from its console (which revokes this binding), then reopen the new link. A self-service device switch is a planned enrichment; v1 never orphans a binding by swapping it locally.</p>`
+    : '<p class="muted small">Joining registers this tab as a Worker for the tenant, bound to its recovery case via a Central-minted credential. The camera stays off until a task asks for it.</p>';
   return `
     <div class="card">
       <div class="cardHead"><h2>Join as edge device</h2>${connectionPill()}</div>
@@ -466,11 +515,9 @@ function joinCard(): string {
       <div class="kv"><span>Worker</span><code>${esc(state.workerId ?? '—')}</code></div>
       ${hb}
       <div class="row">
-        ${joined
-          ? '<button class="dangerBtn" id="leaveBtn">Leave session</button>'
-          : `<button class="primaryBtn" id="joinBtn" ${state.connection === 'connecting' ? 'disabled' : ''}>${state.connection === 'connecting' ? 'Joining…' : joinLabel}</button>`}
+        ${actionRow}
       </div>
-      <p class="muted small">Joining registers this tab as a Worker for the tenant, bound to its recovery case via a Central-minted credential. The camera stays off until a task asks for it.</p>
+      ${footNote}
     </div>`;
 }
 
@@ -652,6 +699,7 @@ function mountVideo(): void {
 
 function wireEdge(): void {
   root.querySelector('#joinBtn')?.addEventListener('click', () => void join());
+  root.querySelector('#keepCaseBtn')?.addEventListener('click', () => keepCurrentCase());
   root.querySelector('#leaveBtn')?.addEventListener('click', () => void leave());
   root.querySelector('#retrySyncBtn')?.addEventListener('click', () => void state.runtime?.flushPendingResults());
   root.querySelector('#openCamBtn')?.addEventListener('click', () => void openCamera());

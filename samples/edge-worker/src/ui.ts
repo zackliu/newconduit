@@ -110,3 +110,49 @@ export function computeDeviceStages(input: {
  * the accepted turn and enforces it on the matching delegate call. It is never encoded into the agent's message text.
  */
 export type ScanTarget = { scope: 'all' } | { deviceRef: string } | { deviceRefs: string[] };
+
+/**
+ * Which join action a Device Scan tab may take, derived purely from whether it already holds a durable Central
+ * binding and whether a fresh one-time invite is present:
+ *  - `unpaired`   — no binding, no invite: the tab must open a pairing link before it can join.
+ *  - `invite`     — no binding, invite present: redeem the invite once into a durable binding, then register.
+ *  - `reconnect`  — binding present, no invite: re-register with the stored binding credential (no invite needed).
+ *  - `conflict`   — binding present AND a fresh invite present (e.g. an invite minted from a DIFFERENT console/case).
+ *
+ * The `conflict` case is the important one: a tab must never silently discard the new invite and reconnect the old
+ * case (the operator who opened the new link would see nothing), and it must never overwrite its binding client-side
+ * and leave an orphaned, still-active Central binding on the old case. v1 resolves the conflict by keeping the
+ * current case — the new invite is dropped only on an explicit user action — and treats moving a device to another
+ * case as an operator close-case flow, not a silent swap. DOM-free so the decision can be unit-tested.
+ */
+export type JoinGate = 'unpaired' | 'invite' | 'reconnect' | 'conflict';
+
+export function computeJoinGate(input: { hasBinding: boolean; hasInvite: boolean }): JoinGate {
+  if (input.hasBinding && input.hasInvite) return 'conflict';
+  if (input.hasBinding) return 'reconnect';
+  if (input.hasInvite) return 'invite';
+  return 'unpaired';
+}
+
+/**
+ * Whether the operator console may hand the durable recovery agent a new instruction. Central only accepts a turn
+ * once the parent case has a worker attached — its status is `running`; sending while the case is still `queued`,
+ * `created`, `starting`, or `paused` fails immediately with `no_current_worker` (the turn is accepted then failed
+ * because there is no worker to route it to). So the console gates instruction entry on the parent actually being
+ * `running` and shows an explicit "waiting for parent capacity" state otherwise. This also honestly models a single
+ * capacity-1 agent pool: a second recovery case stays `queued` (not runnable) until the first frees the worker.
+ * DOM-free so the gate can be unit-tested.
+ */
+export type InstructionGate = 'disconnected' | 'no-session' | 'waiting-capacity' | 'sending' | 'ready';
+
+export function computeInstructionGate(input: {
+  connected: boolean;
+  hasParent: boolean;
+  parentStatus: string;
+  sending: boolean;
+}): InstructionGate {
+  if (!input.connected) return 'disconnected';
+  if (!input.hasParent) return 'no-session';
+  if (input.sending) return 'sending';
+  return input.parentStatus === 'running' ? 'ready' : 'waiting-capacity';
+}

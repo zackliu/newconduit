@@ -89,6 +89,7 @@ export type {
 	WorkerCondition,
 	WorkerCommandAcceptedPayload,
 	WorkerCommandRejectedPayload,
+	WorkerResultAcknowledgedPayload,
 	WorkerHeartbeatPayload,
 	HostPoolControllerClass,
 	HostPoolInstanceRecord,

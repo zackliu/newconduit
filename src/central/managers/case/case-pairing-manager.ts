@@ -98,6 +98,7 @@ export interface CasePairingManagerOptions {
 export class CasePairingManager {
   private readonly inviteTtlMs: number;
   private readonly credentials: BindingCredentialProvider;
+  private readonly caseOperations = new Map<string, Promise<void>>();
 
   constructor(
     private readonly tenantId: string,
@@ -107,6 +108,15 @@ export class CasePairingManager {
   ) {
     this.inviteTtlMs = options.inviteTtlMs ?? DEFAULT_INVITE_TTL_MS;
     this.credentials = options.credentialProvider ?? new BearerCredentialProvider(options.credentialPepper ?? '');
+  }
+
+  async authorizeCaseAccess(caseId: string, principalId: string): Promise<void> {
+    this.requireNonEmpty(caseId, 'caseId');
+    this.requireNonEmpty(principalId, 'principalId');
+    const session = await this.storage.readSession(caseId);
+    if (!session || session.tenantId !== this.tenantId || session.owner !== principalId) {
+      throw new CasePairingError('case_not_found', `case ${caseId} is not an owned session`);
+    }
   }
 
   /**
@@ -160,51 +170,52 @@ export class CasePairingManager {
     const inviteSecret = this.requireBounded(input.inviteSecret, MAX_SECRET_LENGTH, 'inviteSecret');
     this.requireNonEmpty(input.inviteId, 'inviteId');
 
-    const invite = await this.storage.readPairingInvite(input.inviteId);
-    if (!invite || invite.tenantId !== this.tenantId) {
+    const initialInvite = await this.storage.readPairingInvite(input.inviteId);
+    if (!initialInvite || initialInvite.tenantId !== this.tenantId) {
       throw new CasePairingError('invite_not_found', 'pairing invite not found');
     }
-    if (invite.status !== 'pending' || invite.redeemedAt) {
-      throw new CasePairingError('invite_already_redeemed', 'pairing invite already used');
-    }
-    if (Date.parse(invite.expiresAt) <= Date.parse(this.clock.now())) {
-      throw new CasePairingError('invite_expired', 'pairing invite expired');
-    }
-    if (!this.credentials.verify(inviteSecret, { hash: invite.inviteSecretHash, salt: invite.inviteSecretSalt })) {
-      throw new CasePairingError('invite_secret_invalid', 'pairing invite secret invalid');
-    }
+    return this.serializeCaseOperation(initialInvite.caseId, async () => {
+      const invite = await this.storage.readPairingInvite(input.inviteId);
+      if (!invite || invite.tenantId !== this.tenantId || invite.caseId !== initialInvite.caseId) {
+        throw new CasePairingError('invite_not_found', 'pairing invite not found');
+      }
+      if (invite.status !== 'pending' || invite.redeemedAt) {
+        throw new CasePairingError('invite_already_redeemed', 'pairing invite already used');
+      }
+      if (Date.parse(invite.expiresAt) <= Date.parse(this.clock.now())) {
+        throw new CasePairingError('invite_expired', 'pairing invite expired');
+      }
+      if (!this.credentials.verify(inviteSecret, { hash: invite.inviteSecretHash, salt: invite.inviteSecretSalt })) {
+        throw new CasePairingError('invite_secret_invalid', 'pairing invite secret invalid');
+      }
 
-    const caseId = invite.caseId;
-    // A late redeem must not resurrect a closed case: if the case session terminalized after the invite was minted,
-    // reject rather than mint a live binding onto a case that will never route.
-    const session = await this.storage.readSession(caseId);
-    if (!session || session.tenantId !== this.tenantId) {
-      throw new CasePairingError('case_not_found', 'case is not an owned session');
-    }
-    if (TERMINAL_CASE_STATUSES.has(session.status)) {
-      throw new CasePairingError('case_closed', 'case is closed');
-    }
-    const deviceRef = deriveDeviceRef(this.tenantId, caseId, deviceId);
-    const now = this.clock.now();
+      const caseId = invite.caseId;
+      const session = await this.storage.readSession(caseId);
+      if (!session || session.tenantId !== this.tenantId) {
+        throw new CasePairingError('case_not_found', 'case is not an owned session');
+      }
+      if (TERMINAL_CASE_STATUSES.has(session.status)) {
+        throw new CasePairingError('case_closed', 'case is closed');
+      }
+      const deviceRef = deriveDeviceRef(this.tenantId, caseId, deviceId);
+      const now = this.clock.now();
 
-    // Claim the invite BEFORE writing the binding: if a concurrent redeem (a different device) wins this CAS, we
-    // reject rather than mint an unauthorized binding from a spent invite. A spent invite with no binding (rare
-    // storage failure after claim) is fail-safe — the operator simply mints a new invite.
-    const claimed = await this.storage.compareAndSetPairingInvite(invite.revision, {
-      ...invite,
-      status: 'redeemed',
-      redeemedAt: now,
-      redeemedDeviceRef: deviceRef,
-      updatedAt: now,
-      revision: invite.revision + 1
+      const claimed = await this.storage.compareAndSetPairingInvite(invite.revision, {
+        ...invite,
+        status: 'redeemed',
+        redeemedAt: now,
+        redeemedDeviceRef: deviceRef,
+        updatedAt: now,
+        revision: invite.revision + 1
+      });
+      if (!claimed) {
+        throw new CasePairingError('invite_already_redeemed', 'pairing invite already used');
+      }
+
+      const { secret: bindingCredential, hashed } = this.credentials.issue();
+      await this.upsertBinding({ caseId, deviceId, deviceRef, deviceLabel, bindingCredentialHash: hashed.hash, bindingCredentialSalt: hashed.salt, now });
+      return { caseId, deviceRef, bindingCredential };
     });
-    if (!claimed) {
-      throw new CasePairingError('invite_already_redeemed', 'pairing invite already used');
-    }
-
-    const { secret: bindingCredential, hashed } = this.credentials.issue();
-    await this.upsertBinding({ caseId, deviceId, deviceRef, deviceLabel, bindingCredentialHash: hashed.hash, bindingCredentialSalt: hashed.salt, now });
-    return { caseId, deviceRef, bindingCredential };
   }
 
   /**
@@ -350,11 +361,13 @@ export class CasePairingManager {
   async revokeDevice(caseId: string, deviceRef: string): Promise<boolean> {
     this.requireNonEmpty(caseId, 'caseId');
     this.requireNonEmpty(deviceRef, 'deviceRef');
-    const binding = await this.storage.readCaseDeviceBinding(caseId, deviceRef);
-    if (!binding || binding.tenantId !== this.tenantId || binding.status !== 'active') {
-      return false;
-    }
-    return this.markBindingRevoked(binding);
+    return this.serializeCaseOperation(caseId, async () => {
+      const binding = await this.storage.readCaseDeviceBinding(caseId, deviceRef);
+      if (!binding || binding.tenantId !== this.tenantId || binding.status !== 'active') {
+        return false;
+      }
+      return this.markBindingRevoked(binding);
+    });
   }
 
   /**
@@ -364,16 +377,27 @@ export class CasePairingManager {
    */
   async revokeCase(caseId: string): Promise<number> {
     this.requireNonEmpty(caseId, 'caseId');
-    const bindings = (await this.storage.readCaseDeviceBindings(caseId)).filter(
-      (binding) => binding.tenantId === this.tenantId && binding.status === 'active'
-    );
-    let revoked = 0;
-    for (const binding of bindings) {
-      if (await this.markBindingRevoked(binding)) {
-        revoked += 1;
+    return this.serializeCaseOperation(caseId, async () => {
+      const bindings = (await this.storage.readCaseDeviceBindings(caseId)).filter(
+        (binding) => binding.tenantId === this.tenantId && binding.status === 'active'
+      );
+      let revoked = 0;
+      for (const binding of bindings) {
+        if (await this.markBindingRevoked(binding)) {
+          revoked += 1;
+        }
       }
+      return revoked;
+    });
+  }
+
+  async reconcileTerminalCases(): Promise<void> {
+    const terminalCases = (await this.storage.readSessions()).filter(
+      (session) => session.tenantId === this.tenantId && TERMINAL_CASE_STATUSES.has(session.status)
+    );
+    for (const session of terminalCases) {
+      await this.revokeCase(session.sessionId);
     }
-    return revoked;
   }
 
   private async markBindingRevoked(binding: CaseDeviceBindingRecord): Promise<boolean> {
@@ -398,5 +422,18 @@ export class CasePairingManager {
       throw new CasePairingError('invalid_input', `${field} is required and must be at most ${max} characters`);
     }
     return value;
+  }
+
+  private serializeCaseOperation<T>(caseId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.caseOperations.get(caseId) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.caseOperations.set(caseId, tail);
+    void tail.finally(() => {
+      if (this.caseOperations.get(caseId) === tail) {
+        this.caseOperations.delete(caseId);
+      }
+    });
+    return result;
   }
 }

@@ -1,15 +1,15 @@
-import type { EdgeAgent, EdgeAgentContext, EdgeTurnInput, EdgeTurnResult } from '../edge-agent';
-import { CanvasHeuristicAnalyzer, type FrameAnalysis, type FrameAnalyzer } from './frame-analyzer';
-import type { CodeObservation, DeviceObservation, LedIndicatorObservation } from './local-observers';
-import type { ImageSharingPolicy, ShareRequest, SharedImageArtifact } from './image-sharing';
+import type { EdgeAgent, EdgeAgentContext, EdgeTurnInput, EdgeTurnResult } from '../edge-agent.js';
+import { CanvasHeuristicAnalyzer, type FrameAnalysis, type FrameAnalyzer } from './frame-analyzer.js';
+import type { CodeObservation, DeviceObservation, LedIndicatorObservation } from './local-observers.js';
+import type { ImageSharingPolicy, ShareRequest, SharedImageArtifact } from './image-sharing.js';
 
 /**
  * The camera diagnostic agent turns a routed cloud-session task into a bounded, local device-capture
  * measurement. It never touches a sensor itself: capture is delegated to a `CaptureProvider` that must be
  * driven by an explicit user action, and the provider returns only structured `FrameAnalysis` plus optional
  * local observations (LED, barcode/QR) — the raw frame stays on the device by contract. An actual image is
- * only ever attached when the task carries explicit sharing consent and the capture provider is configured to
- * honour it; semantic interpretation of the evidence is left to the cloud agent.
+ * only ever attached when the local capture provider records explicit per-capture authorization and is
+ * configured to honour it; remote task data can request a scope but cannot grant consent.
  */
 
 export type CaptureSource = 'environment' | 'user';
@@ -21,7 +21,7 @@ export interface CaptureRequest {
   reason?: string;
   /** Observer kinds to run (e.g. `['led-indicator','code']`). Omitted runs all configured observers. */
   detect?: string[];
-  /** Optional consent-gated image-sharing request. Without `consent: true` no image is produced. */
+  /** Optional image-processing request. The device holder must authorize sharing separately and locally. */
   share?: ShareRequest;
 }
 
@@ -269,8 +269,7 @@ export class CameraDiagnosticAgent implements EdgeAgent {
   private parseShare(value: unknown): ShareRequest | undefined {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const record = value as Record<string, unknown>;
-    if (record.consent !== true) return undefined;
-    const share: ShareRequest = { consent: true };
+    const share: ShareRequest = {};
     if (typeof record.scope === 'string') share.scope = record.scope;
     if (typeof record.maxEdge === 'number') share.maxEdge = record.maxEdge;
     if (record.maskMode === 'blackout' || record.maskMode === 'pixelate') share.maskMode = record.maskMode;

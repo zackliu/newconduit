@@ -79,6 +79,11 @@ export interface SidecarAgentTurnResult {
 export interface SidecarAgentProcessAdapter {
   start(input: SidecarAgentProcessStartInput): Promise<void>;
   send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult>;
+  /** Non-secret runtime/provider identity facts the daemon merges into the Worker registration description so
+   *  Central and operators can positively identify the concrete runtime behind a Worker (e.g. a real Copilot
+   *  process and its model/provider host) rather than inferring it from selector labels alone. Must never include
+   *  bearer tokens, keys, or any other secret. Optional: adapters that carry no useful identity omit it. */
+  describeRuntime?(): Record<string, string>;
   respondToInteraction?(input: SidecarInteractionResponseInput): Promise<void>;
   pauseAtTurnBoundary?(input: { sessionId: string }): Promise<void>;
   stop?(input: { sessionId: string }): Promise<void>;

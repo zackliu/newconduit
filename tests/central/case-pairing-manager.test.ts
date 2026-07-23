@@ -109,6 +109,15 @@ test('scenario: minting an invite for an unowned case is rejected', async () => 
   });
 });
 
+test('scenario: case pairing access is restricted to the session owner', async () => {
+  await withManager(async ({ storage, manager }) => {
+    await writeCase(storage, 'case-1');
+    await manager.authorizeCaseAccess('case-1', 'owner-1');
+    await assertCode('case_not_found', () => manager.authorizeCaseAccess('case-1', 'other-owner'));
+    await assertCode('case_not_found', () => manager.authorizeCaseAccess('no-such-case', 'owner-1'));
+  });
+});
+
 test('scenario: two devices redeem into one case roster', async () => {
   await withManager(async ({ storage, manager }) => {
     await writeCase(storage, 'case-1');
@@ -239,6 +248,9 @@ test('scenario: a terminal case rejects a credential before its bindings are rev
     // Defense in depth: negotiate/reconnect is rejected on the terminal case, not on the (lagging) binding status.
     await assertCode('case_closed', () =>
       manager.resolveEdgeBinding({ caseId: 'case-1', deviceId: 'device-A', deviceRef: redeemed.deviceRef, bindingCredential: redeemed.bindingCredential }));
+
+    await manager.reconcileTerminalCases();
+    assert.equal((await manager.listCaseDevices('case-1')).length, 0);
   });
 });
 
