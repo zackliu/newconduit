@@ -33,7 +33,7 @@
 | [foundry-hosted-agent-workerpool-ch.md](foundry-hosted-agent-workerpool-ch.md) | 把 Foundry 作为又一类 host-pool adapter（worker pool 后端）的目标态设计：Foundry 只托管容器、命令仍走 Web PubSub（同 Docker）；host-pool adapter 持有一条 liveness invocation 做 boot/keepalive、boot payload 传 per-worker 引导、pause=terminate+我们自己的 snapshot、agent 定义放 repo 的 `foundry/`；Foundry 相关全是 config 可选的 class，无 if-else。 |
 | [durable-agent-delegation-ch.md](durable-agent-delegation-ch.md) | 定义 registered Delegate、Parent-scoped Delegation 与逐次 DelegationCall：现有 `copilot-poc` / `copilot-foundry` AgentSpec引用同一个Delegate，同一Parent/Delegate的Calls串行复用一个普通Child Session。 |
 | [durable-interaction-broker-ch.md](durable-interaction-broker-ch.md) | 定义 approval 与 client tool 的 canonical durable Interaction、普通 Session/Child 统一 owner 流程、单层 Parent projection、首次响应、ack 和 Worker delivery。 |
-| [ahp-host-alignment-ch.md](ahp-host-alignment-ch.md) | 把 central session service 对齐成 Agent Host Protocol (AHP) host 的目标态设计：资源模型完整符合 AHP、运行时用 capability 收窄；六个结构性决定（session identity、Chat 一等资源、turn 内容模型与 Interaction 收编、拆开被压平的 lifecycle/placement/activity、Delegation 表达、客户端传输）；必须一并修掉的现有建模缺陷；serverSeq/action log 持久化；AHP 表面覆盖矩阵与实施切片。 |
+| [ahp-host-alignment-ch.md](ahp-host-alignment-ch.md) | 把 central session service 对齐成 Agent Host Protocol (AHP) host 的目标态设计：引入 Work / Agent Task / Runtime Session 三层术语（Work = `ahp-session`，Agent Task = `ahp-chat`，Runtime Session 归运行时）；资源模型完整符合 AHP、运行时用 capability 收窄；六个结构性决定（Work identity、Agent Task 一等资源且拥有算力、turn 内容模型与 Interaction 收编、拆开被压平的 lifecycle/placement/activity、Delegation Child 归同一 Work、transport-pluggable 客户端接入）；必须一并修掉的现有建模缺陷；serverSeq/action log 持久化；AHP 表面覆盖矩阵与实施切片。 |
 
 ## 建议的后续拆分
 

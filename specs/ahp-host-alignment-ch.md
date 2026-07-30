@@ -11,7 +11,21 @@
 
 ## 1. 结论
 
-**可以做，而且做完之后架构会比现在更干净。** AHP 要解决的问题（N 个 client 共享同一批 agent session 的状态同步）与我们要解决的问题（session 是 durable identity、worker 是可替换算力）是正交的，且 AHP 官方 doctrine 明确把 agent loop、model provider、tool registry、hosting、恢复语义都排除在协议之外——这些恰好全部是我们的地盘。AHP 不会要求我们放弃 Worker/WorkerPool/lease/snapshot/pause/Delegation 中的任何一个。
+**可以做，而且做完之后架构会比现在更干净。** AHP 要解决的问题（N 个 client 共享同一批 agent 工作的状态同步）与我们要解决的问题（Work 是 durable identity、Worker 是可替换算力）是正交的，且 AHP 官方 doctrine 明确把 agent loop、model provider、tool registry、hosting、恢复语义都排除在协议之外——这些恰好全部是我们的地盘。AHP 不会要求我们放弃 Worker/WorkerPool/lease/snapshot/pause/Delegation 中的任何一个。
+
+### 术语
+
+三个词必须分清，spec 全文按此使用：
+
+| 词 | 指什么 | 拥有者 | AHP 侧对应 |
+| --- | --- | --- | --- |
+| **Work** | 一件持久的业务工作。归属、Agent Task 清单、事件日志、审计都挂在它上，状态与待审批由它聚合 | 我们（控制面） | `ahp-session:/<uuid>` |
+| **Agent Task** | Work 里的一段工作：一个已解析 AgentSpec + 一份 workspace + 一条 turn 序列绁定在一起，可单独放置到某个 Worker 上 | 我们（控制面） | `ahp-chat:/<cid>` |
+| **Runtime Session** | 一次具体执行的运行环境实例 | 运行时（Foundry Hosted agent / Docker / 自有集群） | 不出现在 AHP wire 上 |
+
+代码侧的重命名：`SessionRecord` → `WorkRecord`（`sessionId` → `workId`）；新增 `AgentTaskRecord`；`sessionLeaseId` → `taskLeaseId`（租约占的是一段 Agent Task，不是一个 session）；`Worker` / `HostPoolInstance` 不改。
+
+本文出现 `ahp-session`、`SessionState`、`createSession`、`listSessions` 时，都是 **AHP 协议词**，保持原样。我们不争「session」这个词：它对外归运行时，对内只作为 AHP 的协议字段名出现。
 
 ### 指导原则
 
@@ -23,10 +37,10 @@
 
 这**不是加一层适配器就能自然实现**的事情。有四处：
 
-1. **Session / Chat 职责切分**：`ChatRecord` 成为一等 durable 资源，拥有独立 `chatId` 与自己的 turn 序列；Session 保留 Worker 绑定、lease、workspace、snapshot、pause/resume。事件信封新增 `chatId`。
+1. **Work / Agent Task 职责切分**：`AgentTaskRecord` 成为一等 durable 资源，拥有独立 `agentTaskId`、自己的 turn 序列，以及 **Worker 绑定、lease、workspace、snapshot**；Work 拥有归属、Agent Task 清单、project、事件日志与审计，并派生出状态聚合。事件信封新增 `agentTaskId`。
 2. **客户端协议形态**：从"Web PubSub group 广播 + 自造 `ackId` 关联 + 扁平事件流"换成"单条双向 JSON-RPC 流 + channel 订阅 + 有序 action + snapshot/replay"。`ackId`、`client-private-inbox`、`SdkRuntimeEvent` 这套关联机制会被 JSON-RPC request id 与 `serverSeq` 完整取代。
 3. **Turn 内容模型**：`agent.output` 这个大杂烩 payload 无法被 reduce，必须拆成 typed response part（create-then-append，带 `partId`）与 tool call 状态机（七态，带 `toolCallId`）。
-4. **Interaction 的对外表达**：durable Interaction broker 的内部机制（CAS、first-response-wins、lease fencing）全部保留，但对外不再是独立的 `interaction.*` 事件族，而是收编进 AHP 的 tool call confirmation / client tool execution / elicitation 三条既有通道，并由 `session/inputNeeded` 做会话级聚合。
+4. **Interaction 的对外表达**：durable Interaction broker 的内部机制（CAS、first-response-wins、lease fencing）全部保留，但对外不再是独立的 `interaction.*` 事件族，而是收编进 AHP 的 tool call confirmation / client tool execution / elicitation 三条既有通道，并由 `session/inputNeeded` 做 Work 级聚合。
 
 不需要改：event log 作为 durable truth 的地位、Worker/WorkerPool/HostPoolInstance/lease/snapshot 全套调度与恢复、tenant/authorization/audit 边界。
 
@@ -62,7 +76,7 @@ ahp-session:/<uuid>         SessionState { provider, title, status, activity, li
 ahp-terminal:/<id>          ahp-changeset:/<id>   ahp-otlp:   ahp-resource-watch:/<id>
 ```
 
-关键点：**session 是协调作用域，chat 才是会话内容的载体**。一个 session 默认带一个 chat；多 chat 由 `AgentCapabilities.multipleChats` 门控，支持 `fork` 与 `sideChat`。chat 之间是平等 peer，`ChatOrigin` 只是渲染提示，不是层级结构。
+关键点：**session 是协调作用域，chat 才是对话内容的载体**。一个 session 默认带一个 chat；多 chat 由 `AgentCapabilities.multipleChats` 门控，支持 `fork` 与 `sideChat`。chat 之间是平等 peer，`ChatOrigin` 只是渲染提示，不是层级结构。
 
 ### 2.3 Turn 与 tool call
 
@@ -72,7 +86,7 @@ ahp-terminal:/<id>          ahp-changeset:/<id>   ahp-otlp:   ahp-resource-watch
 - Tool call 是 `status` 上的判别联合，七个状态：`streaming` → `pending-confirmation` → `running` → (`auth-required`) → `pending-result-confirmation` → `completed` / `cancelled`。
 - `ToolCallContributor` 区分 `client` 贡献（由某个 active client 执行并回填结果）与 `mcp` 贡献。
 - Elicitation 是 `InputRequestResponsePart`：live 交互与 durable 记录是同一个对象，多 client 共享 answer draft。
-- `SessionState.inputNeeded` 是会话级聚合，四种 kind：`chatInput`、`toolConfirmation`、`toolClientExecution`、`toolAuthentication`；每条自带 `chat` URI 与全部回答所需标识，client **无需订阅该 chat** 即可作答。
+- `SessionState.inputNeeded` 是 session 级聚合，四种 kind：`chatInput`、`toolConfirmation`、`toolClientExecution`、`toolAuthentication`；每条自带 `chat` URI 与全部回答所需标识，client **无需订阅该 chat** 即可作答。
 
 ### 2.4 命令面
 
@@ -86,7 +100,7 @@ ahp-terminal:/<id>          ahp-changeset:/<id>   ahp-otlp:   ahp-resource-watch
 
 agent loop、model provider/路由、tool registry 与 tool schema、agent 之间的协调语义、UI 框架、"每个 workspace 都有本地文件系统或 git"的假设、以及 ACP 的替代品。
 
-**这一段是整份报告最重要的依据**：AHP 是 client-facing presentation & synchronization layer，它上面是 client，下面是 host 自己的运行时。我们的 durable session runtime 正是"下面那一层"。
+**这一段是整份报告最重要的依据**：AHP 是 client-facing presentation & synchronization layer。**我们就是 AHP 定义的 host**，AHP 是我们这个控制面的客户端协议；而 agent 运行时（Foundry Hosted agent、容器、自有集群）在我们之下，不出现在 AHP wire 上。
 
 ---
 
@@ -111,9 +125,9 @@ agent loop、model provider/路由、tool registry 与 tool schema、agent 之�
 
 三句话：
 
-1. **我们的 central session service 就是 AHP 意义上的 host。** 它已经具备 AHP 假设的一切前提：host 权威状态、多 client、断线重连、有序事实、session 目录。
+1. **我们的 central session service 就是 AHP 意义上的 host。** 它已经具备 AHP 假设的一切前提：host 权威状态、多 client、断线重连、有序事实、session 清单。
 2. **我们缺的不是能力，是表达形态。** durable event log 已经是"有序、可 replay、host 权威"的事实流，只是它的形状是"运维事件"而不是"可 reduce 的 UI 状态变更"。
-3. **AHP 的 session/chat 二层结构对我们不是负担，反而正好填上我们缺的一层。** 我们现在把"协调作用域"和"会话内容"压在同一个 `SessionRecord` 上，这也是为什么 Delegation 的 Parent/Child 关系在 SDK 里只能靠 `parentSessionId` 这样一个扁平字段表达。
+3. **AHP 的 session/chat 二层结构对我们不是负担，它就是 Work / Agent Task。** 我们现在把"协调作用域"和"对话内容"压在同一个 `SessionRecord` 上，这也是为什么 Delegation 的 Parent/Child 关系在 SDK 里只能靠 `parentSessionId` 这样一个扁平字段表达。
 
 ---
 
@@ -126,15 +140,16 @@ agent loop、model provider/路由、tool registry 与 tool schema、agent 之�
 | `AgentInfo.provider` | `AgentSpec.agentSpecId` | 天然 | AgentSpec 的 launch/selector/pausePolicy 等调度字段不上 wire |
 | `AgentInfo.models[]` | 尚未建模 | 缺口 | 先返回空数组；模型选择进入产品范围后从 AgentSpec 的 provider config 派生 |
 | `listSessions` + `root/session*` | `session.list.requested` + `client-inbox` 的 `session.catalog.updated` / `session.status.updated` | 天然 | 语义几乎一一对应，我们已经有 tenant 投影通道这个概念 |
-| `ahp-session:/<uuid>` | `SessionRecord` | 需改 id 来源 | 见决定 A |
+| `ahp-session:/<uuid>` | `WorkRecord`（现 `SessionRecord`） | 需改 id 来源 | 见决定 A |
 | `SessionState.lifecycle` | 无直接对应 | 映射 | `creating` → 首次进入 running 之前；之后恒为 `ready` |
 | `SessionState.status`（位集） | `SessionStatus`（10 态） | 映射 | 见决定 D |
 | `SessionState.activity` | `lifecycleReason` + 状态名 | 天然 | AHP 明确把它定义为人类可读描述，正好装我们的 `queued`/`paused`/`resuming` |
 | `SessionState.serverTools` | `ResolvedAgentSpec.runtimeTools` | 天然 | Delegate 派生的 subagent tool 就是 server tool |
 | `SessionState.activeClients[].tools` | 无 | 新增 | 我们的 `interaction kind='tool_call'` 隐含了"client 提供工具"，AHP 让它显式化 |
-| `ahp-chat:/<cid>` / `ChatState` | 无 | 新增一等资源 | `ChatRecord` 独立 `chatId`；见决定 B |
-| `SessionState.chats[]` / `defaultChat` | 无 | 新增 | Session 拥有 chat 目录；见决定 B |
-| `Turn` / `ActiveTurn` | `turnSeq` + event 序列 | 需改内容模型 + 改作用域 | 序列从 session-scoped 迁到 chat-scoped（决定 B），内容 typed 化（决定 C） |
+| `ahp-chat:/<cid>` / `ChatState` | 无 | 新增一等资源 | `AgentTaskRecord` 独立 `agentTaskId`；见决定 B |
+| `SessionState.chats[]` / `defaultChat` | 无 | 新增 | Work 拥有 Agent Task 清单；见决定 B |
+| `SessionMetadata.project` | 无 | 新增 | Work 层的「在做什么」（仓库/工单/数据集）；与物理 workspace 无关，见决定 B |
+| `Turn` / `ActiveTurn` | `turnSeq` + event 序列 | 需改内容模型 + 改作用域 | 序列从 Work 迁到 Agent Task（决定 B），内容 typed 化（决定 C） |
 | `chat/turnStarted` | `input.accepted` | 天然 | |
 | `chat/delta` + `chat/responsePart` | `agent.output.delta` / `.message` | 需改 | 缺 `partId`，无法可靠 reduce |
 | `ToolCallState` 七态 | `agent.output.toolStarted/.toolCompleted` + 独立的 `interaction` | 需合并 | 见决定 C |
@@ -143,7 +158,7 @@ agent loop、model provider/路由、tool registry 与 tool schema、agent 之�
 | `InputRequestResponsePart`（elicitation） | 无独立表达 | 新增 | |
 | `SessionInputRequest.toolConfirmation` | `Interaction kind='approval'` | 需绑定 toolCallId | 见决定 C |
 | `SessionInputRequest.toolClientExecution` | `Interaction kind='tool_call'` | 天然 | |
-| `ChatOrigin.kind='tool'` + `ToolResultSubagentContent` | `Delegation` / Child Session | 高度契合 | 见决定 E |
+| `ChatOrigin.kind='tool'` + `ToolResultSubagentContent` | `Delegation` / Child | 高度契合 | Child 是同一 Work 下的另一个 Agent Task；见决定 E |
 | `ChatInteractivity.ReadOnly` | 无 | 新增 | 正是为 agent-team / worker chat 设计 |
 | `disposeSession` | 无（只有 cancel） | 新增 | |
 | pause / resume | `session.pause.requested` / `session.resume.requested` | **AHP 无对应** | 见决定 F |
@@ -160,46 +175,112 @@ agent loop、model provider/路由、tool registry 与 tool schema、agent 之�
 
 每条给出唯一结论，不留实现分支。
 
-### 决定 A：session identity 改为 client 生成
+### 决定 A：Work identity 改为 client 生成
 
 **现状**：`sessionId` 由 central 生成，client 靠 `ackId` 把创建请求和结果关联起来。
 **AHP 要求**：client 挑 URI（`ahp-session:/<uuid>`），`createSession` 以 URI 为幂等键，重复则返回 `SessionAlreadyExists -32003`。
 
-**决定**：`SessionRecord.sessionId` 改为 client 提供的 UUID，central 只负责 admission 与唯一性校验。
+**决定**：`WorkRecord.workId` 改为 client 提供的 UUID，central 只负责 admission 与唯一性校验。
 
-**理由**：这不是让步，是净简化。它让 create 天然幂等（重试不会造出第二个 session），让 client 在 RPC 返回前就能 `subscribe`，并且直接消灭 `ackId` + `client-private-inbox` 这一整套自造关联机制——JSON-RPC 的 request id 已经覆盖它。
+**理由**：这不是让步，是净简化。它让 create 天然幂等（重试不会造出第二个 Work），让 client 在 RPC 返回前就能 `subscribe`，并且直接消灭 `ackId` + `client-private-inbox` 这一整套自造关联机制——JSON-RPC 的 request id 已经覆盖它。
 
 **影响面**：`SessionManager.startSession`、`SessionStartManager`、SDK、`session.create.requested` payload。改动小，风险低。
 
-### 决定 B：Chat 是一等 durable 资源；「一个 session 一个 chat」是 capability 约束，不是模型恒等式
+### 决定 B：Agent Task 是一等 durable 资源，Work 不拥有算力
 
-AHP 自己就把「一个 session 能不能有多个 chat」定义成 `AgentCapabilities.multipleChats` 这个 capability。因此**完美符合 AHP 的唯一方式就是把它建成 capability**：模型侧无条件支持 Session 1..N Chat，运行侧由 agent 声明的能力决定实际允许几个。把 1:1 硬编码进身份或存储布局，就是把净效果当成了原语。
+AHP 的 session/chat 二层结构就是 Work / Agent Task。AHP 的多 chat 提案把 session 定义为「协调作用域，拥有共享的 workspace、project、**默认**模型和 agent、配置」，chat 定义为「这个作用域上的一条对话流」；动机场景第一条就是「一队专门化的 agent（reviewer、test-writer、implementer）并行工作」，并且明确写着 agent 在哪跑、worker 怎么起属于 harness 层，AHP 不管。
 
-**决定**：
+所以：**一个 Work 下的多个 Agent Task 可以是不同 agent，可以跑在不同 Worker 上，AHP 对此没有任何限制。**
 
-1. **`ChatRecord` 是一等 durable 资源**，拥有 central 分配的独立 `chatId`（**不从 `sessionId` 派生**）。字段：`chatId`、`sessionId`、`title`、`status`、`activity`、`origin`、`interactivity`、`nextTurnSeq`、`workingDirectories?`、`modifiedAt`。
-2. **turn 序列归 Chat**。`SessionRecord.nextTurnSeq` 迁移到 `ChatRecord.nextTurnSeq`；`turnId` 在 chat 内唯一，不再是 session 全局。
-3. **事件信封新增 `chatId`**。会话内容事件（input、agent output、tool call、turn 终态、interaction）带 `chatId`；算力与生命周期事件（assign、pause、lease.lost、worker.*）只带 `sessionId`。
-4. **Session 拥有 chat 目录**：`chatIds[]` + `defaultChatId`。Session 创建时由 central 自动建立 default chat 并 append `session/chatAdded`。
-5. **职责切分固定为「Session 拥有算力与工作现场，Chat 拥有对话」**：Worker 绑定、`sessionLeaseId`、`workspaceRef`、snapshot、pause/resume 全部留在 Session；turns、responseParts、tool call、pending message、draft 全部在 Chat。Session 的 idle 判定改为「所有 chat 都没有 active turn」。
-6. **并发 chat 数由能力声明约束**，不由模型约束。AgentSpec 通过其 agent adapter 声明是否能多路复用对话线程；未声明时 central admission 拒绝第二个 `createChat`，并对应地不在 `AgentInfo.capabilities` 里放 `multipleChats`。
+#### B.0 Agent Task 的定义
 
-**当前落地程度**：所有 agent adapter 都不声明多 chat 能力，因此每个 session 实际恒定一个 chat。这是运行时事实，不是模型限制。
+**一个 Agent Task = 一个已解析的 AgentSpec + 一份 workspace + 一条 turn 序列，三者绑定在一起，共同组成一段可暂停、可恢复、可单独放置到某个 Worker 上的工作。**
 
-**解开多 chat 时允许改什么、不允许改什么**（这是本决定的验收判据）：
+三者必须同生同死：换一个 AgentSpec 就是换一个 agent，它看不懂前一个 agent 的 turn 历史；换一份 workspace 就是换一个工作现场，旧 turn 里的文件引用全部失效。因此它们不能分属不同资源。
+
+**什么时候产生一个新 Agent Task**，完整列举（没有第四种）：
+
+| 触发 | 产生者 | `origin` |
+| --- | --- | --- |
+| Work 创建 | central 自动建默认 Agent Task | 无 |
+| Parent 调用一个 Delegate tool | `DelegationManager` | `{ kind: 'tool', chat, toolCallId }` |
+| client 显式 `createChat` | client（需声明 `fork` / `sideChat`，见 B.4；当前不声明） | `{ kind: 'fork' \| 'sideChat', chat }` |
+
+**什么不会产生新 Agent Task**：pause / resume / 换 Worker / 恢复 snapshot / 中央重启。这些只改变同一个 Agent Task 的 `placement`，不改变它的身份。同一个 `(Parent, Delegate)` 关系的多次调用复用同一个 Child Agent Task，这是现有 Delegation 语义，不变。
+
+#### B.1 具体决定
+
+1. **`AgentTaskRecord` 是一等 durable 资源**，拥有 central 分配的独立 `agentTaskId`（**不从 `workId` 派生**）。字段：`agentTaskId`、`workId`、`title`、`origin`、`interactivity`、`activity`、`placement`、`nextTurnSeq`、`resolvedAgentSpec`、`currentWorkerId`、`taskLeaseId`、`workspaceRef`、`latestSnapshotRef`、`eventCursor`、`updatedAt`。
+2. **turn 序列归 Agent Task**。`nextTurnSeq` 从 `WorkRecord` 迁入，`turnId` 在 Agent Task 内唯一，不再是 Work 全局。
+3. **`sessionLeaseId` 改名为 `taskLeaseId`**。这个 fencing token 标记的是「某个 Worker 当前占着哪一段工作」，占用发生在 Agent Task 层。名字里的 “session” 在三层术语下指向不明（既可读成 AHP session，又可读成 Runtime Session），必须改。`RuntimeEvent`、`SessionAssignPayload`、心跳与 worker command 全部跟着改。
+4. **事件信封新增 `agentTaskId`**。信封指 `RuntimeEvent<TPayload>` 中 `payload` 之外的公共字段（现为 `eventId`、`sessionId`、`workerId`、`sequence`、`type`、`timestamp`、`actor`、`turnSeq`、`sessionLeaseId`）——即不拆开 payload 就能用于路由、排序、鉴权的那一层。改造后信封为：`eventId`、`workId`、`agentTaskId?`、`workerId?`、`sequence`、`type`、`timestamp`、`actor`、`turnSeq?`、`taskLeaseId?`。`agentTaskId` 在对话与算力事件上必填（input、agent output、tool call、turn 终态、interaction、assign、pause、lease.lost），在 Work 级事件上缺失（Work 创建、Work 终态、Agent Task 清单变更）。
+5. **Work 拥有 Agent Task 清单**：`agentTaskIds[]` + `defaultAgentTaskId`，即本 Work 包含哪些 Agent Task、哪个是默认。这是成员索引，与文件系统无关。Work 创建时由 central 自动建立默认 Agent Task 并 append `session/chatAdded`。
+
+#### B.2 职责切分
+
+分两类，不得混淆：**拥有**指该字段是该记录的 durable 真相，写入存储；**派生**指它不落盘，每次从下层算出来。
+
+**Agent Task 拥有**：
+
+| 字段 | 说明 |
+| --- | --- |
+| `resolvedAgentSpec` | 这一段由哪个 agent 承担 |
+| `currentWorkerId` / `taskLeaseId` / `placement` | 算力归属与 fencing |
+| `workspaceRef` / `latestSnapshotRef` | 工作现场与它的快照 |
+| `activity` | 这条对话当前在干什么 |
+| `nextTurnSeq` 与全部 turn 内容 | responseParts、tool call、pending message、draft |
+| `title` / `origin` / `interactivity` | AHP `ChatSummary` / `ChatState` 对应字段 |
+
+**Work 拥有**：
+
+| 字段 | 说明 |
+| --- | --- |
+| `tenantId` / `owner` | 归属与授权边界 |
+| `project` | 这件事是关于什么的（仓库 / 工单 / 数据集），逻辑标识，不是物理路径 |
+| `agentTaskIds[]` / `defaultAgentTaskId` | 本 Work 包含哪些 Agent Task、哪个是默认 |
+| `lifecycle` | 这件工作本身是否还在 |
+| `title` | AHP `SessionState.title` |
+| 事件日志与审计 | 见下 |
+
+**Work 派生（不落盘）**：
+
+| 派生值 | 从哪里算 |
+| --- | --- |
+| `SessionState.status` 位集 | 各 Agent Task 的 `activity` 聚合（见决定 D） |
+| `SessionState.activity` | 贡献 status 位的那个 Agent Task 的 `placement` |
+| `SessionState.inputNeeded` | 各 Agent Task 待决 `InteractionRecord` 的并集 |
+| `provider` | 牵头 Agent Task（默认 Agent Task）的 `resolvedAgentSpec` |
+
+这里有两处之前写得含糊，现在固定：
+
+- **待审批的 owner 是 Agent Task，不是 Work。** `InteractionRecord` 挂在发起它的 Agent Task 上，它的 lease fencing 用的也是该 Agent Task 的 `taskLeaseId`。Work 只提供聚合视图（对应 AHP 的 `SessionState.inputNeeded`）。说「Work 拥有跨 task 的待审批」是错的。
+- **事件日志是 Work 级的单一有序流，`agentTaskId` 是它上面的一个维度。** 日志由 Work 拥有（`sequence` 在 Work 内单调，审计与回放以 Work 为单位）；某个 Agent Task 的历史是对这条流按 `agentTaskId` 过滤的结果，不是另一条独立日志。`AgentTaskRecord.eventCursor` 只是该 Agent Task 在这条共享流上的已投影位置。
+
+#### B.3 workspace 归 Agent Task
+
+**Work 不拥有 workspace。** 一个 Work 的两个 Agent Task，可以一个跑在 Foundry 容器的 `$HOME` 里、另一个跑在本地目录里——它们不在同一个命名空间，不能被塞进一个共享目录集合。Work 持有的是 `project`（AHP 的 `SessionMetadata.project`），即「这件事是关于什么的」，而不是任何物理路径。
+
+**pause / resume 的归属**：机制在 Agent Task（它才有 Worker、workspace 和 snapshot）。用户发起的「暂停这件工作」是 Work 级操作，实现为向其全部 Agent Task 扇出，不是另一种机制。idle 自动回收逐 Agent Task 独立判定。
+
+**`workingDirectories` 怎么填**：现在不填。该字段可选，且「每个 workspace 都有本地文件系统或 git」被 AHP 列为 anti-goal；同时不声明 `multipleWorkingDirectories`。等 `resource*` 落地（切片 S9）后，每个 Agent Task 的 workspace 由我们铸一个 URI（`ahp-ws://<workId>/<agentTaskId>/`），Work 的集合是各 Agent Task 的并集，AHP 要求的「chat 工作目录 ⊆ session 工作目录」按构造成立。**命名空间是我们的，不是后端的**——这与 `workspaceRef` 保持不透明句柄一致。
+
+#### B.4 能力声明
+
+**必须声明 `multipleChats`**。多 Agent Task 不是将来的可选能力，它是 Work 模型的基础：Delegation 产生的每一个 Child 都是本 Work 下的一个 Agent Task。`fork` / `sideChat` 是另外两个独立 capability，按 agent adapter 的实际能力分别声明。
+
+**验收判据**：
 
 | 允许改 | 不允许改 |
 | --- | --- |
-| agent adapter 声明 `multipleChats`（含 `fork` / `sideChat`） | `ChatRecord` / `SessionRecord` / 事件信封 / `InteractionRecord` / `DelegationCall` 的 schema |
-| central admission 放行 `createChat` | 存储布局与 id 分配方式 |
-| workspace adapter 提供 per-chat 视图（例如每 chat 一个 git worktree） | AHP wire contract 与 channel URI 形态 |
-| sidecar agent adapter 多路复用对话线程 | Session 对 Worker / lease / snapshot 的所有权 |
+| agent adapter 声明 `fork` / `sideChat` | `WorkRecord` / `AgentTaskRecord` / 事件信封 / `InteractionRecord` / `DelegationCall` 的 schema |
+| 新增一种运行时后端 | Work 与 Agent Task 的拥有/派生切分 |
+| workspace adapter 提供 per-task 视图 | Agent Task 对 Worker / lease / snapshot / workspace 的所有权 |
+| sidecar agent adapter 多路复用对话线程 | AHP wire contract 与 channel URI 形态 |
 
-换句话说：开启多 chat 必须是 **adapter 能力声明 + controller 准入策略** 的改动，落不到资源模型上。如果将来发现必须改 schema 才能支持多 chat，说明这一版建模是错的。
+**两个待处理的协议细节**：
 
-**真实前置条件**：多 chat 的障碍不在协议，在两处运行时事实——同一个 Worker 上的 agent process 能否承载两条独立对话线程，以及两条 chat 同时改同一份 workspace 的隔离方式。AHP 给出的隔离手段是 per-chat `workingDirectories`（官方例子是每 chat 一个 git worktree），我们的 `ChatRecord.workingDirectories` 字段为此预留。
-
-**为什么 Delegation Child 不是 chat 而是 session**：AHP session 只有**一个** `provider`、一套 workspace 归属、一个 `lifecycle`。我们的 Child 有自己的 AgentSpec、自己的 Worker、自己的 workspace、自己的 pause/resume 与 snapshot——它需要的正是 Session 拥有的那一半职责。塞进 Parent 的同一个 AHP session 会撕裂 AHP 自身的字段语义。见决定 E。
+- `AgentCapabilities.multipleChats` 挂在 `AgentInfo` 上（per provider），而一个 Work 可以跨 agent。我们按 Work 派生出的 `provider`（即默认 Agent Task 的 AgentSpec）来门控。
+- AHP 0.7.0 的 `ChatSummary` / `ChatState` 没有 per-chat agent 字段，提案里「一队专门化 agent」的意图与当前 types 有落差。近期用 `Message.agent`、chat `title`、`ToolResultSubagentContent.agentName` 表达；长期这是我们作为 host 应当向上游提的一条 proposal。
 
 ### 决定 C：Turn 内容模型 typed 化，Interaction 收编进 tool call 状态机
 
@@ -223,51 +304,54 @@ AHP 自己就把「一个 session 能不能有多个 chat」定义成 `AgentCapa
 
 **现状问题**：`SessionStatus` 把三个正交维度压成了一个 10 值枚举：
 
-- 会话本身是否还在：`created` / `completed` / `cancelled` / `failed`
+- 工作本身是否还在：`created` / `completed` / `cancelled` / `failed`
 - 算力放置到哪一步：`queued` / `starting` / `pausing` / `paused` / `resuming`
 - 当前对话在干什么：`running` 同时表示"有 worker"和"可以接消息"，却不区分"正在跑 turn"与"空闲等输入"
 
-压平的后果是状态机膨胀（`pausing`/`resuming` 这类瞬态本质上是放置过渡，却占据了会话状态位），且 chat 层引入后无法表达"一个 session 上多个 chat 各自的活动"。
+压平的后果是状态机膨胀（`pausing`/`resuming` 这类瞬态本质上是放置过渡，却占据了工作状态位），且 Agent Task 层引入后无法表达"一个 Work 上多个 Agent Task 各自的活动与各自的算力归属"。
 
 **决定**：拆成三个正交字段，删除原枚举。
 
 | 字段 | 归属 | 取值 | 含义 |
 | --- | --- | --- | --- |
-| `lifecycle` | Session | `active` / `completed` / `cancelled` / `failed` | 会话本身是否还在，后三者终态 |
-| `placement` | Session | `unplaced` / `queued` / `starting` / `placed` / `releasing` | 算力归属，host 内部概念 |
-| `activity` | **Chat** | `idle` / `running` / `awaiting-input` / `failed` | 这条对话在干什么 |
+| `lifecycle` | **Work** | `active` / `completed` / `cancelled` / `failed` | 这件工作本身是否还在，后三者终态 |
+| `placement` | **Agent Task** | `unplaced` / `queued` / `starting` / `placed` / `releasing` | 这一段的算力归属，host 内部概念 |
+| `activity` | **Agent Task** | `idle` / `running` / `awaiting-input` / `failed` | 这条对话在干什么 |
 
-“paused”不再是一个状态值，而是 `lifecycle: active` + `placement: unplaced` 这个组合的名字。“resuming”就是 `placement: starting`。两个瞬态枚举值消失。
+“paused”不再是一个状态值，而是某个 Agent Task 处于 `placement: unplaced` 而 Work 仍 `lifecycle: active` 这个组合的名字。“resuming”就是 `placement: starting`。两个瞬态枚举值消失。
 
 **AHP 映射随之变成恒等式**：
 
 | AHP 字段 | 来源 |
 | --- | --- |
-| `SessionState.lifecycle` | `creating`（首次 `placed` 之前）/ `creationFailed`（首次放置失败）/ `ready`（其余） |
-| `SessionState.status` 位集 | 从 **chat activity 聚合**：任一 chat `awaiting-input` → `InputNeeded`；任一 `failed` → `Error`；有 `running` → `InProgress`；否则 `Idle` |
-| `ChatState.status` 位集 | 该 chat 自己的 `activity` |
-| `SessionState.activity`（字符串） | 从 `placement` 生成：`waiting for capacity` / `starting worker` / `paused` / `releasing worker` |
-| `_meta.runtime` | `placement`、`currentWorkerId`、`sessionLeaseId`、`latestSnapshotRef` |
+| `SessionState.lifecycle` | `creating`（首个 Agent Task 首次 `placed` 之前）/ `creationFailed`（首次放置失败）/ `ready`（其余） |
+| `SessionState.status` 位集 | 从 **Agent Task activity 聚合**：任一 `awaiting-input` → `InputNeeded`；任一 `failed` → `Error`；有 `running` → `InProgress`；否则 `Idle` |
+| `ChatState.status` 位集 | 该 Agent Task 自己的 `activity` |
+| `SessionState.activity`（字符串） | 从贡献 status 位的那个 Agent Task 的 `placement` 生成：`waiting for capacity` / `starting worker` / `paused` / `releasing worker` |
+| `ChatState._meta.runtime` | 该 Agent Task 的 `placement`、`currentWorkerId`、`taskLeaseId`、`latestSnapshotRef` |
 
 **为什么这才是对的**：AHP 本来就规定 `SessionState.status` 是从 chats 聚合出来的。旧枚举把放置和活动绑在一起，根本无法参与这个聚合——之前需要的那张逐行枚举映射表就是压平的症状，而不是 AHP 难适配。拆开之后不需要映射表。
 
 `_meta` 是 AHP 明确保留的 escape hatch，此处是正当用法：baseline 体验不依赖它，我们自己的运维 UI 依赖它。
 
-### 决定 E：Delegation Child 是独立 AHP session，用 tool-origin + subagent content 表达因果
+### 决定 E：Delegation Child 是同一个 Work 下的另一个 Agent Task
 
 **决定**：
-- Child Session → 独立的 `ahp-session:/<childSessionId>`，出现在 `listSessions` 里（与现有 SDK 语义一致：Child 是普通 durable Session）。
-- Child 的 default chat 携带 `origin = { kind: 'tool', chat: 'ahp-chat:/<parentSessionId>', toolCallId }`。
-- Parent 那次 delegate tool call 的结果里带 `ToolResultSubagentContent { resource: 'ahp-chat:/<childSessionId>', title, agentName, description }`。
-- Child 的 chat 设 `interactivity: 'read-only'`（用户可观察但不直接发消息，输入由 Parent 的 delegate 调用驱动）。
+- Child → 本 Work 下新增一个 Agent Task，即同一个 `ahp-session:/<workId>` 下的另一个 `ahp-chat:/<childAgentTaskId>`。它有自己的 resolved AgentSpec、自己的 Worker、自己的 workspace 与 snapshot。
+- Child 携带 `origin = { kind: 'tool', chat: 'ahp-chat:/<parentAgentTaskId>', toolCallId }`。
+- Parent 那次 delegate tool call 的结果里带 `ToolResultSubagentContent { resource: 'ahp-chat:/<childAgentTaskId>', title, agentName, description }`，`agentName` 填 Child 的 AgentSpec id。
+- Child 设 `interactivity: 'read-only'`：用户可观察但不直接发消息，输入由 Parent 的 delegate 调用驱动。
+- **待审批通过 `SessionState.inputNeeded` 自动聚合到 Work 级**。AHP 的 `inputNeeded` 定义就是「聚合本 session 内所有 chat」，每条自带 `chat` URI 与全部作答标识，client 无需订阅该 chat 即可作答。
 
-**放弃**：wire 层面的 Parent interaction projection。
+**这解决三件事**：
 
-**理由与代价**：AHP 里每个 chat 都是平等可寻址的，任何有权限的 client 都可以直接订阅 Child chat 并对它的 tool call `dispatchAction`。Parent 的 UI 通过 `ToolResultSubagentContent` 就能拿到 Child chat URI 并内联渲染其待批准项。这比我们现在"把同一个 `interactionId` 投影成 Parent 的第二个 view"更简单，也避免了跨 session 的 `inputNeeded` 条目（AHP 的 `inputNeeded` 定义为"聚合本 session 内所有 chat"）。
+1. 客户端看到的是**一件 Work**，不是 N 个互不相干的 session。VS Code 的 Agent Sessions 视图里 Parent 与 Child 在同一条目下。
+2. Parent 侧不需要额外订阅就能看到 Child 的待审批——`inputNeeded` 是 Work 级聚合，这正是 AHP 为此设计的机制。
+3. `InteractionRecord.views[]` 那套「同一 interaction 投影成 Parent 第二个 view」可以整个删掉：Work 级聚合天然覆盖，不需要我们自己造投影。
 
-代价是：Parent 侧客户端必须额外 `subscribe` 一次 Child chat 才能看到待批准项，不能只靠 Parent 的 session state。这是可接受的——AHP 的懒加载订阅模型本来就是这么设计的，而且 `root/sessionSummaryChanged` 会让 Child session 在会话列表里亮起 `InputNeeded`。
+**AHP 的对应设计**：`ChatOrigin.kind='tool'`、`ToolResultSubagentContent`、`ChatInteractivity.ReadOnly` 三者就是为 agent-team 模式设计的，官方描述是「lead chat 完全可交互，worker chat 只读（可观察）或隐藏」。
 
-`InteractionRecord.views[]` 因此简化为单一 owner + 由 Delegation 关系推导的授权 principal 集合。
+**对 SDK 语义的影响**：Child 不再作为独立条目出现在 `listSessions` 里。现有 SDK 语义（Child 是普通 durable Session，支持 `open/send/history/pause/resume/cancel`）随之改变：Child 作为 Agent Task 可被订阅和观察，但不接受直接 `send`——这与 `interactivity: 'read-only'` 一致。[../sdk/client/public-protocol-spec-ch.md](../sdk/client/public-protocol-spec-ch.md) 里的 `parentSessionId` 字段随之退役。
 
 ### 决定 F：客户端接入是 transport-pluggable 的，基线 transport 是 central 直接终结的 WebSocket
 
@@ -275,7 +359,7 @@ AHP 自己就把「一个 session 能不能有多个 chat」定义成 `AgentCapa
 
 **决定**：
 
-1. **基线 transport**：central 直接终结 WebSocket，`GET /ahp?tenantId=...`，一条连接一个 AHP 会话。tenant 与 principal 在握手阶段解析（AHP 明确规定 endpoint 门禁属于 transport 层，在 `initialize` 之前完成）。
+1. **基线 transport**：central 直接终结 WebSocket，`GET /ahp?tenantId=...`，一条连接承载一个 AHP client 连接（一个 `clientId` + 一套订阅）。tenant 与 principal 在握手阶段解析（AHP 明确规定 endpoint 门禁属于 transport 层，在 `initialize` 之前完成）。
 2. **host 侧引入 transport 抽象，形状镜像 AHP 客户端**。AHP 协议是对称的（server 也会发起 `resource*` 与 `createResourceWatch` request），所以**每连接的接口与客户端的 `AhpTransport` 完全同构，直接复用**：
 
    ```ts
@@ -345,7 +429,7 @@ AHP 自己就把「一个 session 能不能有多个 chat」定义成 `AgentCapa
 | 释放判定与新输入并发 | 释放只能在**单一串行 reconcile** 中做出，并对观察到的 Session revision 做 CAS。输入推进 revision，使释放作废并重新评估 |
 | 输入到达时 worker 正在 pause-at-boundary / 做 snapshot | 输入进 `queuedMessages`，不投递给正在退出的 worker；新 worker 就绪后按 AHP 队列规则消费 |
 | 多个 client 在未放置时同时发消息 | 按到达顺序入队，放置完成后 FIFO 消费；AHP 队列消费规则已定义此行为 |
-| 旧 worker 释放后仍尝试写入 | `sessionLeaseId` fencing，既有机制不变 |
+| 旧 worker 释放后仍尝试写入 | `taskLeaseId` fencing，既有机制不变（仅改名） |
 | 存在未决 interaction 时被判定为 idle | 未决 interaction 本身是需求信号，reconcile 不会判定 idle |
 | 放置失败（无 capacity 或启动失败） | Session 停在 `placement: queued`，`activity` 说明原因；已接受的 turn 不丢弃，也不把放置失败伪装成 turn 失败 |
 
@@ -373,7 +457,7 @@ AHP 自己就把「一个 session 能不能有多个 chat」定义成 `AgentCapa
 
 把意图（`.requested`）和事实（`.created`）放进同一个类型、同一条流，是典型的 command/event 混淆。它直接导致了 `toClientAckEvent` 那种 `{...event, type, payload}` 复制信封的写法——一个 ack 里带着毫无意义的 `sequence` 和 `sessionLeaseId`。
 
-**修法**：拆成三个不相关的类型族——**Command**（客户端意图，由 AHP JSON-RPC 承担，不持久化）、**Fact**（durable event log，带 `sequence` / `chatId` / `sessionLeaseId`）、**WorkerCommand**（central → sidecar，带 fencing，不入 event log）。回执与投影不再是独立类型，分别变成 JSON-RPC response 与 AHP notification。
+**修法**：拆成三个不相关的类型族——**Command**（客户端意图，由 AHP JSON-RPC 承担，不持久化）、**Fact**（durable event log，信封字段见决定 B.1 第 4 条）、**WorkerCommand**（central → sidecar，带 fencing，不入 event log）。回执与投影不再是独立类型，分别变成 JSON-RPC response 与 AHP notification。
 
 ### 7.2 `sequence` 字段双语义
 
@@ -395,7 +479,7 @@ SDK 发出的事件都写 `sequence: 0`，central 持久化后才赋真值。同
 
 ### 7.6 `InteractionView` 把投递进度存进了 canonical record
 
-`requestedProjected` / `respondedProjected` / `interruptedProjected` 三个布尔把"事件有没有发出去"当成了 Interaction 的状态。随决定 E（取消 Parent projection）整组删除，`views[]` 塑回单一 owner + 由 Delegation 关系推导的授权 principal 集。
+`requestedProjected` / `respondedProjected` / `interruptedProjected` 三个布尔把"事件有没有发出去"当成了 Interaction 的状态。随决定 E，`views[]` 数组整个删除：Child 既然是同一 Work 下的 Agent Task，AHP 的 `inputNeeded` Work 级聚合已经覆盖 Parent 可见性，我们不需要自己造投影。owner 直接由 `InteractionRecord.agentTaskId` 表达。
 
 ### 7.7 Interaction 的双 ID 在 tool call 收编后失去理由
 
@@ -407,7 +491,7 @@ SDK 发出的事件都写 `sequence: 0`，central 持久化后才赋真值。同
 
 ### 7.9 `SessionRecord` 的时间/游标字段职责重叠
 
-`eventCursor`、`lastEventUpdatedAt`、`updatedAt` 三个字段语义交叠。Chat 层引入后重新划定：event 游标归 Chat（`ChatRecord` 的已投影位置），Session 只留一个 `updatedAt`。
+`eventCursor`、`lastEventUpdatedAt`、`updatedAt` 三个字段语义交叠。Agent Task 层引入后重新划定：event 游标归 Agent Task（`AgentTaskRecord` 的已投影位置），`WorkRecord` 只留一个 `updatedAt`。
 
 ### 7.10 硬编码的 demo principal
 
@@ -421,48 +505,96 @@ SDK 发出的事件都写 `sequence: 0`，central 持久化后才赋真值。同
 
 ## 8. 目标架构
 
+图里每条线都是**某个组件做的一件事**，不是数据流向。协议面在上、运行时在下，这个上下关系就是第 2.5 节的结论。
+
 ```mermaid
 flowchart TB
-    subgraph Clients["AHP Clients"]
-        VSC["VS Code / Web UI / CLI<br/>@microsoft/agent-host-protocol"]
+    VSC["AHP Client<br/>VS Code · Web UI · CLI"]
+
+    subgraph Outer["Central outer shell (no business commands)"]
+        LSN["AhpTransportListener<br/>WebSocket baseline · WebPubSub optional"]
     end
 
-    subgraph Outer["Central outer shell"]
-        LSN["AhpTransportListener（可插拔）<br/>基线：WebSocketListener · 可选：WebPubSubListener<br/>产出 (AhpTransport, 已认证 context)"]
+    subgraph Tenant["TenantRuntime"]
+        subgraph Proto["Protocol plane"]
+            AHPC["AhpConnectionController"]
+            SEQ["ActionSequencer"]
+            PROJ["ChannelProjectionManager"]
+        end
+        MAP["AgentEventMapper"]
+        subgraph Domain["Domain plane"]
+            WORK["WorkManager"]
+            TASK["AgentTaskManager"]
+            INT["InteractionManager"]
+            DEL["DelegationManager"]
+            POOL["WorkerPoolManager"]
+            SNAP["SnapshotManager"]
+        end
     end
 
-    subgraph Tenant["TenantRuntime (tenant-scoped)"]
-        direction TB
-        AHPC["AhpConnectionController<br/>per-connection: initialize / reconnect /<br/>subscribe / dispatchAction 路由"]
-        SEQ["ActionSequencer<br/>tenant 单调 serverSeq · durable action log · replay window"]
-        PROJ["ChannelProjectionManager<br/>RootState / SessionState / ChatState<br/>reducer 折叠 · snapshot"]
-        MAP["AgentEventMapper<br/>sidecar agent 事件 → chat action"]
-        MGR["既有 managers<br/>Session · Worker · WorkerPool · Interaction ·<br/>Delegation · Snapshot · Lease · EventLog"]
-        AHPC --> PROJ
-        AHPC --> MGR
-        MGR --> SEQ
-        MAP --> SEQ
-        SEQ --> PROJ
+    subgraph Worker["Worker"]
+        subgraph Sidecar["Sidecar (our product)"]
+            TR["WebPubSubClientAdapter<br/>implements SidecarRuntimeTransport"]
+            LCC["LeaseCommandController"]
+            HB["HeartbeatController"]
+            DMN["SidecarDaemon"]
+            WSA["WorkspaceAdapter<br/>Docker · Local"]
+            APA["AgentProcessAdapter<br/>Copilot · …"]
+        end
+        AGENT["Agent process<br/>third-party agent runtime"]
     end
 
-    subgraph Store["Durable storage"]
-        EV["Event log (truth)"]
-        AL["Action log (ordered projection)"]
-        ST["Session catalog · Chat catalog · Interaction · Delegation · Worker · Snapshot"]
-    end
+    EV[("Event log<br/>durable truth")]
+    AL[("Action log<br/>ordered projection")]
 
-    subgraph Workers["Workers"]
-        SC["Sidecar + Agent process"]
-    end
+    VSC -->|"JSON-RPC over AhpTransport"| LSN
+    LSN -->|"authenticate tenant + principal, hand off connection"| AHPC
 
-    VSC <-->|"JSON-RPC over AhpTransport"| LSN
-    LSN -->|"attachAhpConnection(transport, context)"| AHPC
-    MGR <--> ST
-    MGR --> EV
-    SEQ <--> AL
-    MGR <-->|"Web PubSub<br/>worker commands / tenant inbox"| SC
-    SC --> MAP
+    AHPC -->|"createSession · disposeSession"| WORK
+    AHPC -->|"send message · cancel turn"| TASK
+    AHPC -->|"confirm tool call · answer elicitation"| INT
+    AHPC -->|"subscribe · reconnect"| PROJ
+
+    WORK -->|"create default Agent Task"| TASK
+    DEL -->|"create one Child per Delegate call"| TASK
+    TASK -->|"request placement"| POOL
+    TASK -->|"capture before release · restore on resume"| SNAP
+    POOL -->|"assign · pause (lease-fenced)"| TR
+    HB -->|"heartbeat renews lease; silence means reclaim"| POOL
+
+    TR -->|"deliver worker command"| LCC
+    LCC -->|"validate taskLeaseId, then admit"| DMN
+    DMN -->|"mount workspace · capture / restore"| WSA
+    DMN -->|"feed input · drive one turn"| APA
+    APA -.->|"process stdio / SDK calls"| AGENT
+    APA -->|"emit typed agent events"| MAP
+
+    MAP -->|"translate to chat action"| SEQ
+    TASK -->|"submit state change as action"| SEQ
+    TASK -->|"append durable fact"| EV
+
+    SEQ -->|"assign serverSeq, persist"| AL
+    SEQ -->|"deliver in order"| PROJ
+    PROJ -->|"push to subscribers of that channel"| AHPC
+
+    classDef external fill:#fbfbfb,stroke:#999,stroke-dasharray:4 4,color:#555
+    class AGENT external
 ```
+
+**产品边界在 `AgentProcessAdapter` 上**。虚线框的 agent process 不是我们的代码——它是 Copilot SDK、别家 agent 框架或客户自己的进程。我们只要求它能被一个 adapter 包住：接收输入、产出 typed 事件、在边界处可暂停。这就是"sidecar 先适配既有 agent 进程"这条产品不变量在架构上的位置。换一个 agent 运行时＝写一个新的 `AgentProcessAdapter`，上面所有组件都不动。
+
+Sidecar 内部四件事各有归属：`WebPubSubClientAdapter` 负责反向连接（容器没有入站端口）、`LeaseCommandController` 负责 fencing 校验、`WorkspaceAdapter` 负责工作现场与快照、`AgentProcessAdapter` 负责翻译。`HeartbeatController` 的心跳是 lease 的续租信号，也是 central 判定 worker 死亡的唯一依据。
+
+图上只画了 `AgentTaskManager` 到 `ActionSequencer` / `Event log` 这一条，代表领域面的共同路径：**每个领域 manager 都走同一条**——状态变化提交为 action、事实 append 进 event log，没有旁路。
+
+三条主链读法：
+
+- **客户端命令**：`AhpConnectionController` 只做分发，业务落到对应 manager。它自己不持有任何 Work / Agent Task 状态。
+- **运行时事实**：agent 产出的事件经 `AgentEventMapper` 翻译成 chat action，与领域面提交的状态变化汇入同一个 `ActionSequencer`，拿到全局单调 `serverSeq` 后才对客户端可见。**这是唯一的编号入口。**
+- **恢复**：`Event log` 是 truth，`Action log` 是可从它确定性重建的有序投影（第 9 节）。
+
+`WorkerPoolManager` 以下（Worker 生命周期、HostPoolInstance、扩缩容）不出现在 AHP wire 上，这是决定 F 与第 11 节的边界。
+
 
 ### Ownership boundary
 
@@ -510,26 +642,27 @@ flowchart TB
 | 握手 | `initialize`、`ping`、`reconnect`、版本协商、`serverInfo` | 必须 | `AhpConnectionController` |
 | 订阅 | `subscribe`、`unsubscribe`、`action` 投递、`delivery.maxLatencyMs` 合并 | 必须 | `AhpConnectionController` + `ChannelProjectionManager` |
 | root | `RootState.agents`、`activeSessions`、`root/agentsChanged`、`root/activeSessionsChanged` | 必须 | `AgentSpecRegistry` 投影 |
-| session 目录 | `listSessions`（分页）、`root/sessionAdded|Removed|SummaryChanged` | 必须 | `SessionManager` |
-| session | `createSession`、`disposeSession`、`SessionState`、`session/ready`、`session/creationFailed`、`session/chatAdded`、`session/activityChanged`、`session/titleChanged` | 必须 | `SessionManager` + `SessionLifecycleManager` |
+| session 清单 | `listSessions`（分页）、`root/sessionAdded|Removed|SummaryChanged` | 必须 | `WorkManager` |
+| session | `createSession`、`disposeSession`、`SessionState`、`session/ready`、`session/creationFailed`、`session/chatAdded`、`session/activityChanged`、`session/titleChanged` | 必须 | `WorkManager` + `AgentTaskManager` |
 | chat 基础 | `chat/turnStarted`、`chat/responsePart`、`chat/delta`、`chat/reasoning`、`chat/turnComplete`、`chat/turnCancelled`、`chat/error`、`chat/usage`、`chat/activityChanged` | 必须 | `AgentEventMapper` |
 | tool call | `chat/toolCallStart|Delta|Ready|Confirmed|Complete|ResultConfirmed|ContentChanged` 全套七态 | 必须 | `AgentEventMapper` + `InteractionManager` |
 | 输入聚合 | `session/inputNeededSet|Removed`、`chat/inputRequested|AnswerChanged|Completed` | 必须 | `InteractionManager` |
 | active client | `session/activeClientSet|Removed`、client 贡献 tool | 必须 | `AhpConnectionController` |
+| 多 chat | `multipleChats` capability、`session/chatAdded` | 必须 | 一个 Work 下多个 Agent Task 是模型基础，见决定 B/E |
+| 委派 | `ChatOrigin.tool`、`ToolResultSubagentContent`、`ChatInteractivity` | 必须 | `DelegationManager`，见决定 E |
 | 历史分页 | `fetchTurns`、`chat/turnsLoaded`、`turnsNextCursor`、`view.turns` | 后续 | `EventLogManager`（event log 天然可分页） |
 | 认证 | `authenticate`、`AgentInfo.protectedResources`、`auth/required`、`AuthRequired -32007` | 后续 | 新 `AhpAuthController` |
-| 会话配置 | `resolveSessionConfig`、`sessionConfigCompletions`、`SessionConfigState` | 后续 | 承载我们的 workspace/labels 输入 |
-| 委派 | `ChatOrigin.tool`、`ToolResultSubagentContent`、`ChatInteractivity` | 后续 | `DelegationManager` |
+| Work 配置 | `resolveSessionConfig`、`sessionConfigCompletions`、`SessionConfigState` | 后续 | 承载我们的 workspace/labels 输入 |
 | 补全 | `completions`、`completionTriggerCharacters` | 后续 | |
 | 文件系统 | 9 个 `resource*` + `createResourceWatch`（含 server→client 反向） | 后续 | 需 central→worker 的 workspace 访问通道 |
-| 多 chat | `createChat`、`fork`、`sideChat`、`multipleChats` capability | 不声明（模型已支持） | agent adapter 声明能力 + admission 放行即可，见决定 B |
-| 多工作目录 | `multipleWorkingDirectories` capability | 不声明（字段已预留） | `ChatRecord.workingDirectories` 已在模型内 |
+| 新建/分叉 chat | `createChat`、`fork`、`sideChat` | 不声明 | 需 agent adapter 具备对应能力后单独声明 |
+| 多工作目录 | `multipleWorkingDirectories` capability | 不声明 | 一个 Agent Task 对应一份 workspace |
 | terminal | `createTerminal`、`ahp-terminal:` | 不声明 | |
 | changeset | `ahp-changeset:`、`invokeChangesetOperation` | 不声明 | |
 | annotations / MCP customizations / MCP Apps | — | 不声明 | |
 | OTLP | `ahp-otlp:` | 不声明 | `InitializeResult.telemetry` 留空 |
 
-AHP 的 capability-first 设计让"不声明"是零成本的：不声明就等于不支持，client 必须降级。注意区分**不声明 capability**（模型支持、只是没打开）与**不实现**（协议表面根本没接线）——多 chat 与多工作目录属于前者。
+AHP 的 capability-first 设计让"不声明"是零成本的：不声明就等于不支持，client 必须降级。注意区分**不声明 capability**（模型支持、只是运行时能力不具备）与**不实现**（协议表面根本没接线）——`fork` / `sideChat` 属于前者。
 
 ---
 
@@ -542,7 +675,7 @@ AHP 的 capability-first 设计让"不声明"是零成本的：不声明就等�
 | snapshot / restore / recovery mode | 完全内部。恢复降级原因通过 `session/activityChanged` + `_meta` 暴露 |
 | tenant | 一个 AHP endpoint = 一个 tenant 视图，tenant 不上 wire |
 | audit | 完全内部，AHP 无对应概念 |
-| Delegate 注册与 DelegationCall 记录 | 内部。对外只体现为 server tool + subagent chat |
+| Delegate 注册与 DelegationCall 记录 | 内部。对外只体现为 server tool + 同 Work 下的 subagent chat |
 
 **判断**：这些恰好全部落在 AHP doctrine 明示的 anti-goal 里（"AHP intentionally does not define... hosting、recovery、agent-to-agent coordination"）。这不是我们在协议外偷跑，而是协议设计上就把这一层留给了 host。这也是"我们的功能可以完整保留"的根本原因。
 
@@ -550,21 +683,131 @@ AHP 的 capability-first 设计让"不声明"是零成本的：不声明就等�
 
 ## 12. 实施切片
 
-每片都必须能独立通过"用 AHP 官方 TypeScript client（`@microsoft/agent-host-protocol/client` + `/ws`）连上并跑通"来验收。
+**切片规则**：每片是一个完整的能力面，不是一次机械改名。每片必须自带 scenario-based 测试，断言业务行为与运行时不变量，不断言源码形状。每片结束时 `pnpm build` / `pnpm typecheck` / `pnpm test` 与既有 Docker、Foundry e2e 全绿。
 
-| 切片 | 内容 | 验收 |
-| --- | --- | --- |
-| S0 | 引入 AHP 类型依赖；`AhpTransportListener` 抽象 + 基线 `WebSocketListener`（`GET /ahp`）；`initialize`（版本协商 + `serverInfo`）、`ping`、`subscribe('ahp-root://')`、只读 `RootState.agents`、`listSessions` | 官方 client 连上、拿到 agent 列表与会话列表；同一套 controller 在 `InMemoryTransport.pair()` 下也能跑通（证明协议层与 transport 无关）；不改任何内部模型 |
-| S1 | `ActionSequencer` + durable action log + tenant 原子序列（`RuntimeStorage` 扩展）+ `ChannelProjectionManager` + snapshot + `reconnect` replay/snapshot 双路径 | 断开连接、产生变更、重连后从 `lastSeenServerSeq` replay 到一致状态；超窗口回落 snapshot |
-| S2 | `createSession`（client URI，决定 A）、`disposeSession`、`SessionState` 全字段、`session/ready|creationFailed`；`ChatRecord` 作为一等资源落地（独立 `chatId`、`nextTurnSeq` 从 Session 迁出、事件信封加 `chatId`、chat 目录与 `session/chatAdded`，决定 B）、`root/session*` 通知 | 官方 client 创建会话、订阅 session channel、从 `chats[]` 拿到 chat URI 并订阅；重复 `createSession` 返回 `-32003` |
-| S3 | 事件信封拆分为 Command / Fact / WorkerCommand 三族（第 7.1、7.2 节）；sidecar agent 事件 typed 化（改 `SidecarAgentProcessEvent` 契约，删 `internalEvent`）+ `AgentEventMapper` + chat 基础 action（turn/part/delta/reasoning/complete/error/usage） | 真实 Copilot turn 在官方 client 上正确渲染成有序 response parts；`chat/delta` 全部有 `partId`；没有任何类型既是 command 又是 durable fact |
-| S4 | tool call 七态状态机 + Interaction 收编（决定 C）+ 双 ID 收敛为 `toolCallId`（第 7.7 节）+ `session/inputNeeded` 聚合 + `activeClients` | Docker e2e 里的"agent 写文件需批准"场景，用官方 client 通过 `chat/toolCallConfirmed` 批准；`already_resolved` 幂等语义保持 |
-| S5 | Delegation → tool-origin chat + `ToolResultSubagentContent` + `ChatInteractivity`（决定 E）；`InteractionView.*Projected` 与 `DelegationCall.awaitRequests` 删除（第 7.6、7.8 节） | Parent 调用 delegate，官方 client 从 subagent content 拿到 Child chat URI 并订阅到 Child 的完整 turn |
-| S6 | `authenticate` + `protectedResources` + `AuthRequired`；transport 握手真鉴权，删除 `DEMO_*_CONTEXT`（第 7.10 节）；`resolveSessionConfig`；`fetchTurns` 分页 + `view.turns` | 未授权 principal 被 `-32007` 拒绝并能通过 `authenticate` 恢复；长会话历史可分页加载 |
-| S7 | 拆除旧客户端路径：删 `sdk/client`、`/client/negotiate`、面向 client 的三个 Web PubSub group；`samples/` 全部迁到官方 client；清理 `poc-` 命名与 `tmp/` 残留（第 7.11 节） | 仓库内不再存在第二套客户端协议定义；webclient 用官方 client 跑通完整 demo |
-| S8 | `resource*` 远程 workspace 访问（central → worker） | 官方 client 通过 `resourceList`/`resourceRead` 浏览运行中 session 的 workspace |
+**验收方式分两类**，不能混为一谈：
 
-S7 是硬性拆除点：它之前新旧两条客户端路径并存只是为了让切片可验收，它之后不得再有任何旧路径残留。不为旧 SDK 保留兼容层，也不保留双行为开关。
+- **协议片**（S0、S3–S9）用官方 `@microsoft/agent-host-protocol` client 验收。
+- **内部片**（S1、S2）在 AHP 表面之下，官方 client 此时看不到它们。它们的验收是既有 e2e 保持绿 + 新增的模型不变量测试。硬要求"每片都用官方 client 验收"会逼出假的中间层。
+
+新增的协议层测试放 `tests/ahp/`，与既有 `tests/central`、`tests/sidecar` 并列。
+
+### S0 — AHP 协议骨架与可插拔传输
+
+**内容**：引入 AHP 类型依赖；`AhpTransportListener` 抽象 + 基线 `WebSocketListener`（`GET /ahp`）；`AhpConnectionController`；`initialize`（版本协商 + `serverInfo` + capability 声明）、`ping`、`subscribe` / `unsubscribe`；只读 `RootState.agents`；`listSessions` 从现有 `SessionRecord` 只读投影。不改任何内部模型。
+
+**测试**：
+- `tests/ahp/handshake.test.ts` — 版本协商成功；不支持的版本返回 `-32005`；`serverInfo` 与 capability 集合正确；未声明的 capability 对应命令返回 `MethodNotFound`。
+- `tests/ahp/root-channel.test.ts` — `subscribe('ahp-root://')` 拿到 `agents[]`；config 变更触发 `root/agentsChanged`；`unsubscribe` 后不再收到。
+- `tests/ahp/transport-neutrality.test.ts` — 同一 `AhpConnectionController` 在 `WebSocketListener` 与 `InMemoryTransport.pair()` 下产生**逐条相同**的消息序列。
+
+### S1 — 有序事实与断线恢复
+
+**内容**：`ActionSequencer`；durable action log；`RuntimeStorage` 的 tenant 级原子递增序列；`ChannelProjectionManager` + reducer + snapshot 物化；`reconnect` 的 replay / snapshot 双路径。
+
+**变更源**：此时还没有 `createSession`，replay 用 `RootState.agents` 的变更（增删 `config/agent-specs/` 条目）驱动。这是本片唯一可用的变更源，实现时不要等 S3。
+
+**测试**：
+- `tests/ahp/action-sequencer.test.ts` — `serverSeq` 在 tenant 内严格单调；并发 append 不重号不跳号；action log 删除后从 event log 重建出**逐个相同**的 `serverSeq`。
+- `tests/ahp/reconnect.test.ts` — 断线期间产生 N 个 action，重连按 `lastSeenServerSeq` 补齐；超出保留窗口回落整棵 snapshot；protocol notification 不参与重放。
+- `tests/central/local-file-storage.test.ts`（扩展）— 原子序列在并发递增与进程崩溃后不重号。
+
+### S2 — 内部资源模型重构
+
+这是最大的一片，也是唯一不能再拆的一片：`WorkRecord` / `AgentTaskRecord` 的拆分、状态三拆、事件信封重构互为前提，分开做会产生一个字段悬空的中间态。
+
+**内容**：
+- 事件信封拆成 Command / Fact / WorkerCommand 三族（第 7.1、7.2 节）。
+- `SessionRecord` → `WorkRecord`；`AgentTaskRecord` 成为一等 durable 资源；Worker 绑定、lease、`workspaceRef`、snapshot、`nextTurnSeq`、`eventCursor` 从 Work 迁入 Agent Task（决定 B）。
+- `sessionLeaseId` → `taskLeaseId`，贯穿 `RuntimeEvent`、assign payload、心跳、worker command。
+- **`SessionStatus` 10 值枚举拆成 `lifecycle`（Work）/ `placement`（Agent Task）/ `activity`（Agent Task）**（决定 D）。
+- `WorkRecord` 时间字段收敛为单一 `updatedAt`（第 7.9 节）。
+
+**测试**：
+- `tests/central/work-agent-task-model.test.ts` — 创建 Work 自动建默认 Agent Task 并进清单；Agent Task 持有 Worker/lease/workspace，Work 上查不到这些字段；两个 Agent Task 可绑不同 Worker 且互不影响。
+- `tests/central/status-decomposition.test.ts` — 三轴独立取值；"paused" = Work `active` + Agent Task `unplaced`；`pausing` / `resuming` 不再是任何字段的合法值；一个 Agent Task 失败不把 Work 拖成终态。
+- `tests/central/event-envelope.test.ts` — Fact 必带 `workId`，对话与算力 Fact 必带 `agentTaskId`；Command 不进 event log；WorkerCommand 带 fencing 且不进 event log；没有任何类型同时出现在两族里。
+- `tests/central/task-lease-fencing.test.ts` — 旧 `taskLeaseId` 的写入被拒；Agent Task 换 Worker 后旧 lease 立即失效。
+- 既有 `tests/central/*`、`tests/recovery/session-memory.integration.test.ts`、Docker 与 Foundry e2e 全绿。
+
+### S3 — AHP Work / Agent Task 表面
+
+**内容**：决定 A（`workId` 由 client 提供，`createSession` 幂等）、`disposeSession`；`SessionState` 全字段（`status` / `activity` / `inputNeeded` 按决定 D 从 Agent Task 聚合派生）；`ChatState` 骨架；`chats[]` / `defaultChat`；`session/ready` / `creationFailed` / `chatAdded` / `activityChanged` / `titleChanged`；`root/session*`。
+
+**测试**：
+- `tests/ahp/create-session.test.ts` — client 提供 URI 后 create 幂等，重复返回 `-32003`；RPC 返回**之前**就能 `subscribe` 并收到后续 action；重试不产生第二个 Work。
+- `tests/ahp/session-state-aggregation.test.ts` — 单 Agent Task 与多 Agent Task 两种形态下，`status` 位集从各 Agent Task `activity` 聚合；任一 `awaiting-input` 置 `InputNeeded`；`lifecycle` 走 `creating` → `ready`，首次放置失败走 `creationFailed`。
+- `tests/ahp/session-catalog.test.ts` — `root/sessionAdded|Removed|SummaryChanged` 与 `listSessions` 分页一致。
+
+### S4 — Turn 内容 typed 化
+
+**内容**：`SidecarAgentProcessEvent` 重构为 typed 事件族并删除 `internalEvent`（第 7.3 节）；新增 `AgentEventMapper`；chat 基础 action（turnStarted / responsePart / delta / reasoning / turnComplete / turnCancelled / error / usage）；修复 `toolName` 被填成 `toolCallId`（第 7.5 节）；**处置 `dotnet-process-wrapper`——提供真正的 .NET adapter 或删除该 worker type 与 `docker-dotnet` 配置**（第 7.4 节）。
+
+**测试**：
+- `tests/sidecar/agent-process-events.test.ts` — typed 事件契约完整；不存在自由结构 payload；`toolName` 与 `toolCallId` 是两个不同来源的值。
+- `tests/ahp/agent-event-mapper.test.ts` — 文本 / reasoning / tool call 交错的事件流映射成**有序** `responseParts`；每个 `chat/delta` 都带能对上的 `partId`；乱序到达时 reduce 结果仍确定。
+- `tests/sidecar/copilot-process-adapter.test.ts`（扩展）— 真实 Copilot 事件样本映射到 typed 事件，覆盖每个分支。
+- Docker e2e：真实 Copilot turn 在官方 client 上渲染成正确的有序输出。
+
+### S5 — Tool call 七态与 Interaction 收编
+
+**内容**：tool call 七态状态机；`Interaction kind='approval'` → `pending-confirmation` + `toolConfirmation`；`kind='tool_call'` → `ToolCallRunningState` + `contributor:{kind:'client'}` + `toolClientExecution`；双 ID 收敛为 `toolCallId`（第 7.7 节）；`session/inputNeeded` 聚合；`activeClients` 与 client 贡献 tool（决定 C）。
+
+**测试**：
+- `tests/ahp/tool-call-state-machine.test.ts` — 七态合法迁移全覆盖；非法迁移被拒绝且不改变状态。
+- `tests/central/interaction-tool-call-binding.test.ts` — approval 必须携带可对上的 `toolCallId`；关联不上时**抛错**（视为 adapter 缺陷），不降级成 elicitation。
+- `tests/sidecar/interaction-broker.test.ts`（扩展）— revision CAS、first-response-wins、`already_resolved`、owner lease fencing 在新表达下逐条保持。
+- Docker e2e：写文件需批准的场景改由官方 client 经 `chat/toolCallConfirmed` 批准并完成。
+
+### S6 — Delegation 归入同一 Work
+
+**内容**：Child 改为同一 Work 下的 Agent Task（决定 E）；声明 `multipleChats`；`ChatOrigin.kind='tool'`；`ToolResultSubagentContent`；`ChatInteractivity.ReadOnly`；删除 `InteractionRecord.views[]` 与 `InteractionView` 类型（第 7.6 节）；删除 `DelegationCall.awaitRequests[]`（第 7.8 节）。
+
+**测试**：
+- `tests/delegation/child-as-agent-task.test.ts` — Child 出现在 Parent **同一个** `SessionState.chats[]` 里，带 `origin.kind='tool'` 与正确的 `toolCallId`；`listSessions` 中没有 Child 条目。
+- `tests/delegation/cross-task-input-needed.test.ts` — Child 的待审批**无需订阅 Child channel** 即出现在 Work 级 `inputNeeded`；Parent 侧作答与 Child 侧作答都生效且 first-response-wins；迟到的第二个响应返回 `already_resolved`。
+- `tests/delegation/read-only-child.test.ts` — Child 可订阅可观察，直接 `send` 被拒。
+- `tests/central/delegation-manager.test.ts`（扩展）— 同一 `(Parent, Delegate)` 的多次调用复用同一个 Child Agent Task，FIFO 串行不变。
+
+### S7 — 认证、历史分页与会话配置
+
+这三件事打包，是因为它们都是"client 取用 host 数据的准入面"：认证决定能不能取，`fetchTurns` 决定取多少，`resolveSessionConfig` 决定创建时能给什么。
+
+**内容**：`authenticate` + `AgentInfo.protectedResources` + `AuthRequired -32007`；transport 握手真鉴权并删除 `DEMO_CLIENT_CONTEXT` / `DEMO_SIDECAR_CONTEXT`（第 7.10 节）；`fetchTurns` 分页 + `view.turns`；`resolveSessionConfig` + `sessionConfigCompletions`。
+
+**测试**：
+- `tests/ahp/authentication.test.ts` — 未授权 principal 被 `-32007` 拒绝并能通过 `authenticate` 恢复；跨 tenant 访问返回 `-32009`；第 7 节要求的六个授权点（创建、连接、路由、回放、artifact、worker 注册）逐个断言。
+- `tests/ahp/fetch-turns.test.ts` — 长历史按游标分页；`view.turns` 窗口随订阅移动；游标失效有明确错误。
+- `tests/ahp/session-config.test.ts` — `resolveSessionConfig` 承载 workspace / labels 输入并被 create 采纳。
+
+### S8 — 拆除旧客户端路径
+
+**硬性拆除点**：S8 之前新旧两条客户端路径并存只是为了让切片可验收，S8 之后不得残留任何旧路径。不为旧 SDK 保留兼容层，不保留双行为开关。
+
+**内容**：删除 `sdk/client`、`POST /client/negotiate`、面向 client 的三个 Web PubSub group；`samples/` 全部迁到官方 client；补齐 runtime admin API（pause / resume / cancel，非 AHP 路径）——webclient demo 依赖它，缺了 demo 不完整；清理 `poc-` 命名与 `tmp/` 残留并补 `.gitignore`（第 7.11 节）。
+
+**测试**：
+- `tests/ahp/legacy-path-removed.test.ts` — `POST /client/negotiate` 返回 404；启动后 tenant 只创建 `tenant-inbox` 与 `worker-commands` 两类 group；旧 client 事件类型不再被发布。
+- `tests/ahp/runtime-admin-api.test.ts` — 经 admin API pause 后，AHP 视图上该 Agent Task 的 `activity` 与 Work 的 `SessionState.activity` 正确变化；resume 后恢复接消息。
+- webclient 端到端：连接 → 创建 Work → 发消息 → 批准 tool call → pause → resume，全程官方 client。
+
+### S9 — 远程 workspace 访问
+
+**内容**：9 个 `resource*` + `createResourceWatch`（含 server → client 反向）；每个 Agent Task 的 workspace 铸 `ahp-ws://<workId>/<agentTaskId>/` URI；回填 `workingDirectories`。
+
+**测试**：
+- `tests/ahp/resource-access.test.ts` — `resourceList` / `resourceRead` 经 central → worker 取到运行中 Agent Task 的真实文件；worker 不在位时返回明确错误。
+- `tests/ahp/workspace-uri.test.ts` — 「chat 工作目录 ⊆ session 工作目录」按构造成立；URI 不泄露后端路径或存储前缀。
+
+### 依赖顺序
+
+```text
+S0 ──> S1 ──> S3 ──> S4 ──> S5 ──> S6 ──> S7 ──> S8 ──> S9
+        │      ▲
+        └ S2 ──┘
+```
+
+S2 与 S0/S1 无依赖关系，可并行开工，但必须在 S3 之前合入：`SessionState` 的 `status` / `activity` / `inputNeeded` 全部是从 Agent Task 派生的，Agent Task 不存在就没有派生源。反过来，S2 不依赖任何 AHP 代码——这正是它能用既有 e2e 验收的原因。
 
 ---
 
@@ -576,17 +819,17 @@ S7 是硬性拆除点：它之前新旧两条客户端路径并存只是为了�
 - `session-events` 面向 client 的 group —— AHP channel 订阅覆盖
 - `POST /client/negotiate` —— 基线握手就是 WebSocket upgrade 本身
 - `AgentOutputPayload` 大杂烩载荷及其 `internalEvent` 原始转储
-- wire 层的 Parent interaction projection 与 `InteractionView.*Projected`
-- `SessionStatus` 10 值枚举（拆成 `lifecycle` / `placement` / chat `activity`）
+- wire 层的 Parent interaction projection、`InteractionView` 类型与 `InteractionRecord.views[]`
+- `SessionStatus` 10 值枚举（拆成 Work 的 `lifecycle` / Agent Task 的 `placement` 与 `activity`）
 - `DelegationCall.awaitRequests[]`
 - **`sdk/client` 这个协议客户端**（见下）
 
 **关于 SDK**：官方 `@microsoft/agent-host-protocol` 已提供 TypeScript / Rust / Kotlin / Go / Swift 五种客户端。我们再维护一份自有协议客户端，就是永久保留一条协议漂移面——[../sdk/client/public-protocol-spec-ch.md](../sdk/client/public-protocol-spec-ch.md) 里"SDK protocol drift 是 release blocker"这条规则的存在本身，就是这条漂移面的证据。成为 AHP host 之后，客户直接用官方客户端；`samples/` 全部迁到官方客户端，这同时就是最好的一致性测试。`public-protocol-spec-ch.md` 相应退役，由本文与 host 私有扩展说明（`_meta` 键、admin API）接替。只有在官方客户端之上确实反复出现同一段样板代码时，才考虑发布一个薄 helper 包，且它不得重新定义任何 wire 类型。
 
 **重建**（概念保留，形状重做）：
-- **event log**：仍是 durable truth，但信封拆分为 Command / Fact / WorkerCommand 三族（第 7.1 节），Fact 新增 `chatId`
-- **`InteractionRecord`**：CAS、first-response-wins、lease fencing、delivery checkpoint 全部保留；`views[]` 塑回单一 owner，双 ID 收敛为 `toolCallId`
-- **`SessionRecord`**：拆出 `ChatRecord`；`nextTurnSeq` 迁出；时间/游标字段收敛
+- **event log**：仍是 durable truth，但信封拆分为 Command / Fact / WorkerCommand 三族（第 7.1 节），Fact 新增 `agentTaskId`
+- **`InteractionRecord`**：CAS、first-response-wins、lease fencing、delivery checkpoint 全部保留；`views[]` 数组删除，owner 由 `agentTaskId` 直接表达；双 ID 收敛为 `toolCallId`
+- **`SessionRecord` → `WorkRecord`**：拆出 `AgentTaskRecord`；`nextTurnSeq`、Worker 绑定、lease（同时改名 `taskLeaseId`）、`workspaceRef`、snapshot、`placement`、`eventCursor` 全部迁出；时间字段收敛为单一 `updatedAt`
 - **`RuntimeChannel`**：从五类收缩为 `tenant-inbox` + `worker-commands` 两类
 
 **保留（不动）**：
@@ -605,12 +848,12 @@ S7 是硬性拆除点：它之前新旧两条客户端路径并存只是为了�
 | --- | --- | --- |
 | AHP 处于 0.x DRAFT | 官方明确"breaking changes to wire types, actions, and state shapes are expected" | 把所有映射集中在 `AgentEventMapper` + `ChannelProjectionManager` 两个模块；使用 `SUPPORTED_PROTOCOL_VERSIONS` 提供多版本兜底 |
 | tenant 级原子序列 | 多实例 central 下 `serverSeq` 必须严格单调 | 作为 `RuntimeStorage` 的一等契约（原子递增），`LocalFileStorage` 需扩展；生产后端需支持条件写 |
-| 大 payload | AHP 用 `ContentRef` + `resourceRead` 把大内容移出状态树；我们的 event payload 目前无上限 | S3 引入 payload 尺寸阈值，超阈值转 `ContentRef` |
-| approval ↔ toolCallId 关联 | 取决于 Copilot SDK 的 `permission.requested` 是否携带可关联标识 | S4 的第一个待验证项；关联不上按 adapter 缺陷修，不加协议分支 |
-| 跨 session 的 `ChatOrigin.tool` | AHP 未明文禁止，但 `createChat` 的 source 约束是同 session | 我们的 tool-origin chat 由 host 创建而非 `createChat`；同时 `MessageChatAttachment` 明确允许跨 session 引用 chat，说明跨 session chat 引用在 AHP 中是被接受的形态。持续跟踪上游 |
+| 大 payload | AHP 用 `ContentRef` + `resourceRead` 把大内容移出状态树；我们的 event payload 目前无上限 | S4 引入 payload 尺寸阈值，超阈值转 `ContentRef` |
+| approval ↔ toolCallId 关联 | 取决于 Copilot SDK 的 `permission.requested` 是否携带可关联标识 | S5 的第一个待验证项；关联不上按 adapter 缺陷修，不加协议分支 |
+| 跨 Work 的 chat 引用 | 决定 E 后 Delegation Child 与 Parent 在同一 Work 内，不再需要跨 session 的 `ChatOrigin.tool`。但客户端仍可能需要引用另一件 Work 里的 chat | AHP 的 `MessageChatAttachment` 明确允许跨 session 引用 chat，该形态已被接受；继续跟踪上游 |
 | pause/resume 无协议表达 | 用户在标准 AHP client 里看不到显式 pause 控制 | 短期走 admin API；向上游提 proposal |
-| `turnId` 类型与作用域 | AHP 用 chat 内唯一的 `string`，我们用 session-scoped `turnSeq: number` | 序列随决定 B 迁到 `ChatRecord.nextTurnSeq`；`turnId = "t" + turnSeq` 在 chat 内唯一。客户端契约不得暴露"turnSeq 是 session 全局单调"这一事实 |
-| 会话规模 | AHP 要求 host 保有可 replay 的 action 窗口与可折叠的 channel state | 通过 `fetchTurns` 分页 + snapshot 物化 + action log 保留策略控制 |
+| `turnId` 类型与作用域 | AHP 用 chat 内唯一的 `string`，我们用 session-scoped `turnSeq: number` | 序列随决定 B 迁到 `AgentTaskRecord.nextTurnSeq`；`turnId = "t" + turnSeq` 在 Agent Task 内唯一。客户端契约不得暴露"turnSeq 是 Work 全局单调"这一事实 |
+| 对话规模 | AHP 要求 host 保有可 replay 的 action 窗口与可折叠的 channel state | 通过 `fetchTurns` 分页 + snapshot 物化 + action log 保留策略控制 |
 | 基线 transport 下的连接亲和性 | central 直接终结 WebSocket 时，连接钉在受理它的实例上；实例重启会断开该实例上的所有客户端 | AHP 自带 `reconnect` + `lastSeenServerSeq`，断线重连到任意实例都能补齐；若这条代价变得不可接受，启用 WPS listener（决定 F）即可去除亲和性，不需要改协议层 |
 
 ---
@@ -621,15 +864,15 @@ S7 是硬性拆除点：它之前新旧两条客户端路径并存只是为了�
 
 1. 官方 `@microsoft/agent-host-protocol` client 无需任何我方私有代码即可完成 connect → listSessions → createSession → subscribe → 发消息 → 看流式输出 → 批准 tool call → 断线重连补齐历史。
 2. 任何一条 wire 消息都能只凭 `(method, params.channel)` 路由，无需反序列化其余 payload。
-3. 每个 client 可见的 durable 事实都能从 channel state 恢复；没有只存在于 ephemeral notification 里的会话真相。
+3. 每个 client 可见的 durable 事实都能从 channel state 恢复；没有只存在于 ephemeral notification 里的工作真相。
 4. `serverSeq` 在 tenant 内严格单调，且 action log 丢失后可从 event log 确定性重建出相同序列。
-5. 把某个 agent adapter 的 `multipleChats` 能力打开、并让 admission 放行 `createChat` 之后，第二个 chat 能正常收发消息，且 `ChatRecord` / `SessionRecord` / 事件信封 / `InteractionRecord` / `DelegationCall` 的 schema、存储布局、AHP wire contract **一个字段都没有改动**。
+5. Delegation 产生的 Child 与 Parent 在同一个 `ahp-session:` 下：Child 出现在 `SessionState.chats[]` 里、携带 `origin.kind='tool'`、`interactivity='read-only'`，Child 的待审批无需额外订阅即出现在 Work 级 `inputNeeded` 里，且 `listSessions` 里没有 Child 条目。
 6. outer central 不包含任何 `createSession` / `pause` / `handleEvent` 级别的业务逻辑；它只做 WebSocket 受理、tenant 解析、principal 认证与 `attachAhpConnection`。
-7. Worker、WorkerPool、HostPoolInstance、lease、snapshot、tenant、audit 这些名词不出现在任何 AHP wire 字段里（`_meta` 内的运维扩展除外）。
+7. Worker、WorkerPool、HostPoolInstance、lease、snapshot、tenant、audit、Work、Agent Task 这些内部名词不出现在任何 AHP wire 字段里（`_meta` 内的运维扩展除外）。
 8. `chat/delta` 全部携带 `partId`；`chat/toolCall*` 全部携带 `toolCallId`；没有任何"结构自由"的 agent 输出载荷。
 9. 未声明的 capability 对应的 command 全部返回 `MethodNotFound`，且官方 client 能优雅降级。
 10. 没有任何类型同时充当客户端命令与 durable fact；事件日志里不存在 `.requested` 这类意图记录。
-11. 第 7 节列举的每一条缺陷都已修复，仓库内搜不到 `internalEvent`、`awaitRequests`、`*Projected`、`DEMO_CLIENT_CONTEXT` 这些标识符。
+11. 第 7 节列举的每一条缺陷都已修复，仓库内搜不到 `internalEvent`、`awaitRequests`、`*Projected`、`views`、`DEMO_CLIENT_CONTEXT` 这些标识符。
 12. 仓库内只存在一套客户端协议定义（来自 `@microsoft/agent-host-protocol`）；`samples/` 不依赖任何自有协议客户端。
 13. 协议层与 transport 无关：全套 AHP 行为能在 `InMemoryTransport.pair()` 上跑通，且新增一种 transport 只需新增一个 listener 实现，不触及任何 AHP 类型、channel URI 语义、reducer、action log 或 `serverSeq` 分配。
 14. `pnpm build` / `pnpm typecheck` / `pnpm test` 与既有 Docker、Foundry e2e 全绿。
