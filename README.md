@@ -38,8 +38,10 @@ src/
     sidecar-daemon.ts # Receives worker commands; runs the per-turn agent loop; capture/restore on pause/resume
     adapters/         # Copilot SDK process wrapper, Docker workspace (mount + snapshot parts), Web PubSub client
 sdk/client/           # Customer-facing TypeScript SDK (talks to central; never imports src/)
+sdk/edge-worker/      # Browser edge-worker SDK: registers a web page as a Worker + local capture agent
 samples/webclient/    # Browser demo that drives durable sessions through the SDK
 samples/diagnostic-console/ # SignalOS end-user diagnostic application
+samples/edge-worker/  # Remote Network Recovery browser edge worker demo (operator console + phone edge-worker roles)
 containers/sidecar/   # Dockerfile baked into the sidecar worker image
 specs/                # POC workflow, runtime resource model, and implementation plan
 tests/                # Scenario-based tests (central, sidecar, recovery, webpubsub, workerpool)
@@ -129,7 +131,7 @@ Then, in the browser:
 5. Click **Pause**. The sidecar reaches a turn boundary, flushes the Copilot session files, and the workspace plus agent state are captured to a session-addressed snapshot under `<RUNTIME_STORAGE_ROOT>/snapshots/<sessionId>/<snapshotId>/`. Central records the snapshot, releases the lease, and the idle worker is scaled in (recycled).
 6. Click **Resume**. Central re-queues the session, the WorkerPool scales out a **new** worker, the sidecar restores the snapshot before starting Copilot, and Copilot reattaches to its prior session. The agent can read files it created earlier and recall the conversation — on different compute.
 
-> The first scale-out builds the sidecar image (a few minutes). Subsequent scale-outs reuse the cached image and start in seconds. Editing any file under `src/` invalidates the image's build layers, so the next scale-out rebuilds it.
+> WorkerPool scale-out never builds an image. Re-run `pnpm build:sidecar-image` after changing runtime code; subsequent scale-outs use that pre-built local image.
 
 ## Run on Azure AI Foundry Hosted Agents (alternate WorkerPool backend)
 
@@ -329,7 +331,96 @@ pnpm test
 
 The verified browser E2E covers both paths: one device diagnosis completed after a single visible consent, and one public Microsoft documentation fetch completed without an approval dialog or local device inspection.
 
-## How Scaling and Recovery Work
+## Run the Remote Network Recovery Browser Edge Worker
+
+[samples/edge-worker/](samples/edge-worker/) turns a **phone browser into a temporary Worker** for a durable cloud recovery session, using the runtime's existing **Delegation** model. The scenario is a home-network fault: the user's internet is down and they reach a durable **Network Recovery Console** agent from a phone, often over a weak cellular link. The cloud agent (`network-recovery-expert`) holds the recovery ticket — the reported symptom, any carrier line-status notes, what has been tried, the next step. When it needs to see the real hardware (router / fiber modem / ONT), it calls the Central-defined delegate tool `scan_device_evidence`. Central resolves that delegate to the `device-scan-probe` callee, creates a **child session**, and — purely by capability labels — routes it to the phone's **Device Scan** tab. The browser edge worker asks the person to explicitly frame and capture one frame, analyses it **locally**, and returns **only structured optical observations** (brightness, exposure, glare, focus, dominant colour, detected indicator lights, decoded QR/barcode) plus a short summary. The raw frame never leaves the device.
+
+The browser worker reuses the same runtime protocol as the Node sidecar — the tab reverse-registers over `/sidecar/negotiate`, joins Web PubSub, heartbeats, and answers `session.assign` / `session.input` / `session.pause.requested` — via a dedicated [sdk/edge-worker/](sdk/edge-worker/) package. The end-to-end delegation chain is proven against a real `CentralService` in [tests/edge/delegation-network-recovery.integration.test.ts](tests/edge/delegation-network-recovery.integration.test.ts) (part of `pnpm test`).
+
+The one app serves two roles from `?role=`:
+
+- **Network Recovery Console** (`?role=console`) — the client SDK (`@agent-runtime-sidecar/sdk`) creates/resumes a `network-recovery-expert` parent session, sends it plain-language instructions, then discovers and observes the delegated child session (the child inherits the parent's owner). It renders the agent's diagnosis log, the routed scan steps, the structured evidence timeline, the connected device manifest, and a rolled-up diagnosis.
+- **Device Scan** (`?role=edge`) — the edge SDK (`@agent-runtime-sidecar/edge-worker`) registers the tab as a Worker, shows its capability manifest, and — only after an explicit user gesture — opens the camera, captures a frame, analyses it locally, and returns the structured observation. Results are queued in `localStorage` when the connection drops and replayed on reconnect.
+
+### 1. Build the SDKs and start Central
+
+The browser worker is a normal Worker, so it needs a running Central with Web PubSub (browsers speak Web PubSub, not the in-memory transport):
+
+```powershell
+pnpm install
+pnpm build
+pnpm --dir sdk/client build
+pnpm --dir sdk/edge-worker build
+az login
+$env:WEBPUBSUB_ENDPOINT = 'https://<your-wps>.webpubsub.azure.com'
+$env:WEBPUBSUB_HUB = 'agentruntimepoc'
+pnpm start:central
+```
+
+`network-recovery-expert`, `device-scan-probe`, and the `device-scan-capture` delegate are declarative documents in [config/](config/). The parent matches the existing `poc-docker-copilot` pool through `{ agent: copilot, storage: volume-snapshot }`. The browser callee's base selector is `{ agent: browser-edge, storage: host-managed }`, but a tab becomes eligible for a case only after it redeems that case's one-time invite and Central mints its authoritative `{ case, deviceRef }` binding labels.
+
+### 2. Provide the parent "brain" (a real Copilot worker)
+
+The parent `network-recovery-expert` session needs a worker to run its turns and fire the delegate tool. The default local path is the existing **`poc-docker-copilot` WorkerPool**: Central creates one no-reuse, session-pinned Docker worker for each queued console case. The worker runs the real `CopilotProcessAdapter`, decides when to call `scan_device_evidence`, and interprets the returned structured evidence.
+
+**A. Local Docker WorkerPool — default.** Build the sidecar image once before starting Central:
+
+```powershell
+az login
+pnpm build:sidecar-image
+$env:WEBPUBSUB_ENDPOINT = 'https://<your-wps>.webpubsub.azure.com'
+$env:WEBPUBSUB_HUB = 'agentruntimepoc'
+$env:COPILOT_MODEL = '<your-model-deployment>'
+$env:COPILOT_PROVIDER_TYPE = 'azure' # or openai
+$env:COPILOT_PROVIDER_BASE_URL = 'https://<your-provider-endpoint>'
+pnpm start:central
+```
+
+Central forwards the non-secret provider configuration, mounts the host Azure CLI profile into the container for `DefaultAzureCredential`, and scales the pre-built image when a case queues. The current Docker adapter uses a writable bind mount because Azure CLI token state may refresh; treat that profile as credential-bearing host state and use a dedicated test identity/profile where possible. A second console queues a second session-pinned instance instead of requiring another manually launched parent.
+
+**B. Standalone real Copilot worker — optional debugging path.** A `copilot-process-wrapper` sidecar with labels `{"agent":"copilot","storage":"volume-snapshot"}` can satisfy the same AgentSpec without Docker. This is useful for adapter debugging, but it has fixed manual capacity; use the Docker pool to validate automatic multi-console scale-out.
+
+**C. Scripted offline harness — deterministic tests only.** It registers a real `SidecarDaemon`, but its adapter emits a fixed delegate call and does not reason. Never use it as proof of a real Copilot parent.
+
+```powershell
+$env:CENTRAL_URL = 'http://localhost:3000'
+$env:TENANT_ID = 'poc'
+pnpm --dir samples/edge-worker dev:offline-parent
+```
+
+### 3. Run the sample
+
+```powershell
+pnpm --dir samples/edge-worker dev   # http://127.0.0.1:5176
+```
+
+### 4. Two-device (or two-tab) demo
+
+1. Open the **console**: `http://127.0.0.1:5176/?role=console&central=http://localhost:3000&tenant=poc`, then press **Start recovery session**. Instructions remain disabled while the parent is queued and become available only after the Docker worker registers and the case is `running`.
+2. Press **Create pairing invite**. Open the generated one-time link in a second browser tab. The invite secret is in the `#pair` fragment, is stripped after redemption, and must never be copied into source control or logs.
+3. On **Device Scan**, press **Enroll & join**. The camera remains off; the console roster shows the device before any capture. Mint every additional device invite from this same console/case.
+4. Choose one `deviceRef` or **All paired devices**, then send an instruction such as **Check indicator lights**. The real parent decides to call `scan_device_evidence`; Central enforces the operator-selected per-turn target.
+5. On each targeted edge tab press **Use sample frame** for a fully local two-tab test, or explicitly open the camera from a secure origin. Only structured observations return to the parent.
+
+### 5. Validate
+
+```powershell
+pnpm --dir sdk/edge-worker typecheck
+pnpm --dir sdk/edge-worker test          # analyzer, camera-agent, weak-network runtime unit tests
+pnpm --dir sdk/edge-worker test:package  # CommonJS require + native Node ESM import
+pnpm --dir samples/edge-worker test      # console/Device Scan UI helper unit tests
+pnpm --dir samples/edge-worker build     # tsc + vite build
+```
+
+### Honest browser limitations
+
+- **Not a daemon.** The worker *is* the browser tab. Closing it, or backgrounding it long enough for the runtime's orphan/idle timeout, suspends the worker; the durable session survives and can be re-served when a worker reconnects.
+- **Weak-network by design.** Structured JSON is the default (and only) payload; the raw frame stays on the device. If the connection drops mid-capture, the result is saved in a `localStorage` queue and replayed to the same session on reconnect — the edge UI shows connected / queued / synced state.
+- **Camera needs a secure context.** `getUserMedia` only works on `https://` or `localhost`. A phone opening the sample over plain LAN `http://` cannot open the live camera. Use a temporary HTTPS reverse proxy without committing its generated public URL, or use the built-in **sample-frame** fallback.
+- **Consent is local and per-capture.** A routed task never auto-opens the camera. The task only produces a card; the frame is captured only after an explicit tap, and can be declined.
+- **Local probe, not a browser VLM.** The default analyzer computes real optical signals (brightness, exposure, contrast, colour temperature, Laplacian-variance focus, glare) plus LED-blob detection, and uses the native `BarcodeDetector` for QR/codes when present — with an honest degradation notice when it is not. Device-model semantics and the final diagnosis are the cloud agent's job. `FrameAnalyzer` is the seam where a future WebGPU/ONNX/WebNN model can be dropped in without changing the worker or console.
+
+
 
 - **Scale-out**: a queued session whose labels match the WorkerPool triggers the Docker host pool adapter to start a sidecar container. The container registers as a Worker; only after its first heartbeat does it become eligible for assignment.
 - **Assignment**: central writes a `sessionLeaseId` and routes `session.assign` (with any restore reference) to the worker. The lease is how a durable session is bound to replaceable compute; stale-lease writes are rejected.

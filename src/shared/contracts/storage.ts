@@ -1,4 +1,4 @@
-import type { CreateDelegationResult, CreateInteractionResult, DelegationRecord, HostPoolInstanceRecord, InteractionRecord, RuntimeEvent, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../models';
+import type { CaseDeviceBindingRecord, CreateCaseDeviceBindingResult, CreateDelegationResult, CreateFanoutGroupResult, CreateInteractionResult, CreatePairingInviteResult, DelegationRecord, FanoutGroupRecord, HostPoolInstanceRecord, InteractionRecord, PairingInviteRecord, RuntimeEvent, SessionRecord, WorkerRecord, WorkspaceSnapshot } from '../models';
 
 export interface RuntimeStorage {
   createSession(session: SessionRecord): Promise<{ session: SessionRecord; created: boolean }>;
@@ -18,7 +18,7 @@ export interface RuntimeStorage {
   createDelegation(delegation: DelegationRecord): Promise<CreateDelegationResult>;
   compareAndSetDelegation(expectedRevision: number, delegation: DelegationRecord): Promise<boolean>;
   readDelegation(delegationId: string): Promise<DelegationRecord | undefined>;
-  readDelegationByKey(parentSessionId: string, delegateId: string): Promise<DelegationRecord | undefined>;
+  readDelegationByKey(parentSessionId: string, delegateId: string, targetRef?: string): Promise<DelegationRecord | undefined>;
   readDelegations(): Promise<DelegationRecord[]>;
   createInteraction(interaction: InteractionRecord): Promise<CreateInteractionResult>;
   compareAndSetInteraction(expectedRevision: number, interaction: InteractionRecord): Promise<boolean>;
@@ -26,4 +26,15 @@ export interface RuntimeStorage {
   readInteractionByAdapterRequest(ownerSessionId: string, requestLeaseId: string, adapterRequestId: string): Promise<InteractionRecord | undefined>;
   readInteractions(): Promise<InteractionRecord[]>;
   readInteractionsBySession(sessionId: string): Promise<InteractionRecord[]>;
+  createPairingInvite(invite: PairingInviteRecord): Promise<CreatePairingInviteResult>;
+  compareAndSetPairingInvite(expectedRevision: number, invite: PairingInviteRecord): Promise<boolean>;
+  readPairingInvite(inviteId: string): Promise<PairingInviteRecord | undefined>;
+  createCaseDeviceBinding(binding: CaseDeviceBindingRecord): Promise<CreateCaseDeviceBindingResult>;
+  compareAndSetCaseDeviceBinding(expectedRevision: number, binding: CaseDeviceBindingRecord): Promise<boolean>;
+  readCaseDeviceBinding(caseId: string, deviceRef: string): Promise<CaseDeviceBindingRecord | undefined>;
+  readCaseDeviceBindings(caseId: string): Promise<CaseDeviceBindingRecord[]>;
+  createFanoutGroup(group: FanoutGroupRecord): Promise<CreateFanoutGroupResult>;
+  compareAndSetFanoutGroup(expectedRevision: number, group: FanoutGroupRecord): Promise<boolean>;
+  readFanoutGroup(groupId: string): Promise<FanoutGroupRecord | undefined>;
+  readFanoutGroups(): Promise<FanoutGroupRecord[]>;
 }

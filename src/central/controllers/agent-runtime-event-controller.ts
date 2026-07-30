@@ -1,6 +1,17 @@
-import type { AgentInteractionRequestedPayload, AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPartName, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandAcceptedPayload, WorkerCommandRejectedPayload } from '../../shared';
+import type { AgentInteractionRequestedPayload, AgentOutputPayload, RuntimeEvent, RuntimeEventTransport, RuntimeStorage, SessionPausedPayload, SessionRecord, SnapshotCreatedPayload, SnapshotPartName, StatusChangedPayload, TurnCompletedPayload, TurnFailedPayload, WorkerCommandAcceptedPayload, WorkerCommandRejectedPayload, WorkerResultAcknowledgedPayload } from '../../shared';
 import { EventLogManager, InteractionManager, SessionLifecycleManager, SessionLeaseManager, SessionLifecycleReconciler, WorkerManager } from '../managers';
 import { SnapshotManager } from '../persistence';
+
+export interface AgentRuntimeEventOutcome {
+  handled: boolean;
+  duplicate: boolean;
+}
+
+interface SessionAppendOutcome<TPayload> {
+  event: RuntimeEvent<TPayload>;
+  duplicate: boolean;
+  current: boolean;
+}
 
 /**
  * Handles events that originate from a running agent on a leased worker, making sure they become central-owned session history before clients see them.
@@ -20,7 +31,7 @@ export class AgentRuntimeEventController {
     private readonly eventTransport: RuntimeEventTransport
   ) {}
 
-  async handleRuntimeEvent(event: RuntimeEvent): Promise<boolean> {
+  async handleRuntimeEvent(event: RuntimeEvent): Promise<AgentRuntimeEventOutcome> {
     switch (event.type) {
       case 'status.changed': {
         const payload = this.parseStatusChangedPayload(event.payload);
@@ -28,58 +39,60 @@ export class AgentRuntimeEventController {
         if (payload.status === 'failed' && event.sessionId) {
           await this.interactionManager.interruptForOwnerSession(event.sessionId, 'owner_session_terminal');
         }
-        await this.eventTransport.publish({ kind: 'client-inbox' }, {
-          ...appended,
-          ackId: undefined,
-          type: 'session.status.updated',
-          payload: {
-            sessionId: appended.sessionId,
-            status: payload.status,
-            reason: payload.reason
-          }
-        });
-        return true;
+        if (appended.current) {
+          await this.eventTransport.publish({ kind: 'client-inbox' }, {
+            ...appended.event,
+            ackId: undefined,
+            type: 'session.status.updated',
+            payload: {
+              sessionId: appended.event.sessionId,
+              status: payload.status,
+              reason: payload.reason
+            }
+          });
+        }
+        return { handled: true, duplicate: appended.duplicate };
       }
       case 'agent.output': {
         const payload = this.parseAgentOutputPayload(event.payload);
-        await this.appendSessionEvent(event, payload);
-        return true;
+        const appended = await this.appendSessionEvent(event, payload);
+        return { handled: true, duplicate: appended.duplicate };
       }
       case 'turn.completed': {
         const payload = this.parseTurnCompletedPayload(event.payload);
-        await this.appendSessionEvent(event, payload);
-        return true;
+        const appended = await this.appendSessionEvent(event, payload);
+        return { handled: true, duplicate: appended.duplicate };
       }
       case 'turn.failed': {
         const payload = this.parseTurnFailedPayload(event.payload);
-        await this.appendSessionEvent(event, payload);
+        const appended = await this.appendSessionEvent(event, payload);
         if (event.sessionId) {
           await this.interactionManager.interruptForOwnerSession(event.sessionId, 'owner_turn_failed');
         }
-        return true;
+        return { handled: true, duplicate: appended.duplicate };
       }
       case 'worker.command.rejected': {
         const payload = this.parseWorkerCommandRejectedPayload(event.payload);
-        await this.appendSessionEvent(event, payload, { assertCurrentLease: false });
-        return true;
+        const appended = await this.appendSessionEvent(event, payload, { assertCurrentLease: false });
+        return { handled: true, duplicate: appended.duplicate };
       }
       case 'worker.command.accepted': {
         const payload = this.parseWorkerCommandAcceptedPayload(event.payload);
-        await this.appendSessionEvent(event, payload);
+        const appended = await this.appendSessionEvent(event, payload);
         await this.interactionManager.acknowledgeDelivery(payload.commandEventId);
-        return true;
+        return { handled: true, duplicate: appended.duplicate };
       }
       case 'agent.interaction.requested': {
         const payload = this.parseAgentInteractionRequestedPayload(event.payload);
         await this.interactionManager.admitAgentRequest(event, payload);
-        return true;
+        return { handled: true, duplicate: false };
       }
       case 'session.paused': {
         const payload = this.parseSessionPausedPayload(event.payload);
         const appended = await this.appendSessionEvent(event, { reason: payload.reason });
         const session = await this.requireSession(event);
-        let finalSequence = appended.sequence;
-        let finalTimestamp = appended.timestamp;
+        let finalSequence = appended.event.sequence;
+        let finalTimestamp = appended.event.timestamp;
         let latestSnapshotRef = session.latestSnapshotRef;
         if (payload.snapshot) {
           const snapshot = await this.snapshotManager.recordCapture(session, payload.snapshot);
@@ -103,20 +116,22 @@ export class AgentRuntimeEventController {
         }
         await this.sessionLifecycleManager.pauseAfterEvent(session, finalSequence, finalTimestamp, payload.reason, latestSnapshotRef);
         this.triggerReconcile();
-        await this.eventTransport.publish({ kind: 'client-inbox' }, {
-          ...appended,
-          ackId: undefined,
-          type: 'session.status.updated',
-          payload: {
-            sessionId: appended.sessionId,
-            status: 'paused',
-            reason: payload.reason
-          }
-        });
-        return true;
+        if (!appended.duplicate) {
+          await this.eventTransport.publish({ kind: 'client-inbox' }, {
+            ...appended.event,
+            ackId: undefined,
+            type: 'session.status.updated',
+            payload: {
+              sessionId: appended.event.sessionId,
+              status: 'paused',
+              reason: payload.reason
+            }
+          });
+        }
+        return { handled: true, duplicate: appended.duplicate };
       }
       default:
-        return false;
+        return { handled: false, duplicate: false };
     }
   }
 
@@ -138,7 +153,7 @@ export class AgentRuntimeEventController {
       });
   }
 
-  private async appendSessionEvent<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean; status?: Extract<SessionRecord['status'], 'running' | 'failed'>; statusReason?: string } = {}): Promise<RuntimeEvent<TPayload>> {
+  private async appendSessionEvent<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean; status?: Extract<SessionRecord['status'], 'running' | 'failed'>; statusReason?: string } = {}): Promise<SessionAppendOutcome<TPayload>> {
     if (!event.sessionId) {
       throw new Error(`${event.type} requires sessionId`);
     }
@@ -148,8 +163,45 @@ export class AgentRuntimeEventController {
     return run;
   }
 
-  private async appendSessionEventOnce<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean; status?: Extract<SessionRecord['status'], 'running' | 'failed'>; statusReason?: string }): Promise<RuntimeEvent<TPayload>> {
+  private async appendSessionEventOnce<TPayload>(event: RuntimeEvent, payload: TPayload, options: { assertCurrentLease?: boolean; status?: Extract<SessionRecord['status'], 'running' | 'failed'>; statusReason?: string }): Promise<SessionAppendOutcome<TPayload>> {
     const session = await this.requireSession(event);
+    const existing = (await this.storage.readEvents(session.sessionId, 0)).find((candidate) => candidate.eventId === event.eventId);
+    if (existing) {
+      if (existing.type !== event.type
+        || existing.turnSeq !== event.turnSeq
+        || JSON.stringify(existing.payload) !== JSON.stringify(payload)) {
+        throw new Error(`runtime event ${event.eventId} conflicts with an existing session event`);
+      }
+      const current = existing.sequence >= session.eventCursor;
+      if (session.eventCursor < existing.sequence) {
+        if (options.status) {
+          await this.sessionLifecycleManager.transitionAfterEvent(
+            session,
+            options.status,
+            existing.sequence,
+            existing.timestamp,
+            options.statusReason
+          );
+        } else {
+          await this.sessionLifecycleManager.advanceEventCursor(session, existing.sequence);
+        }
+        await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, existing);
+      } else if (session.eventCursor === existing.sequence && options.status) {
+        if (session.status !== options.status || session.lifecycleReason !== options.statusReason) {
+          await this.sessionLifecycleManager.transitionAfterEvent(
+            session,
+            options.status,
+            existing.sequence,
+            existing.timestamp,
+            options.statusReason
+          );
+        } else {
+          await this.sessionLifecycleManager.reconcileTerminalHook(session);
+        }
+        await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, existing);
+      }
+      return { event: existing as RuntimeEvent<TPayload>, duplicate: true, current };
+    }
     if (options.assertCurrentLease !== false) {
       this.sessionLeaseManager.assertCurrent(session, this.requireSessionLeaseId(event));
     }
@@ -164,12 +216,41 @@ export class AgentRuntimeEventController {
       turnSeq: event.turnSeq,
       sessionLeaseId: event.sessionLeaseId
     });
-    const advanced = await this.sessionLifecycleManager.advanceEventCursor(session, appended.sequence);
     if (options.status) {
-      await this.sessionLifecycleManager.transition(advanced, options.status, options.statusReason);
+      await this.sessionLifecycleManager.transitionAfterEvent(
+        session,
+        options.status,
+        appended.sequence,
+        appended.timestamp,
+        options.statusReason
+      );
+    } else {
+      await this.sessionLifecycleManager.advanceEventCursor(session, appended.sequence);
     }
     await this.eventTransport.publish({ kind: 'session-events', sessionId: session.sessionId }, appended);
-    return appended;
+    return { event: appended, duplicate: false, current: true };
+  }
+
+  async acknowledgeWorkerResultIfNeeded(event: RuntimeEvent): Promise<void> {
+    if (event.type !== 'turn.completed' && event.type !== 'turn.failed') {
+      return;
+    }
+    if (!event.workerId || !event.sessionId || typeof event.turnSeq !== 'number') {
+      throw new Error(`${event.type} requires workerId, sessionId, and turnSeq`);
+    }
+    const payload: WorkerResultAcknowledgedPayload = { resultEventId: event.eventId };
+    await this.eventTransport.publish({ kind: 'worker-commands', workerId: event.workerId }, {
+      eventId: crypto.randomUUID(),
+      type: 'worker.result.acknowledged',
+      actor: 'central',
+      payload,
+      sequence: 0,
+      timestamp: new Date().toISOString(),
+      sessionId: event.sessionId,
+      workerId: event.workerId,
+      sessionLeaseId: event.sessionLeaseId,
+      turnSeq: event.turnSeq
+    });
   }
 
   private async requireSession(event: RuntimeEvent): Promise<SessionRecord> {

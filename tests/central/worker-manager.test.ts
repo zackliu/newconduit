@@ -375,6 +375,69 @@ test('scenario: new worker registration creates a separate active worker lifetim
   });
 });
 
+test('scenario: a terminal worker heartbeat rejection is delivered to the worker command channel so the edge can re-register', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const transport = new InMemoryRuntimeTransportAdapter();
+    const manager = new WorkerManager(storage, clock, 30_000, transport);
+    const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    await manager.close({ workerId: worker.workerId });
+
+    // The edge is subscribed to its own command channel; a rejected heartbeat must reach it there, not just the log.
+    const commands: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'worker-commands', workerId: worker.workerId }, async (envelope) => {
+      commands.push(envelope.event);
+    });
+
+    const result = await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 1, conditions: ['ready'] });
+    assert.equal(result?.lifecycleState, 'closed');
+
+    assert.deepEqual(commands.map((event) => event.type), ['worker.heartbeat.rejected']);
+    assert.deepEqual(commands[0].payload, { reason: 'terminal-worker' });
+    assert.equal(commands[0].workerId, worker.workerId);
+  });
+});
+
+test('scenario: an unknown worker heartbeat rejection is delivered to that worker command channel', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const transport = new InMemoryRuntimeTransportAdapter();
+    const manager = new WorkerManager(storage, clock, 30_000, transport);
+    const commands: RuntimeEvent[] = [];
+    await transport.subscribe({ kind: 'worker-commands', workerId: 'missing-worker' }, async (envelope) => {
+      commands.push(envelope.event);
+    });
+
+    const result = await manager.heartbeat({ workerId: 'missing-worker', capacity: 1, allocatable: 1, conditions: ['ready'] });
+
+    assert.equal(result, undefined);
+    assert.equal(await storage.readWorker('missing-worker'), undefined);
+    assert.deepEqual(commands.map((event) => event.type), ['worker.heartbeat.rejected']);
+    assert.deepEqual(commands[0].payload, { reason: 'unknown-worker' });
+  });
+});
+
+test('scenario: a lost worker reconciles its stale held-session count to zero', async () => {
+  await withStorage(async ({ storage, clock }) => {
+    const manager = new WorkerManager(storage, clock, 1_000);
+    const worker = await registerWorker(manager);
+    await manager.heartbeat({ workerId: worker.workerId, capacity: 1, allocatable: 0, conditions: ['busy'] });
+    // The worker is holding a leased session, so its record shows one in-flight session.
+    const busy = await storage.readWorker(worker.workerId);
+    assert.ok(busy);
+    await storage.writeWorker({ ...busy, currentSessionCount: 1 });
+    await writeLeasedSession(storage, worker);
+    clock.set('2026-06-24T00:00:01.001Z');
+
+    await manager.expireWorkers();
+
+    const terminal = await storage.readWorker(worker.workerId);
+    assert.equal(terminal?.lifecycleState, 'expired');
+    // Its lease was failed by worker loss, so the terminal worker must hold zero sessions — no stale count that
+    // would make a dead tab look like it is still running work.
+    assert.equal(terminal?.currentSessionCount, 0);
+  });
+});
+
 async function withStorage(testBody: (input: { root: string; storage: LocalFileStorage; clock: FixedClock }) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'ars-worker-lifecycle-'));
   try {

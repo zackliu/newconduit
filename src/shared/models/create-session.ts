@@ -1,3 +1,5 @@
+import type { DelegationTarget } from './delegation';
+
 export interface AgentSpecRef {
   agentSpecId: string;
   version?: string;
@@ -33,6 +35,11 @@ export interface RequestContext {
 export interface SessionInputRequest {
   input: {
     message: string;
+    /**
+     * Operator-authoritative delegation target for this turn. Central binds it to the accepted turn and enforces it
+     * on the matching delegate call; a delegating agent cannot widen or change it. Absent for ordinary inputs.
+     */
+    delegationTarget?: DelegationTarget;
   };
 }
 

@@ -1,4 +1,4 @@
-import type { AgentOutputPayload, InteractionKind, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPartName } from '../shared';
+import type { AgentOutputPayload, DelegationTarget, InteractionKind, ResolvedAgentSpec, RuntimeChannel, RuntimeEvent, RuntimeEventHandler, RuntimeSubscription, SnapshotPartName } from '../shared';
 
 export interface SidecarRuntimeTransport {
   connect(accessUrl: string): Promise<void>;
@@ -46,6 +46,10 @@ export interface SidecarAgentProcessInput {
   sessionId: string;
   turnSeq: number;
   message: string;
+  /** Operator-authoritative delegation target Central bound to this turn, forwarded so a delegating agent adapter
+   * may set the delegate tool's `target` to match it. Central still enforces it independently. Absent for ordinary
+   * turns and non-delegating agents. */
+  delegationTarget?: DelegationTarget;
 }
 
 export interface SidecarInteractionRequest {
@@ -75,6 +79,11 @@ export interface SidecarAgentTurnResult {
 export interface SidecarAgentProcessAdapter {
   start(input: SidecarAgentProcessStartInput): Promise<void>;
   send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult>;
+  /** Non-secret runtime/provider identity facts the daemon merges into the Worker registration description so
+   *  Central and operators can positively identify the concrete runtime behind a Worker (e.g. a real Copilot
+   *  process and its model/provider host) rather than inferring it from selector labels alone. Must never include
+   *  bearer tokens, keys, or any other secret. Optional: adapters that carry no useful identity omit it. */
+  describeRuntime?(): Record<string, string>;
   respondToInteraction?(input: SidecarInteractionResponseInput): Promise<void>;
   pauseAtTurnBoundary?(input: { sessionId: string }): Promise<void>;
   stop?(input: { sessionId: string }): Promise<void>;

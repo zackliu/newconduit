@@ -81,6 +81,29 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
     private readonly resolveProviderToken: ProviderTokenResolver = createDefaultProviderTokenResolver()
   ) {}
 
+  /** Non-secret identity of this concrete runtime: it is a real Copilot process, and (when a custom provider is
+   *  configured) the model plus the provider type and host it talks to. The provider bearer token is never included.
+   *  Central records this on the Worker so `/runtime/status` distinguishes a real Copilot Worker from a stand-in. */
+  describeRuntime(): Record<string, string> {
+    const identity: Record<string, string> = { runtime: CopilotProcessAdapter.classId };
+    const model = process.env.COPILOT_MODEL?.trim();
+    if (model) {
+      identity.model = model;
+    }
+    const baseUrl = process.env.COPILOT_PROVIDER_BASE_URL?.trim();
+    if (baseUrl) {
+      identity.provider = process.env.COPILOT_PROVIDER_TYPE?.trim() || 'custom';
+      try {
+        identity.providerHost = new URL(baseUrl).host;
+      } catch {
+        // A malformed base URL is surfaced when the session actually starts; identity stays best-effort here.
+      }
+    } else {
+      identity.provider = 'github';
+    }
+    return identity;
+  }
+
   async start(input: SidecarAgentProcessStartInput): Promise<void> {
     if (!input.workspacePath || !input.copilotSessionStatePath) {
       throw new Error('workspacePath and copilotSessionStatePath are required');
@@ -104,17 +127,26 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       logLevel: 'error'
     });
     await client.start();
-    const sessionConfig = await this.createCopilotSessionConfig({ gitHubToken, resolvedAgentSpec: input.resolvedAgentSpec });
-    const restoredSessionId = await client.getLastSessionId();
-    const session = restoredSessionId
-      ? await client.resumeSession(restoredSessionId, sessionConfig)
-      : await client.createSession(sessionConfig);
-    this.sessions.set(input.sessionId, {
-      client: client as unknown as CopilotSdkClient,
-      session: session as unknown as CopilotSdkSession,
-      runtimeToolNames: new Set((sessionConfig.tools ?? []).map((tool) => tool.name)),
-      pendingPermissionRequests: new Map()
-    });
+    try {
+      const sessionConfig = await this.createCopilotSessionConfig({ gitHubToken, resolvedAgentSpec: input.resolvedAgentSpec });
+      const restoredSessionId = await client.getLastSessionId();
+      const session = restoredSessionId
+        ? await client.resumeSession(restoredSessionId, sessionConfig)
+        : await client.createSession(sessionConfig);
+      this.sessions.set(input.sessionId, {
+        client: client as unknown as CopilotSdkClient,
+        session: session as unknown as CopilotSdkSession,
+        runtimeToolNames: new Set((sessionConfig.tools ?? []).map((tool) => tool.name)),
+        pendingPermissionRequests: new Map()
+      });
+    } catch (error) {
+      try {
+        await client.stop();
+      } catch (stopError) {
+        throw new AggregateError([error, stopError], `failed to initialize and stop Copilot session ${input.sessionId}`);
+      }
+      throw error;
+    }
   }
 
   async send(input: SidecarAgentProcessInput, emit: SidecarAgentProcessEventHandler): Promise<SidecarAgentTurnResult> {
@@ -399,10 +431,14 @@ export class CopilotProcessAdapter implements SidecarAgentProcessAdapter {
       parameters: tool.inputSchema
     }));
     const runtimeToolNames = new Set(tools.map((tool) => tool.name));
+    const providerConfig = await this.resolveProviderSessionConfig();
     return {
       streaming: true,
-      ...(input.gitHubToken ? { gitHubToken: input.gitHubToken } : {}),
-      ...await this.resolveProviderSessionConfig(),
+      // The Copilot SDK rejects `session.create` when both `gitHubToken` and a custom `provider` are supplied. A
+      // custom provider authenticates the model with its own bearer token, so the GitHub token is only meaningful
+      // for GitHub-hosted models. Pass the GitHub token only when no custom provider is configured.
+      ...(input.gitHubToken && !providerConfig ? { gitHubToken: input.gitHubToken } : {}),
+      ...(providerConfig ?? {}),
       ...(tools.length > 0 ? { tools } : {}),
       systemMessage: { mode: 'append', content: input.resolvedAgentSpec.instructions },
       onPermissionRequest: (request) => request.kind === 'custom-tool'

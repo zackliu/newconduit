@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AgentSpec, Delegate } from '../../src/shared';
 import { StaticDelegateBindingIndex, StaticDelegateRegistry } from '../../src/central/registries/delegate-registry';
+import { DelegateAdmissionManager } from '../../src/central/managers';
 
 const DELEGATE: Delegate = {
   id: 'copilot-foundry',
@@ -41,6 +42,15 @@ test('scenario: Delegate config rejects unknown refs and ambiguous callee bindin
     () => new StaticDelegateBindingIndex(registry, [agentSpec('callee-a', [], [DELEGATE.id]), agentSpec('callee-b', [], [DELEGATE.id])]),
     /Delegate copilot-foundry has multiple callee AgentSpecs/
   );
+});
+
+test('scenario: a device delegate lets the real agent omit the Central-bound operator target', () => {
+  const admission = new DelegateAdmissionManager();
+  const tool = admission.runtimeTool(admission.resolve({ ...DELEGATE, targetPolicy: 'device' }));
+  const schema = tool.inputSchema as { required: string[]; properties: Record<string, unknown> };
+
+  assert.deepEqual(schema.required, ['message']);
+  assert.ok(schema.properties.target, 'the agent may echo the exact target for diagnostics');
 });
 
 function agentSpec(agentSpecId: string, asCaller: string[], asCallee: string[]): AgentSpec {

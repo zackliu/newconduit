@@ -1,6 +1,21 @@
 import type { ResolvedAgentSpec } from './agent-spec';
+import type { DelegateTargetPolicy } from './delegate';
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+/**
+ * The operator's device-routing intent for a single parent turn, carried as trusted structured control metadata on
+ * the session input — never encoded in the agent's natural-language message. Central durably associates it with the
+ * turn it accepts and treats it as the authoritative delegation target when the matching delegate tool fires: the
+ * agent's own tool `target` may repeat it but cannot widen or change it. `scope: 'all'` fans out to every device on
+ * the case roster; `deviceRefs` names an explicit subset (e.g. a failed-only retry); `deviceRef` pins one device;
+ * `scope: 'any'` is an explicit stateless pool task (only honoured by non-device delegates).
+ */
+export type DelegationTarget =
+  | { scope: 'all' }
+  | { scope: 'any' }
+  | { deviceRef: string }
+  | { deviceRefs: string[] };
 
 export interface ResolvedDelegate {
   id: string;
@@ -11,6 +26,7 @@ export interface ResolvedDelegate {
   maxResultBytes: number;
   deadlineMs: number;
   maxQueuedCalls: number;
+  targetPolicy: DelegateTargetPolicy;
 }
 
 export type DelegationStatus = 'creating_child' | 'open' | 'closing' | 'closed' | 'failed';
@@ -80,6 +96,10 @@ export interface DelegationRecord {
   resolvedDelegate: ResolvedDelegate;
   resolvedCalleeAgentSpec: ResolvedAgentSpec;
   status: DelegationStatus;
+  // The Central-validated device this delegation is pinned to (a case roster `deviceRef`). Part of the delegation
+  // key alongside (parentSessionId, delegateId), so targeting device A then device B opens two separate delegations
+  // and two separate Child Sessions. Absent = an explicit pool/`any` target with no device pin.
+  targetRef?: string;
   activeCallId?: string;
   nextCallSeq: number;
   closeReason?: DelegationCloseReason;

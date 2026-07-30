@@ -89,6 +89,9 @@ function validateDelegate(delegate: Delegate): void {
   requirePositiveInteger(delegate.maxResultBytes, `Delegate ${delegate.id} maxResultBytes`);
   requirePositiveInteger(delegate.deadlineMs, `Delegate ${delegate.id} deadlineMs`);
   requirePositiveInteger(delegate.maxQueuedCalls, `Delegate ${delegate.id} maxQueuedCalls`);
+  if (delegate.targetPolicy !== undefined && delegate.targetPolicy !== 'pool' && delegate.targetPolicy !== 'device') {
+    throw new Error(`Delegate ${delegate.id} targetPolicy must be 'pool' or 'device'`);
+  }
 }
 
 function validateReferences(delegateRegistry: DelegateRegistry, agentSpec: AgentSpec, role: keyof AgentSpec['delegateRefs']): void {

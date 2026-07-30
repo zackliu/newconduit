@@ -11,11 +11,25 @@ export class DelegateAdmissionManager {
       maxInputBytes: delegate.maxInputBytes,
       maxResultBytes: delegate.maxResultBytes,
       deadlineMs: delegate.deadlineMs,
-      maxQueuedCalls: delegate.maxQueuedCalls
+      maxQueuedCalls: delegate.maxQueuedCalls,
+      targetPolicy: delegate.targetPolicy ?? 'pool'
     };
   }
 
   runtimeTool(delegate: ResolvedDelegate): AgentRuntimeToolDefinition {
+    const deviceScoped = delegate.targetPolicy === 'device';
+    const target: JsonValue = {
+      type: 'object',
+      additionalProperties: false,
+      description: deviceScoped
+        ? 'Optional echo of the operator-selected paired device target. Central already binds the authoritative target to the turn; omit this field unless echoing the exact same target. A different target is rejected.'
+        : 'Optional. Routing target: omit or { "scope": "any" } for ordinary pool routing.',
+      properties: {
+        deviceRef: { type: 'string', minLength: 1 },
+        deviceRefs: { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1 },
+        scope: { type: 'string', enum: deviceScoped ? ['all'] : ['all', 'any'] }
+      }
+    };
     return {
       name: delegate.toolName,
       description: delegate.description,
@@ -24,7 +38,8 @@ export class DelegateAdmissionManager {
         additionalProperties: false,
         required: ['message'],
         properties: {
-          message: { type: 'string', minLength: 1 }
+          message: { type: 'string', minLength: 1 },
+          target
         }
       },
       binding: { kind: 'delegate', delegateId: delegate.id }

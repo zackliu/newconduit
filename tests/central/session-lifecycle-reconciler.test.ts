@@ -611,7 +611,8 @@ function activeDelegation(parent: SessionRecord, child: SessionRecord, now: stri
       maxInputBytes: 8192,
       maxResultBytes: 32768,
       deadlineMs: 600000,
-      maxQueuedCalls: 1
+      maxQueuedCalls: 1,
+      targetPolicy: 'pool'
     },
     resolvedCalleeAgentSpec: child.resolvedAgentSpec,
     status: 'open',

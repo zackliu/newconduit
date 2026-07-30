@@ -6,10 +6,12 @@ import type {
   AgentTurnError,
   AgentTurnEvent,
   AgentTurnResult,
+  CaseDeviceView,
   CreateSessionInput,
   DelegatedInteractionSource,
   InteractionResponseInput,
   InteractionResponseResult,
+  PairingInvite,
   RuntimeConnectionGrant,
   SdkRuntimeEvent,
   SdkRuntimeEventType,
@@ -50,6 +52,7 @@ export class InteractionResponseError extends Error {
 
 export class AgentRuntimeClient {
   readonly sessions: SessionClient;
+  readonly cases: CaseClient;
 
   private readonly channelMapper: SdkWebPubSubRuntimeChannelMapper;
   private readonly pendingAcknowledgements = new Map<string, PendingAcknowledgement>();
@@ -62,6 +65,7 @@ export class AgentRuntimeClient {
   constructor(private readonly options: AgentRuntimeClientOptions) {
     this.channelMapper = new SdkWebPubSubRuntimeChannelMapper(options.tenantId);
     this.sessions = new SessionClient(this);
+    this.cases = new CaseClient(this);
   }
 
   async connect(): Promise<void> {
@@ -217,6 +221,37 @@ export class AgentRuntimeClient {
     return payload.events.map((event) => this.parseEvent(event));
   }
 
+  async mintCasePairing(caseId: string): Promise<PairingInvite> {
+    const ackId = crypto.randomUUID();
+    const acknowledgement = this.waitForAcknowledgement(ackId, 'case.pairing.minted');
+    await this.publishTenantEvent({
+      type: 'case.pairing.mint.requested',
+      ackId,
+      payload: { caseId }
+    });
+    const provided = await acknowledgement;
+    const payload = provided.payload as { invite?: unknown; error?: unknown };
+    this.throwCaseError(payload.error);
+    return this.toPairingInvite(payload.invite);
+  }
+
+  async listCaseDevices(caseId: string): Promise<CaseDeviceView[]> {
+    const ackId = crypto.randomUUID();
+    const acknowledgement = this.waitForAcknowledgement(ackId, 'case.devices.provided');
+    await this.publishTenantEvent({
+      type: 'case.devices.requested',
+      ackId,
+      payload: { caseId }
+    });
+    const provided = await acknowledgement;
+    const payload = provided.payload as { devices?: unknown[]; error?: unknown };
+    this.throwCaseError(payload.error);
+    if (!Array.isArray(payload.devices)) {
+      throw new Error('central returned invalid case device roster');
+    }
+    return payload.devices.map((device) => this.toCaseDeviceView(device));
+  }
+
   private async negotiate(): Promise<RuntimeConnectionGrant> {
     const url = new URL(CLIENT_NEGOTIATE_PATH, this.options.centralUrl);
     url.searchParams.set(TENANT_ID_QUERY, this.options.tenantId);
@@ -321,10 +356,91 @@ export class AgentRuntimeClient {
       status: candidate.status as SessionStatus,
       agentSpecId: resolvedAgentSpec.agentSpecId,
       owner: candidate.owner,
+      ...(typeof candidate.currentWorkerId === 'string' ? { currentWorkerId: candidate.currentWorkerId } : {}),
       eventCursor: candidate.eventCursor,
       createdAt: candidate.createdAt,
       updatedAt: candidate.updatedAt
     };
+  }
+
+  private throwCaseError(error: unknown): void {
+    if (error === undefined || error === null) {
+      return;
+    }
+    if (typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
+      const candidate = error as { code: string; message?: unknown };
+      throw new CasePairingError(candidate.code, typeof candidate.message === 'string' ? candidate.message : candidate.code);
+    }
+    throw new CasePairingError('case_pairing_failed', 'case pairing request failed');
+  }
+
+  private toPairingInvite(value: unknown): PairingInvite {
+    if (typeof value !== 'object' || value === null) {
+      throw new Error('central returned invalid pairing invite');
+    }
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.caseId !== 'string'
+      || typeof candidate.inviteId !== 'string'
+      || typeof candidate.inviteSecret !== 'string'
+      || typeof candidate.expiresAt !== 'string') {
+      throw new Error('central returned invalid pairing invite');
+    }
+    return {
+      caseId: candidate.caseId,
+      inviteId: candidate.inviteId,
+      inviteSecret: candidate.inviteSecret,
+      expiresAt: candidate.expiresAt
+    };
+  }
+
+  private toCaseDeviceView(value: unknown): CaseDeviceView {
+    if (typeof value !== 'object' || value === null) {
+      throw new Error('central returned invalid case device view');
+    }
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.deviceRef !== 'string'
+      || typeof candidate.deviceLabel !== 'string'
+      || typeof candidate.online !== 'boolean'
+      || typeof candidate.ready !== 'boolean'
+      || typeof candidate.busy !== 'boolean'
+      || typeof candidate.lastRedeemedAt !== 'string') {
+      throw new Error('central returned invalid case device view');
+    }
+    return {
+      deviceRef: candidate.deviceRef,
+      deviceLabel: candidate.deviceLabel,
+      online: candidate.online,
+      ready: candidate.ready,
+      busy: candidate.busy,
+      ...(typeof candidate.workerId === 'string' ? { workerId: candidate.workerId } : {}),
+      ...(typeof candidate.lastHeartbeatAt === 'string' ? { lastHeartbeatAt: candidate.lastHeartbeatAt } : {}),
+      lastRedeemedAt: candidate.lastRedeemedAt
+    };
+  }
+}
+
+/** A typed, sanitized failure returned by a case-pairing request. `code` is safe to branch on in a UI. */
+export class CasePairingError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'CasePairingError';
+  }
+}
+
+/**
+ * Case-pairing operations for the operator console: mint a one-time device invite and read the case's device
+ * roster. Both are tenant- and case-scoped in central (the case must be a session the caller owns), so a caller
+ * cannot mint invites for or enumerate devices of an unowned case.
+ */
+export class CaseClient {
+  constructor(private readonly runtime: AgentRuntimeClient) {}
+
+  async createPairingInvite(caseId: string): Promise<PairingInvite> {
+    return this.runtime.mintCasePairing(caseId);
+  }
+
+  async listDevices(caseId: string): Promise<CaseDeviceView[]> {
+    return this.runtime.listCaseDevices(caseId);
   }
 }
 

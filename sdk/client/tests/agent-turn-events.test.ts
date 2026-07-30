@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { AgentRuntimeClient, AgentTurn, InteractionResponseError, SessionHandle, mapSessionEvent } from '../src/agent-runtime-client';
+import { AgentRuntimeClient, AgentTurn, CasePairingError, InteractionResponseError, SessionHandle, mapSessionEvent } from '../src/agent-runtime-client';
 
 test('scenario: delegated interaction source and interruption map into Session events', () => {
   assert.deepEqual(mapSessionEvent({
@@ -143,6 +143,121 @@ test('scenario: session list preserves a delegated session parent relationship',
     createdAt: '2026-07-15T00:00:00.000Z',
     updatedAt: '2026-07-15T00:01:00.000Z'
   }]);
+});
+
+test('scenario: cases.createPairingInvite mints a one-time invite for the operator case', async () => {
+  const client = new AgentRuntimeClient({ centralUrl: 'http://central.test', tenantId: 'tenant-1' });
+  const runtime = client as unknown as {
+    waitForAcknowledgement(ackId: string, expectedType: string): Promise<unknown>;
+    publishTenantEvent(input: { type: string; payload?: unknown; ackId?: string }): Promise<void>;
+  };
+  let requested: { type: string; payload?: unknown } | undefined;
+  runtime.publishTenantEvent = async (input) => { requested = input; };
+  runtime.waitForAcknowledgement = async (_ackId, expectedType) => {
+    assert.equal(expectedType, 'case.pairing.minted');
+    return {
+      eventId: 'event-pairing-minted',
+      sequence: 0,
+      type: 'case.pairing.minted',
+      timestamp: '2026-07-22T00:00:00.000Z',
+      actor: 'central',
+      payload: {
+        invite: {
+          caseId: 'case-parent-1',
+          inviteId: 'invite-abc',
+          inviteSecret: 'secret-xyz',
+          expiresAt: '2026-07-22T00:05:00.000Z'
+        }
+      }
+    };
+  };
+
+  const invite = await client.cases.createPairingInvite('case-parent-1');
+
+  assert.equal(requested?.type, 'case.pairing.mint.requested');
+  assert.deepEqual((requested?.payload as { caseId: string }).caseId, 'case-parent-1');
+  assert.deepEqual(invite, {
+    caseId: 'case-parent-1',
+    inviteId: 'invite-abc',
+    inviteSecret: 'secret-xyz',
+    expiresAt: '2026-07-22T00:05:00.000Z'
+  });
+});
+
+test('scenario: cases.listDevices returns the case-scoped roster with live worker state', async () => {
+  const client = new AgentRuntimeClient({ centralUrl: 'http://central.test', tenantId: 'tenant-1' });
+  const runtime = client as unknown as {
+    waitForAcknowledgement(ackId: string, expectedType: string): Promise<unknown>;
+    publishTenantEvent(input: { type: string; payload?: unknown; ackId?: string }): Promise<void>;
+  };
+  let requested: { type: string; payload?: unknown } | undefined;
+  runtime.publishTenantEvent = async (input) => { requested = input; };
+  runtime.waitForAcknowledgement = async (_ackId, expectedType) => {
+    assert.equal(expectedType, 'case.devices.provided');
+    return {
+      eventId: 'event-case-devices',
+      sequence: 0,
+      type: 'case.devices.provided',
+      timestamp: '2026-07-22T00:00:00.000Z',
+      actor: 'central',
+      payload: {
+        devices: [
+          {
+            deviceRef: 'dref_a',
+            deviceLabel: 'iOS device',
+            online: true,
+            ready: true,
+            busy: false,
+            workerId: 'worker-a',
+            lastHeartbeatAt: '2026-07-22T00:00:00.000Z',
+            lastRedeemedAt: '2026-07-22T00:00:00.000Z'
+          },
+          {
+            deviceRef: 'dref_b',
+            deviceLabel: 'Android device',
+            online: false,
+            ready: false,
+            busy: false,
+            lastRedeemedAt: '2026-07-22T00:00:00.000Z'
+          }
+        ]
+      }
+    };
+  };
+
+  const devices = await client.cases.listDevices('case-parent-1');
+
+  assert.equal(requested?.type, 'case.devices.requested');
+  assert.deepEqual((requested?.payload as { caseId: string }).caseId, 'case-parent-1');
+  assert.equal(devices.length, 2);
+  assert.equal(devices[0].deviceRef, 'dref_a');
+  assert.equal(devices[0].online, true);
+  assert.equal(devices[0].workerId, 'worker-a');
+  assert.equal(devices[1].deviceRef, 'dref_b');
+  assert.equal(devices[1].online, false);
+  assert.equal(devices[1].workerId, undefined);
+});
+
+test('scenario: a case-scoped roster error surfaces as a typed CasePairingError, not a silent empty roster', async () => {
+  const client = new AgentRuntimeClient({ centralUrl: 'http://central.test', tenantId: 'tenant-1' });
+  const runtime = client as unknown as {
+    waitForAcknowledgement(ackId: string, expectedType: string): Promise<unknown>;
+    publishTenantEvent(input: unknown): Promise<void>;
+  };
+  runtime.publishTenantEvent = async () => undefined;
+  runtime.waitForAcknowledgement = async () => ({
+    eventId: 'event-case-devices',
+    sequence: 0,
+    type: 'case.devices.provided',
+    timestamp: '2026-07-22T00:00:00.000Z',
+    actor: 'central',
+    payload: { error: { code: 'case_not_owned', message: 'caller does not own this case' } }
+  });
+
+  await assert.rejects(
+    client.cases.listDevices('case-parent-1'),
+    (error: unknown) => error instanceof CasePairingError && error.code === 'case_not_owned'
+  );
 });
 
 test('scenario: explicit turn completed event completes the turn after final agent output', async () => {

@@ -1,0 +1,37 @@
+{
+  "name": "@agent-runtime-sidecar/edge-worker",
+  "version": "0.1.0",
+  "description": "Browser edge-worker SDK for Agent Runtime Sidecar: registers a web page as a durable Worker and runs a local device-capture agent.",
+  "main": "dist/index.js",
+  "module": "dist-es/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist-es/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "dist-es",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.esm.json && node -e \"require('node:fs').writeFileSync('dist-es/package.json', JSON.stringify({type:'module'}))\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-tests/tests/**/*.test.js\"",
+    "test:package": "pnpm build && node -e \"require('./dist/index.js')\" && node --input-type=module -e \"await import('./dist-es/index.js')\"",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true }); require('fs').rmSync('dist-es', { recursive: true, force: true }); require('fs').rmSync('dist-tests', { recursive: true, force: true })\""
+  },
+  "dependencies": {
+    "@azure/web-pubsub-client": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

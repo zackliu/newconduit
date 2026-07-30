@@ -16,7 +16,8 @@ test('scenario: copilot-poc delegates from Docker to copilot-foundry', () => {
   const calleeSpec = specs.find((candidate) => candidate.agentSpecId === 'copilot-foundry');
   assert.ok(calleeSpec, 'expected a copilot-foundry AgentSpec');
   assert.deepEqual(calleeSpec.delegateRefs.asCallee, ['copilot-foundry']);
-  const [delegate] = store.loadDelegates();
+  const delegate = store.loadDelegates().find((candidate) => candidate.id === 'copilot-foundry');
+  assert.ok(delegate, 'expected a copilot-foundry delegate');
   assert.equal(delegate.toolName, 'copilot_foundry');
   assert.match(delegate.description, /copilot-foundry subagent/);
 

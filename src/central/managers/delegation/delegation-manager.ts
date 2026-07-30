@@ -3,6 +3,7 @@ import type { AgentSpecAdmissionManager } from '../admission/agent-spec-admissio
 import { digestJson, type DelegateAdmissionManager } from '../admission/delegate-admission-manager';
 import type { DelegateBindingIndex, ResolvedDelegateRegistry } from '../../registries/delegate-registry';
 import type { SessionLifecycleManager } from '../session/session-lifecycle-manager';
+import { EDGE_CASE_LABEL_KEY, EDGE_DEVICE_REF_LABEL_KEY } from '../case/case-pairing-manager';
 import type { Clock, DelegationCallRecord, DelegationRecord, RuntimeStorage, SessionRecord } from '../../../shared';
 
 export interface StartDelegationCallInput {
@@ -11,6 +12,12 @@ export interface StartDelegationCallInput {
   callerToolRequestId: string;
   delegateId: string;
   input: string;
+  /**
+   * The Central-validated device this call targets, as a case roster `deviceRef`. Absent = an explicit pool/`any`
+   * target with no device pin (only valid for a stateless task). A device-pinned target opens a Delegation and
+   * Child Session dedicated to that device, so targeting device A then device B produce two independent children.
+   */
+  targetRef?: string;
 }
 
 export interface StartDelegationCallResult {
@@ -32,6 +39,13 @@ export class DelegationManager {
 
   async startCall(input: StartDelegationCallInput): Promise<StartDelegationCallResult> {
     this.assertParent(input.parentSession, input.delegateId);
+    const resolvedDelegate = this.delegateRegistry.resolve(input.delegateId);
+    // A device-scoped delegate must never silently fall back to pool/random routing: an on-device diagnostic that
+    // arrives with no Central-validated device target is rejected here rather than placed on an unrelated worker.
+    // Fan-out/device targets always carry a `targetRef`; only an absent target (a pool/`any` request) trips this.
+    if (resolvedDelegate.targetPolicy === 'device' && input.targetRef === undefined) {
+      throw new Error(`delegate ${input.delegateId} requires an explicit device target ({ deviceRef }, { deviceRefs } or { scope: "all" }); pool/any routing is not allowed`);
+    }
     const inputHash = digestJson(input.input);
     const retry = await this.findCallByCallerKey(input.parentSession.sessionId, input.callerTurnSeq, input.callerToolRequestId);
     if (retry) {
@@ -43,12 +57,12 @@ export class DelegationManager {
         : retry;
     }
 
-    const existing = await this.storage.readDelegationByKey(input.parentSession.sessionId, input.delegateId);
+    const existing = await this.storage.readDelegationByKey(input.parentSession.sessionId, input.delegateId, input.targetRef);
     if (existing) {
       return this.appendCall(existing, input, inputHash);
     }
 
-    const resolvedDelegate = this.delegateRegistry.resolve(input.delegateId);
+    await this.validateTargetRef(input.parentSession, input.targetRef);
     this.delegateAdmissionManager.validateInput(resolvedDelegate, input.input);
     const resolvedCalleeAgentSpec = this.agentSpecAdmissionManager.resolve(this.delegateBindingIndex.resolveCallee(input.delegateId));
     const now = this.clock.now();
@@ -62,6 +76,7 @@ export class DelegationManager {
       resolvedDelegate,
       resolvedCalleeAgentSpec,
       status: 'creating_child',
+      ...(input.targetRef ? { targetRef: input.targetRef } : {}),
       nextCallSeq: 2,
       calls: [call],
       revision: 1,
@@ -142,25 +157,54 @@ export class DelegationManager {
   }
 
   async failForParentTerminal(delegationId: string): Promise<DelegationRecord | undefined> {
+    return this.closeForTerminal(delegationId, 'parent_terminal', 'parent_terminal', (delegation) =>
+      delegation.closeReason === 'parent_terminal',
+      (delegation) => `Parent Session ${delegation.parentSessionId} is terminal`);
+  }
+
+  /**
+   * Settle a Delegation whose Child Session was lost (its worker expired / disconnected) before the active Call
+   * completed. Nothing routes the synthetic worker-loss `turn.failed` through the agent inbox, so without this
+   * the Parent's tool await would hang forever and the Parent turn would stay `working`. Failing the active Call
+   * here lets `deliverAwaitResponses` return an error to the Parent, which can then retry (opening a fresh
+   * Delegation onto the rejoined paired device).
+   */
+  async failForChildLost(childSessionId: string, message: string): Promise<DelegationRecord | undefined> {
+    const delegation = (await this.storage.readDelegations()).find((candidate) => candidate.childSessionId === childSessionId);
+    if (!delegation) {
+      return undefined;
+    }
+    return this.closeForTerminal(delegation.delegationId, 'child_terminal', 'child_session_lost',
+      (current) => current.closeReason === 'child_terminal',
+      () => message);
+  }
+
+  private async closeForTerminal(
+    delegationId: string,
+    closeReason: DelegationRecord['closeReason'],
+    failureCode: string,
+    alreadyClosed: (delegation: DelegationRecord) => boolean,
+    message: (delegation: DelegationRecord) => string
+  ): Promise<DelegationRecord | undefined> {
     for (;;) {
       const delegation = await this.storage.readDelegation(delegationId);
       if (!delegation) {
         return undefined;
       }
-      if (delegation.closeReason === 'parent_terminal') {
+      if (alreadyClosed(delegation)) {
         return delegation;
       }
       const now = this.clock.now();
-      const message = `Parent Session ${delegation.parentSessionId} is terminal`;
+      const failure = { code: failureCode, message: message(delegation) };
       const next: DelegationRecord = {
         ...delegation,
         status: 'failed',
         activeCallId: undefined,
-        closeReason: 'parent_terminal',
-        failure: { code: 'parent_terminal', message },
+        closeReason,
+        failure,
         calls: delegation.calls.map((call) => this.isTerminalCall(call.status)
           ? call
-          : { ...call, status: 'failed' as const, failure: { code: 'parent_terminal', message }, updatedAt: now }),
+          : { ...call, status: 'failed' as const, failure, updatedAt: now }),
         revision: delegation.revision + 1,
         updatedAt: now
       };
@@ -299,12 +343,41 @@ export class DelegationManager {
       owner: parentSession.owner,
       resolvedAgentSpec: delegation.resolvedCalleeAgentSpec,
       workspaceRef: delegation.childSessionId,
+      // The delegated scan routes to exactly one Central-authoritative device on the case roster. `case` = the
+      // parent recovery session id and `deviceRef` = the validated target; both are minted by Central onto the
+      // paired worker (never client-supplied), so this narrows within the callee AgentSpec's base workerSelector
+      // and can only pin to a device already bound to THIS parent's case and tenant — never redirect or widen.
+      // A call with no target is an explicit stateless pool/`any` task: it imposes no extra labels and is placed
+      // by ordinary least-loaded routing within the callee AgentSpec's base selector. There is no client-supplied
+      // worker-label pinning — device routing identity comes only from the Central-validated deviceRef.
+      requiredWorkerLabels: delegation.targetRef
+        ? { [EDGE_CASE_LABEL_KEY]: parentSession.sessionId, [EDGE_DEVICE_REF_LABEL_KEY]: delegation.targetRef }
+        : undefined,
       delegationBinding: {
         delegationId: delegation.delegationId,
         parentSessionId: parentSession.sessionId,
         delegateId: delegation.resolvedDelegate.id
       }
     });
+  }
+
+  /**
+   * A device-pinned target must resolve to an active binding on THIS parent's case roster (`caseId` = the parent
+   * recovery session id) within this tenant. This is the authorization seam that prevents a caller from escaping the
+   * case/tenant boundary: even though the tool payload can name any `deviceRef`, Central only pins the child to a
+   * device the operator has actually paired into this case. An absent target is a pool task and is not validated here.
+   */
+  private async validateTargetRef(parentSession: SessionRecord, targetRef: string | undefined): Promise<void> {
+    if (!targetRef) {
+      return;
+    }
+    const binding = await this.storage.readCaseDeviceBinding(parentSession.sessionId, targetRef);
+    if (!binding || binding.tenantId !== this.tenantId || binding.caseId !== parentSession.sessionId) {
+      throw new Error(`target device ${targetRef} is not paired to case ${parentSession.sessionId}`);
+    }
+    if (binding.status !== 'active') {
+      throw new Error(`target device ${targetRef} binding is ${binding.status}`);
+    }
   }
 
   private assertParent(parent: SessionRecord, delegateId: string): void {
