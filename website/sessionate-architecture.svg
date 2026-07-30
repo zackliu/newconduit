@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" role="img" aria-labelledby="title description">
+  <title id="title">Sessionate general architecture</title>
+  <desc id="description">Applications and declarative specifications connect to Sessionate Central, which owns durable session state and coordinates Foundry, cloud, Docker, and local workers through commands and typed events.</desc>
+  <defs>
+    <linearGradient id="central" x1="180" y1="290" x2="1220" y2="520" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0f2742"/>
+      <stop offset="1" stop-color="#06111f"/>
+    </linearGradient>
+    <linearGradient id="bus" x1="140" y1="570" x2="1260" y2="634" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#087f83"/>
+      <stop offset=".52" stop-color="#20c6c7"/>
+      <stop offset="1" stop-color="#7766ee"/>
+    </linearGradient>
+    <linearGradient id="workerFoundry" x1="100" y1="680" x2="440" y2="840" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#e9fbfa"/>
+      <stop offset="1" stop-color="#f8fbff"/>
+    </linearGradient>
+    <linearGradient id="workerCloud" x1="530" y1="680" x2="870" y2="840" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#eef4ff"/>
+      <stop offset="1" stop-color="#f8fbff"/>
+    </linearGradient>
+    <linearGradient id="workerLocal" x1="960" y1="680" x2="1300" y2="840" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f0edff"/>
+      <stop offset="1" stop-color="#f8fbff"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#dbe4ef" stroke-opacity=".55"/>
+    </pattern>
+    <filter id="shadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#14283f" flood-opacity=".12"/>
+    </filter>
+    <filter id="softShadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#14283f" flood-opacity=".09"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10Z" fill="#47718f"/>
+    </marker>
+    <style>
+      text { font-family: "Segoe UI", Arial, sans-serif; }
+      .layer { fill: #5a6e84; font-size: 18px; font-weight: 700; letter-spacing: 2px; }
+      .title { fill: #0b1728; font-size: 32px; font-weight: 750; }
+      .subtitle { fill: #64788f; font-size: 19px; }
+      .card-title { fill: #10243a; font-size: 21px; font-weight: 750; }
+      .card-copy { fill: #687c92; font-size: 16px; }
+      .central-title { fill: #f5fbff; font-size: 34px; font-weight: 760; }
+      .central-copy { fill: #8fa8bf; font-size: 18px; }
+      .module-title { fill: #ebf7ff; font-size: 19px; font-weight: 700; }
+      .module-copy { fill: #8ca4bb; font-size: 14px; }
+      .pill { fill: #47718f; font-size: 14px; font-weight: 700; letter-spacing: .7px; }
+      .worker-title { fill: #10243a; font-size: 24px; font-weight: 750; }
+      .worker-copy { fill: #62778d; font-size: 16px; }
+      .flow-label { fill: #49667d; font-size: 15px; font-weight: 700; letter-spacing: .4px; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="900" rx="28" fill="#f7f9fc"/>
+  <rect width="1400" height="900" rx="28" fill="url(#grid)" opacity=".6"/>
+
+  <g transform="translate(52 34)">
+    <rect width="42" height="42" rx="13" fill="#07111f"/>
+    <path d="M8 15h8c6 0 7 4 7 6s1 6 7 6h7" fill="none" stroke="#20c6c7" stroke-width="3.5" stroke-linecap="round"/>
+    <path d="M34 15h-7c-6 0-7 4-7 6s-1 6-7 6H7" fill="none" stroke="#8b7cff" stroke-width="3.5" stroke-linecap="round"/>
+    <text x="58" y="19" class="title">Sessionate architecture</text>
+    <text x="58" y="40" class="subtitle">Durable session control plane for agents anywhere</text>
+  </g>
+
+  <text x="70" y="112" class="layer">01 · PRODUCT INTENT</text>
+  <g filter="url(#softShadow)">
+    <rect x="70" y="132" width="1260" height="126" rx="20" fill="#fff" stroke="#cfdae7"/>
+    <rect x="98" y="158" width="276" height="74" rx="14" fill="#f2fbfb" stroke="#b7e6e4"/>
+    <circle cx="130" cy="195" r="14" fill="#20c6c7"/>
+    <path d="M124 195h12M130 189v12" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+    <text x="158" y="190" class="card-title">Product applications</text>
+    <text x="158" y="212" class="card-copy">User experiences and workflows</text>
+
+    <rect x="398" y="158" width="244" height="74" rx="14" fill="#f3f6fb" stroke="#d3deea"/>
+    <rect x="423" y="179" width="36" height="32" rx="8" fill="#10253f"/>
+    <text x="441" y="200" text-anchor="middle" fill="#d9fbf8" font-size="11" font-weight="800">SDK</text>
+    <text x="477" y="190" class="card-title">Client SDK / API</text>
+    <text x="477" y="212" class="card-copy">Create and observe sessions</text>
+
+    <rect x="666" y="158" width="636" height="74" rx="14" fill="#f7f5ff" stroke="#d9d2ff"/>
+    <text x="694" y="184" class="card-title">Declarative resources</text>
+    <text x="694" y="211" class="card-copy">Desired agent behavior and available capacity</text>
+    <rect x="1020" y="176" width="112" height="38" rx="19" fill="#ece9ff"/>
+    <text x="1076" y="200" text-anchor="middle" class="pill" fill="#6554d9">AgentSpec</text>
+    <rect x="1144" y="176" width="132" height="38" rx="19" fill="#ece9ff"/>
+    <text x="1210" y="200" text-anchor="middle" class="pill" fill="#6554d9">WorkerPool</text>
+  </g>
+
+  <path d="M700 258V286" stroke="#47718f" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="624" y="262" width="152" height="24" rx="12" fill="#f7f9fc"/>
+  <text x="700" y="279" text-anchor="middle" class="flow-label">session API + specs</text>
+
+  <text x="70" y="314" class="layer">02 · SOURCE OF TRUTH</text>
+  <g filter="url(#shadow)">
+    <rect x="180" y="334" width="1040" height="216" rx="28" fill="url(#central)" stroke="#31506e"/>
+    <circle cx="226" cy="380" r="18" fill="#20c6c7" fill-opacity=".14" stroke="#20c6c7"/>
+    <path d="M217 380h18M226 371v18" stroke="#62ebe4" stroke-width="2" stroke-linecap="round"/>
+    <text x="260" y="374" class="central-title">Sessionate Central</text>
+    <text x="260" y="398" class="central-copy">Owns durable session identity, state, history, and relationships</text>
+    <rect x="990" y="357" width="188" height="42" rx="21" fill="#20c6c7" fill-opacity=".12" stroke="#20c6c7" stroke-opacity=".5"/>
+    <circle cx="1016" cy="378" r="5" fill="#20c6c7"/>
+    <text x="1032" y="383" fill="#baf7f2" font-size="12" font-weight="700">SOURCE OF TRUTH</text>
+
+    <g>
+      <rect x="218" y="426" width="222" height="86" rx="14" fill="#fff" fill-opacity=".055" stroke="#fff" stroke-opacity=".12"/>
+      <text x="238" y="454" class="module-title">Session truth</text>
+      <text x="238" y="478" class="module-copy">catalog · status · event history</text>
+      <text x="238" y="496" class="module-copy">parent / child lineage</text>
+
+      <rect x="460" y="426" width="222" height="86" rx="14" fill="#fff" fill-opacity=".055" stroke="#fff" stroke-opacity=".12"/>
+      <text x="480" y="454" class="module-title">Lifecycle controllers</text>
+      <text x="480" y="478" class="module-copy">assignment · leases · pause</text>
+      <text x="480" y="496" class="module-copy">resume · recovery</text>
+
+      <rect x="702" y="426" width="222" height="86" rx="14" fill="#fff" fill-opacity=".055" stroke="#fff" stroke-opacity=".12"/>
+      <text x="722" y="454" class="module-title">Worker capacity</text>
+      <text x="722" y="478" class="module-copy">registry · health · pool scaling</text>
+      <text x="722" y="496" class="module-copy">runtime selection</text>
+
+      <rect x="944" y="426" width="238" height="86" rx="14" fill="#fff" fill-opacity=".055" stroke="#fff" stroke-opacity=".12"/>
+      <text x="964" y="454" class="module-title">Durability</text>
+      <text x="964" y="478" class="module-copy">snapshots · metadata · history</text>
+      <text x="964" y="496" class="module-copy">compute-independent identity</text>
+    </g>
+  </g>
+
+  <path d="M700 550V568" stroke="#47718f" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="70" y="602" class="layer">03 · RUNTIME CONNECTION</text>
+  <g filter="url(#softShadow)">
+    <rect x="140" y="616" width="1120" height="62" rx="19" fill="url(#bus)"/>
+    <circle cx="184" cy="647" r="10" fill="#fff" fill-opacity=".2"/>
+    <path d="M178 647h12M184 641v12" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
+    <text x="210" y="653" fill="#fff" font-size="17" font-weight="750">Commands + typed events</text>
+    <text x="514" y="653" fill="#e5ffff" font-size="13">Web PubSub transports messages; Central retains authoritative state.</text>
+    <rect x="1088" y="632" width="142" height="30" rx="15" fill="#07111f" fill-opacity=".32" stroke="#fff" stroke-opacity=".24"/>
+    <text x="1159" y="652" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">BIDIRECTIONAL</text>
+  </g>
+
+  <path d="M700 678V696M270 696H1130M270 696V716M700 696V716M1130 696V716" fill="none" stroke="#47718f" stroke-width="2.3"/>
+  <circle cx="270" cy="696" r="4" fill="#20c6c7"/>
+  <circle cx="700" cy="696" r="4" fill="#4388ff"/>
+  <circle cx="1130" cy="696" r="4" fill="#8b7cff"/>
+
+  <text x="70" y="730" class="layer">04 · REPLACEABLE COMPUTE</text>
+  <g filter="url(#softShadow)">
+    <rect x="100" y="748" width="340" height="116" rx="20" fill="url(#workerFoundry)" stroke="#9fdcd9"/>
+    <circle cx="136" cy="784" r="18" fill="#087f83"/>
+    <text x="136" y="790" text-anchor="middle" fill="#fff" font-size="11" font-weight="800">AI</text>
+    <text x="168" y="782" class="worker-title">Foundry hosted agents</text>
+    <text x="168" y="804" class="worker-copy">Managed reasoning runtime</text>
+    <rect x="124" y="824" width="130" height="25" rx="12.5" fill="#dff5f4"/>
+    <text x="189" y="841" text-anchor="middle" class="pill">Sidecar</text>
+    <path d="M262 836h22" stroke="#7ba5ad" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="290" y="824" width="126" height="25" rx="12.5" fill="#fff" stroke="#b8d8dc"/>
+    <text x="353" y="841" text-anchor="middle" class="pill">Agent session</text>
+
+    <rect x="530" y="748" width="340" height="116" rx="20" fill="url(#workerCloud)" stroke="#bfd1f3"/>
+    <circle cx="566" cy="784" r="18" fill="#4388ff"/>
+    <text x="566" y="790" text-anchor="middle" fill="#fff" font-size="10" font-weight="800">CLD</text>
+    <text x="598" y="782" class="worker-title">Cloud / Docker workers</text>
+    <text x="598" y="804" class="worker-copy">Elastic and self-hosted capacity</text>
+    <rect x="554" y="824" width="130" height="25" rx="12.5" fill="#e8efff"/>
+    <text x="619" y="841" text-anchor="middle" class="pill">Sidecar</text>
+    <path d="M692 836h22" stroke="#7b99c8" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="720" y="824" width="126" height="25" rx="12.5" fill="#fff" stroke="#c6d4ec"/>
+    <text x="783" y="841" text-anchor="middle" class="pill">Agent session</text>
+
+    <rect x="960" y="748" width="340" height="116" rx="20" fill="url(#workerLocal)" stroke="#cec5f8"/>
+    <circle cx="996" cy="784" r="18" fill="#7766ee"/>
+    <text x="996" y="790" text-anchor="middle" fill="#fff" font-size="10" font-weight="800">LOC</text>
+    <text x="1028" y="782" class="worker-title">Local hosts</text>
+    <text x="1028" y="804" class="worker-copy">Private files, tools, and devices</text>
+    <rect x="984" y="824" width="130" height="25" rx="12.5" fill="#ebe8ff"/>
+    <text x="1049" y="841" text-anchor="middle" class="pill">Sidecar</text>
+    <path d="M1122 836h22" stroke="#8f82cf" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="1150" y="824" width="126" height="25" rx="12.5" fill="#fff" stroke="#d3ccf3"/>
+    <text x="1213" y="841" text-anchor="middle" class="pill">Agent session</text>
+  </g>
+
+  <text x="700" y="888" text-anchor="middle" fill="#5e7288" font-size="13" font-weight="700">
+    Sessions are durable identities. Workers are replaceable compute.
+  </text>
+</svg>
